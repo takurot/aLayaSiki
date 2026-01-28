@@ -1,15 +1,18 @@
 use rkyv::{Archive, Deserialize, Serialize};
+use bytecheck::CheckBytes;
 
-#[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, CheckBytes)]
 #[archive_attr(repr(C))]
+#[archive(check_bytes)]
 pub struct Node {
     pub id: u64,
     pub embedding: Vec<f32>,
     pub metadata: String, // Simulating JSON for now
 }
 
-#[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, CheckBytes)]
 #[archive_attr(repr(C))]
+#[archive(check_bytes)]
 pub struct Edge {
     pub source: u64,
     pub target: u64,

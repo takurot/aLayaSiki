@@ -27,7 +27,8 @@ We evaluated potential languages and libraries for the core engine.
 **Decision:** Use `rkyv` for node/edge serialization.
 **Reasoning:**
 - Benchmarks/Tests confirm zero parsing cost for accessing fields.
-- Mapping a file into memory and casting it to a struct is safe and instant.
+- Mapping a file into memory and using `check_archived_root` ensures safety with minimal overhead.
+- We will strictly use Validated Zero-Copy access for data read from disk to prevent UB.
 
 ## Consequences
 - Team needs Rust expertise.
