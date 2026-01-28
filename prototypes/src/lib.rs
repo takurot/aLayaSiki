@@ -32,8 +32,10 @@ mod tests {
         // Serialize
         let bytes = rkyv::to_bytes::<_, 256>(&node).expect("failed to serialize");
 
-        // Deserialize (Zero-copy access)
-        let archived = unsafe { rkyv::archived_root::<Node>(&bytes[..]) };
+        // Deserialize (Zero-copy access with validation)
+        // check_archived_root verifies the archive's integrity without full deserialization
+        let archived = rkyv::check_archived_root::<Node>(&bytes[..])
+            .expect("failed to verify archive");
 
         assert_eq!(archived.id, 1);
         assert_eq!(archived.embedding.len(), 3);
