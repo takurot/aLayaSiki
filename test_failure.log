@@ -1,0 +1,143 @@
+warning: unused import: `Edge`
+ --> storage/src/repo.rs:2:35
+  |
+2 | ...e, Edge};
+  |       ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Archive`, `Deserialize`, and `Serialize`
+ --> storage/src/repo.rs:5:12
+  |
+5 | ...::{Archive, Deserialize, Serialize, t...
+  |       ^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused variable: `start_pos`
+   --> storage/src/wal.rs:103:17
+    |
+103 | ...et start_pos = ...
+    |       ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_start_pos`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> storage/src/wal.rs:95:13
+   |
+95 | ...et mut file = ...
+   |       ----^^^^
+   |       |
+   |       help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> storage/src/snapshot.rs:29:13
+   |
+29 | ...et mut path = ...
+   |       ----^^^^
+   |       |
+   |       help: remove this `mut`
+
+warning: field `path` is never read
+  --> storage/src/wal.rs:20:5
+   |
+18 | pub struct Wal {
+   |            --- field in this struct
+19 |     file: BufWrit...
+20 |     path: PathBuf,
+   |     ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling storage v0.1.0 (/Volumes/Storage/src/aLayaSiki/storage)
+warning: `storage` (lib) generated 6 warnings (run `cargo fix --lib -p storage` to apply 4 suggestions)
+error: The #[tokio::test] macro requires rt or rt-multi-thread.
+   --> storage/src/wal.rs:153:5
+    |
+153 |     #[tokio::test]
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: this error originates in the attribute macro `tokio::test` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: The #[tokio::test] macro requires rt or rt-multi-thread.
+   --> storage/src/wal.rs:177:5
+    |
+177 |     #[tokio::test]
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: this error originates in the attribute macro `tokio::test` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: The #[tokio::test] macro requires rt or rt-multi-thread.
+  --> storage/src/repo.rs:80:5
+   |
+80 |     #[tokio::test]
+   |     ^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `tokio::test` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `super::*`
+   --> storage/src/wal.rs:150:9
+    |
+150 |     use super::*;
+    |         ^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tempfile::tempdir`
+   --> storage/src/wal.rs:151:9
+    |
+151 |     use tempfile::tempdir;
+    |         ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Edge`
+ --> storage/src/repo.rs:2:35
+  |
+2 | use alayasiki_core::model::{Node, Edge};
+  |                                   ^^^^
+
+warning: unused imports: `Archive`, `Deserialize`, and `Serialize`
+ --> storage/src/repo.rs:5:12
+  |
+5 | use rkyv::{Archive, Deserialize, Serialize, to_bytes};
+  |            ^^^^^^^  ^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `super::*`
+  --> storage/src/repo.rs:77:9
+   |
+77 |     use super::*;
+   |         ^^^^^^^^
+
+warning: unused import: `tempfile::tempdir`
+  --> storage/src/repo.rs:78:9
+   |
+78 |     use tempfile::tempdir;
+   |         ^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `start_pos`
+   --> storage/src/wal.rs:103:17
+    |
+103 |             let start_pos = file.stream_position().await?;
+    |                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_start_pos`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> storage/src/wal.rs:95:13
+   |
+95 |         let mut file = self.file.get_mut();
+   |             ----^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+  --> storage/src/snapshot.rs:29:13
+   |
+29 |         let mut path = self.dir.join(format!("snapshot_{:020}.rkyv", lsn));
+   |             ----^^^^
+   |             |
+   |             help: remove this `mut`
+
+warning: `storage` (lib test) generated 9 warnings
+error: could not compile `storage` (lib test) due to 3 previous errors; 9 warnings emitted
