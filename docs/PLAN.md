@@ -76,6 +76,8 @@
 
 * Depends on: PR-03
 
+- [ ] **[High] WAL Replay による再起動復元**: Repository 起動時に WAL を replay してノードを復元する (PR-03 レビュー指摘)
+- [ ] **[High] 削除トゥームストーン対応**: delete_node を WAL に記録し、クラッシュ後も削除を維持する (PR-03 レビュー指摘)
 - [ ] ANNインデックスの初期実装（挿入・検索・削除）
 - [ ] グラフ隣接リストの初期実装（1-hop/2-hop探索）
 - [ ] Hyper-Index の相互参照を実装（IDマップ経由の参照で開始）
