@@ -205,33 +205,37 @@ impl Repository {
     }
 
     pub async fn record_idempotency(&self, key: &str, node_ids: Vec<u64>) -> Result<(), RepoError> {
-        // 1. Check in-memory first
+        // Optimization: Lock once and check.
+        // Review feedback suggests removing double-check pattern if racy or checking under write lock.
+        // We will just acquire write lock immediately to be atomic and safe. 
+        // Read check optimization is good for read-heavy, but here we expect write if we got this far.
+        
         {
-            let index = self.idempotency_index.read().await;
+            let mut index = self.idempotency_index.write().await;
             if index.contains_key(key) {
                 return Ok(());
             }
-        }
 
-        // 2. Create WalEntry
-        let entry = WalEntry::IdempotencyKey { 
-            key: key.to_string(), 
-            node_ids: node_ids.clone() 
-        };
-        let mut serializer = AllocSerializer::<256>::default();
-        serializer.serialize_value(&entry).map_err(|_| RepoError::Serialization)?;
-        let bytes = serializer.into_serializer().into_inner();
-
-        // 3. Append to WAL
-        {
-            let mut wal = self.wal.lock().await;
-            wal.append(&bytes).await?;
-            wal.flush().await?;
-        }
-
-        // 4. Update Index
-        {
-            let mut index = self.idempotency_index.write().await;
+            // Create WalEntry inside write lock to ensure consistency (though WAL append is async).
+            // Actually, we should serialize first to avoid holding lock during serialization?
+            // But we can't check-then-serialize-then-lock-then-write without race.
+            // So we hold lock.
+            
+            let entry = WalEntry::IdempotencyKey { 
+                key: key.to_string(), 
+                node_ids: node_ids.clone() 
+            };
+            // Increase buffer size for large ID lists
+            let mut serializer = AllocSerializer::<4096>::default();
+            serializer.serialize_value(&entry).map_err(|_| RepoError::Serialization)?;
+            let bytes = serializer.into_serializer().into_inner();
+            
+            {
+                 let mut wal = self.wal.lock().await;
+                 wal.append(&bytes).await?;
+                 wal.flush().await?;
+            }
+            
             index.insert(key.to_string(), node_ids);
         }
 

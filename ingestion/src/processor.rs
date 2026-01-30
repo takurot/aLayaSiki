@@ -10,6 +10,8 @@ use thiserror::Error;
 use sha2::{Digest, Sha256};
 use dashmap::DashMap;
 
+use jobs::queue::{Job, JobQueue};
+
 #[derive(Error, Debug)]
 pub enum IngestionError {
     #[error("Storage error: {0}")]
@@ -22,6 +24,21 @@ pub enum IngestionError {
     ExtractionFailed(String),
     #[error("Policy error: {0}")]
     Policy(#[from] PolicyError),
+    #[error("Job Queue error: {0}")]
+    JobQueue(#[from] anyhow::Error),
+    #[error("Idempotency conflict: processing already in progress for key {0}")]
+    IdempotencyConflict(String),
+}
+
+struct IdempotencyGuard {
+    key: String,
+    locks: Arc<DashMap<String, ()>>,
+}
+
+impl Drop for IdempotencyGuard {
+    fn drop(&mut self) {
+        self.locks.remove(&self.key);
+    }
 }
 
 pub struct IngestionPipeline {
@@ -32,6 +49,7 @@ pub struct IngestionPipeline {
     default_model_id: String,
     // In-flight locks for idempotency keys
     locks: Arc<DashMap<String, ()>>,
+    job_queue: Option<Arc<dyn JobQueue>>,
 }
 
 impl IngestionPipeline {
@@ -43,6 +61,7 @@ impl IngestionPipeline {
             policy: Box::new(NoOpPolicy),
             default_model_id: "embedding-default-v1".to_string(),
             locks: Arc::new(DashMap::new()),
+            job_queue: None,
         }
     }
 
@@ -58,6 +77,7 @@ impl IngestionPipeline {
             // For `with_chunker`, we'll add the default locks initialization.
             default_model_id: "embedding-default-v1".to_string(),
             locks: Arc::new(DashMap::new()),
+            job_queue: None,
         }
     }
 
@@ -66,16 +86,21 @@ impl IngestionPipeline {
         chunker: Box<dyn Chunker>,
         embedder: Box<dyn Embedder>,
         policy: Box<dyn ContentPolicy>,
-        default_model_id: impl Into<String>,
+        default_model_id: &str,
     ) -> Self {
         Self {
             repo,
             chunker,
             embedder,
             policy,
-            default_model_id: default_model_id.into(),
+            default_model_id: default_model_id.to_string(),
             locks: Arc::new(DashMap::new()),
+            job_queue: None,
         }
+    }
+
+    pub fn set_job_queue(&mut self, queue: Arc<dyn JobQueue>) {
+        self.job_queue = Some(queue);
     }
 
     pub async fn ingest(&self, request: IngestionRequest) -> Result<Vec<u64>, IngestionError> {
@@ -84,21 +109,18 @@ impl IngestionPipeline {
 
         // LOCKING: Prevent concurrent processing of same key
         let lock_key = idempotency_key.clone().unwrap_or_else(|| content_hash.clone());
-        let _lock = self.locks.insert(lock_key.clone(), ()); // Simple lock by existence, but DashMap doesn't block async. 
-        // Actually, DashMap insert returns old value. If we want a mutex-like behavior for async, we usually need distinct Mutexes per key or a specialized library.
-        // For MVP, we'll assume atomic check-then-set at Repo level handles durability.
-        // But the reviewer asked for "in-progress" state. 
-        // Let's use DashMap to check if it's currently being processed.
-        if self.locks.contains_key(&lock_key) {
-             // In a real system we might wait or return "Pending". 
-             // Here we just proceed, risking duplicate work but Repo will catch the final write.
-             // Actually, the reviewer said "concurrent requests will write duplicate nodes".
-             // So we really should skip or wait.
-             // For simplicity in this PR, let's just use the persistence check which is now atomic-ish via Repo lock?
-             // No, repo check is read lock. 
+        
+        {
+            if self.locks.contains_key(&lock_key) {
+                return Err(IngestionError::IdempotencyConflict(lock_key));
+            }
+            self.locks.insert(lock_key.clone(), ());
         }
-        // Ideally we keep the entry in DashMap until function return.
-        // Let's rely on Repo's persistent check first.
+        // Created guard to remove lock on drop (RAII)
+        let _guard = IdempotencyGuard {
+            key: lock_key.clone(),
+            locks: self.locks.clone(),
+        };
 
         // 1. Check Persistent Idempotency
         if let Some(key) = idempotency_key.as_deref() {
@@ -133,6 +155,8 @@ impl IngestionPipeline {
 
             let chunk_id = derive_chunk_id(&content_hash, i as u64);
 
+            let chunk_content = chunk.content.clone();
+            
             let node = Node {
                 id: chunk_id,
                 embedding,
@@ -142,6 +166,18 @@ impl IngestionPipeline {
 
             self.repo.put_node(node).await?;
             node_ids.push(chunk_id);
+
+            // Enqueue Job if queue is present
+            if let Some(queue) = &self.job_queue {
+                let job = Job::ExtractEntities {
+                    node_id: chunk_id,
+                    content: chunk_content,
+                };
+                if let Err(e) = queue.enqueue(job).await {
+                    // Best-effort: Log warning but continue ingestion to preserve idempotency
+                    tracing::warn!("Failed to enqueue job for node {}: {}", chunk_id, e);
+                }
+            }
         }
 
         // 2. Record Idempotency persistently
@@ -150,8 +186,8 @@ impl IngestionPipeline {
         }
         self.repo.record_idempotency(&content_hash, node_ids.clone()).await?;
 
-        // Remove lock
-        self.locks.remove(&lock_key);
+        // Guard will automatically remove lock on drop
+        // self.locks.remove(&lock_key);
 
         Ok(node_ids)
     }

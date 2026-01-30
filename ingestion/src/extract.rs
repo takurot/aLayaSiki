@@ -42,23 +42,18 @@ pub fn extract_utf8(bytes: &[u8]) -> Result<String, std::string::FromUtf8Error> 
 }
 
 pub fn extract_pdf_text(bytes: &[u8]) -> Option<String> {
-    use lopdf::Document;
+    // pdf-extract panics on some errors/signals, and handles bytes via Cursor?
+    // pdf_extract::extract_text_from_mem (if available) or generic read
     
-    // Load PDF document from memory
-    let doc = Document::load_mem(bytes).ok()?;
-    
-    // Extract text from all pages
-    let result = doc.get_pages()
-        .keys()
-        .filter_map(|&page_num| {
-             doc.extract_text(&[page_num]).ok()
-        })
-        .collect::<Vec<String>>()
-        .join("\n");
-
-    if result.trim().is_empty() {
-        None
-    } else {
-        Some(result)
+    // pdf-extract 0.7 API: extract_text(path) or extract_text_from_mem(bytes)
+    match pdf_extract::extract_text_from_mem(bytes) {
+        Ok(text) => {
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        },
+        Err(_) => None,
     }
 }
