@@ -1,5 +1,6 @@
 pub mod config;
 pub mod model;
+pub mod ingest;
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
