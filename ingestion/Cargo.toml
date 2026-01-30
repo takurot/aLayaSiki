@@ -10,11 +10,10 @@ tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
 tracing = "0.1"
-bytes = "1.0"
 sha2 = "0.10"
-uuid = { version = "1.0", features = ["v4"] }
 text-splitter = "0.4"
-async-trait = "0.1"
+lopdf = "0.31"
+dashmap = "5.5"
 
 [dev-dependencies]
 tempfile = "3.3"

@@ -28,12 +28,14 @@ pub enum WalEntry {
     Put(Node),
     PutEdge(Edge),
     Delete(u64),
+    IdempotencyKey { key: String, node_ids: Vec<u64> },
 }
 
 pub struct Repository {
     wal: Arc<tokio::sync::Mutex<Wal>>,
     nodes: Arc<RwLock<HashMap<u64, Node>>>,
     pub hyper_index: Arc<RwLock<HyperIndex>>,
+    idempotency_index: Arc<RwLock<HashMap<String, Vec<u64>>>>,
 }
 
 impl Repository {
@@ -43,48 +45,68 @@ impl Repository {
             wal,
             nodes: Arc::new(RwLock::new(HashMap::new())),
             hyper_index: Arc::new(RwLock::new(HyperIndex::new())),
+            idempotency_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     /// Open a Repository with WAL replay to restore previous state
     pub async fn open(wal_path: impl AsRef<Path>) -> Result<Self, RepoError> {
-        let mut wal = Wal::open(&wal_path).await?;
-        let mut nodes_map: HashMap<u64, Node> = HashMap::new();
-        let mut hyper_index = HyperIndex::new();
+        let wal_instance = Wal::open(&wal_path).await?;
+        let wal = Arc::new(tokio::sync::Mutex::new(wal_instance));
+        let nodes = Arc::new(RwLock::new(HashMap::new()));
+        let hyper_index = Arc::new(RwLock::new(HyperIndex::new()));
+        let idempotency_index = Arc::new(RwLock::new(HashMap::new()));
+        
+        // 1. Replay WAL
+        {
+            let mut wal_lock = wal.lock().await;
+            let mut node_map = nodes.write().await;
+            let mut h_index = hyper_index.write().await;
+            let mut idem_map = idempotency_index.write().await;
 
-        // Collect WAL entries first (sync callback)
-        let mut entries: Vec<Vec<u8>> = Vec::new();
-        wal.replay(|_lsn, payload| {
-            entries.push(payload);
-            Ok(())
-        }).await?;
+            wal_lock.replay(|_lsn, data| {
+                // Deserialize (zero-copy check)
+                let entry = rkyv::check_archived_root::<WalEntry>(&data[..])
+                    .map_err(|_| WalError::CorruptEntry)?;
 
-        // Apply entries to in-memory state
-        for payload in entries {
-            let entry: WalEntry = rkyv::from_bytes(&payload)
-                .map_err(|_| RepoError::Deserialization)?;
-
-            match entry {
-                WalEntry::Put(node) => {
-                    // Update HyperIndex components
-                    hyper_index.insert_node(node.id, node.embedding.clone());
-                    // Update primary storage
-                    nodes_map.insert(node.id, node);
+                match entry {
+                    ArchivedWalEntry::Put(node) => {
+                        let deserialized: Node = node.deserialize(&mut rkyv::Infallible).unwrap();
+                        let id = deserialized.id;
+                        let embedding = deserialized.embedding.clone();
+                        
+                        node_map.insert(id, deserialized);
+                        h_index.insert_node(id, embedding);
+                    }
+                    ArchivedWalEntry::Delete(id_archived) => {
+                        let id: u64 = id_archived.deserialize(&mut rkyv::Infallible).unwrap();
+                        node_map.remove(&id);
+                        h_index.remove_node(id);
+                    }
+                    ArchivedWalEntry::PutEdge(edge) => {
+                        let deserialized: Edge = edge.deserialize(&mut rkyv::Infallible).unwrap();
+                        h_index.insert_edge(
+                            deserialized.source,
+                            deserialized.target,
+                            deserialized.relation,
+                            deserialized.weight
+                        );
+                    }
+                    ArchivedWalEntry::IdempotencyKey { key, node_ids } => {
+                        let key: String = key.deserialize(&mut rkyv::Infallible).unwrap();
+                        let node_ids: Vec<u64> = node_ids.deserialize(&mut rkyv::Infallible).unwrap();
+                        idem_map.insert(key, node_ids);
+                    }
                 }
-                WalEntry::PutEdge(edge) => {
-                    hyper_index.insert_edge(edge.source, edge.target, edge.relation.clone(), edge.weight);
-                }
-                WalEntry::Delete(id) => {
-                    hyper_index.remove_node(id);
-                    nodes_map.remove(&id);
-                }
-            }
+                Ok(())
+            }).await?;
         }
 
         Ok(Self {
-            wal: Arc::new(tokio::sync::Mutex::new(wal)),
-            nodes: Arc::new(RwLock::new(nodes_map)),
-            hyper_index: Arc::new(RwLock::new(hyper_index)),
+            wal,
+            nodes,
+            hyper_index,
+            idempotency_index,
         })
     }
 
@@ -173,6 +195,44 @@ impl Repository {
         {
             let mut index = self.hyper_index.write().await;
             index.remove_node(id);
+        }
+
+        Ok(())
+    }
+    pub async fn check_idempotency(&self, key: &str) -> Option<Vec<u64>> {
+        let index = self.idempotency_index.read().await;
+        index.get(key).cloned()
+    }
+
+    pub async fn record_idempotency(&self, key: &str, node_ids: Vec<u64>) -> Result<(), RepoError> {
+        // 1. Check in-memory first
+        {
+            let index = self.idempotency_index.read().await;
+            if index.contains_key(key) {
+                return Ok(());
+            }
+        }
+
+        // 2. Create WalEntry
+        let entry = WalEntry::IdempotencyKey { 
+            key: key.to_string(), 
+            node_ids: node_ids.clone() 
+        };
+        let mut serializer = AllocSerializer::<256>::default();
+        serializer.serialize_value(&entry).map_err(|_| RepoError::Serialization)?;
+        let bytes = serializer.into_serializer().into_inner();
+
+        // 3. Append to WAL
+        {
+            let mut wal = self.wal.lock().await;
+            wal.append(&bytes).await?;
+            wal.flush().await?;
+        }
+
+        // 4. Update Index
+        {
+            let mut index = self.idempotency_index.write().await;
+            index.insert(key.to_string(), node_ids);
         }
 
         Ok(())
