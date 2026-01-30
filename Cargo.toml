@@ -2,6 +2,7 @@
 members = [
     "core",
     "storage",
+    "ingestion",
     "prototypes",
 ]
 resolver = "2"
