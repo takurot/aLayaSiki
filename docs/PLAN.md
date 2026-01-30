@@ -21,8 +21,10 @@
 - 実装言語 / ランタイム（Rust/Go/C++ など）
 - ANNインデックス（HNSW/IVF/FAISS など）とGPU対応方針
 - グラフストレージ方式（隣接リスト/CSR/インメモリ + 永続化）
+- コミュニティ検出アルゴリズム（**Leiden推奨** - Louvainより高速で連結性保証）
 - 取り込み時のテキスト解析器（PDF/Markdown/JSON）
 - SLM推論実行基盤（内蔵推論/外部推論サービス）
+- 抽出特化SLM（**Triplex/GLM-4-Flash推奨** - コスト最大98%削減可能）
 
 ---
 
@@ -85,8 +87,8 @@
 - [x] **[Medium] AllocSerializer への切り替え**: to_bytes の固定サイズを動的シリアライザに変更 (PR-04 レビュー指摘)
 - [x] **[Medium] Repository と HyperIndex の連携**: 再起動後にインデックスも復元する (PR-04 レビュー指摘)
 - [x] **[Low] delete_node 順序修正**: 存在確認後に WAL 書き込み (PR-04 レビュー指摘)
-- [ ] **[Low] expand_graph 仕様明確化**: max_hops の挙動を修正 (PR-04 レビュー指摘)
-- [ ] **[Low] ANN 次元チェック**: 次元不一致を除外/エラー化 (PR-04 レビュー指摘)
+- [x] **[Low] expand_graph 仕様明確化**: max_hops の挙動を修正 (PR-04 レビュー指摘)
+- [x] **[Low] ANN 次元チェック**: 次元不一致を除外/エラー化 (PR-04 レビュー指摘)
 
 ---
 
@@ -94,12 +96,13 @@
 
 * Depends on: PR-01, PR-03
 
-- [ ] Ingestion API のエンドポイント定義（PDF/JSON/Markdown/画像/音声）
-- [ ] Auto-Chunking のルール実装（意味区切り/最大長/オーバーラップ）
-- [ ] Embedding 生成フローの実装（model_id を付与）
-- [ ] Idempotency/Dedup（content_hash + idempotency_key）
-- [ ] PIIマスキング/禁止語フィルタのポリシーフック
-- [ ] 初期版はテキスト/PDFを優先し、画像/音声は後続PRで拡張
+- [x] Ingestion API のエンドポイント定義（PDF/JSON/Markdown）
+- [ ] Ingestion API のエンドポイント定義（画像/音声）
+- [x] Auto-Chunking のルール実装（意味区切り/最大長/オーバーラップ）
+- [x] Embedding 生成フローの実装（model_id を付与）
+- [x] Idempotency/Dedup（content_hash + idempotency_key）
+- [x] PIIマスキング/禁止語フィルタのポリシーフック
+- [x] 初期版はテキスト/PDFを優先し、画像/音声は後続PRで拡張
 
 ---
 
@@ -108,10 +111,23 @@
 * Depends on: PR-05
 
 - [ ] SLMレジストリ（model_id、バージョン管理、ロールバック）
-- [ ] NER / Relation Extraction の最小実装
-- [ ] Lazy Graph Construction のジョブキュー（バックグラウンド/オンデマンド）
+- [x] NER / Relation Extraction の最小実装 (Mock)
+- [x] Lazy Graph Construction のジョブキュー（バックグラウンド/オンデマンド）
 - [ ] 再現性担保のための model_id / snapshot_id 固定ロジック
 - [ ] 失敗時のフェイルセーフ（ベクトル化のみで取り込み継続）
+- [ ] **[New] Triplex/GLM-4-Flash のような軽量抽出モデル統合** (コスト削減)
+
+---
+
+## PR-06.5: コミュニティ検出と階層的要約 (NEW)
+
+* Depends on: PR-04, PR-06
+
+- [ ] **Leidenアルゴリズム実装** (コミュニティ検出)
+- [ ] 階層的コミュニティ構造の維持
+- [ ] 各レベルでの自然言語要約生成 (LLM使用)
+- [ ] **FastGraphRAGアプローチ**: PageRankで上位10%ノードを特定し要約
+- [ ] コミュニティ要約の増分更新サポート
 
 ---
 
@@ -120,6 +136,7 @@
 * Depends on: PR-03, PR-04
 
 - [ ] JSON DSL のパーサーとバリデーション
+- [ ] **search_mode** (local/global/drift/auto) のパラメータ追加とバリデーション
 - [ ] Query Planner（Vector Search → Graph Expansion → Context Pruning）
 - [ ] Explain Plan 出力（アンカー/経路/除外理由）
 - [ ] Query Mode（answer/evidence）の切替実装
@@ -128,11 +145,14 @@
 
 ## PR-08: GraphRAG 推論パイプライン
 
-* Depends on: PR-07, PR-06
+* Depends on: PR-07, PR-06, PR-06.5
 
 - [ ] Vector Search のアンカー特定
 - [ ] Graph Expansion の hop 探索
 - [ ] Context Pruning の初期実装（ノイズ除外）
+- [ ] **ローカル検索**: エンティティ中心の探索 (1-2 hop)
+- [ ] **グローバル検索**: コミュニティ要約を活用したMap-Reduceスタイル回答
+- [ ] **DRIFT検索**: フィードバックループによる動的グラフ拡張
 - [ ] 生成回答の groundedness スコア付与
 - [ ] GraphRAG失敗時のフォールバック（Vector-only回答）
 
@@ -171,6 +191,17 @@
 
 ---
 
+## PR-11.5: エージェンティックワークフロー対応 (NEW)
+
+* Depends on: PR-04, PR-07
+
+- [ ] セッショングラフ（TTL付きの一時サブグラフ）
+- [ ] ワーキングメモリ用の低レイテンシ読み書きAPI
+- [ ] セッション境界の分離（テナント/ユーザー単位）
+- [ ] セッショングラフのスナップショット化/クリーンアップ
+
+---
+
 ## PR-12: Observability & SLO
 
 * Depends on: PR-01, PR-07
@@ -188,6 +219,20 @@
 - [ ] SDK のクライアント実装（ingest/query/response）
 - [ ] サンプルコード（SPEC の擬似コード準拠）
 - [ ] リトライ/バックオフの方針実装
+- [ ] **LlamaIndex 統合**: `GraphStore` / `VectorStore` インターフェース実装
+- [ ] **LangChain 統合**: `GraphVectorStore` 対応
+
+---
+
+## PR-13.5: 可視化UI (NEW)
+
+* Depends on: PR-13, PR-06.5
+
+- [ ] グラフエクスプローラーUI (フォースダイレクテッドレイアウト)
+- [ ] コミュニティクラスタリング表示
+- [ ] ノード/エッジ詳細パネル
+- [ ] AIチャットとのインタラクティブ連携
+- [ ] フロントエンド: React + D3.js
 
 ---
 
@@ -228,14 +273,25 @@
 - PR-01 → すべての基盤
 - PR-02 → PR-03/11/16
 - PR-03 → PR-04/07
-- PR-04 → PR-08/14
+- PR-04 → PR-06.5/08/14
 - PR-05 → PR-06
-- PR-06 → PR-08
+- PR-06 → PR-06.5/08
+- PR-06.5 → PR-08/13.5 (NEW: コミュニティ検出)
 - PR-07 → PR-08/09/11/12/13
 - PR-08 → PR-09/14
 - PR-09 → PR-13
 - PR-10 → 独立 (PR-01依存)
 - PR-12 → PR-14
-- PR-13 → PR-15
+- PR-13 → PR-13.5/15
+- PR-13.5 → PR-15 (NEW: 可視化UI)
 - PR-14 → PR-15
 - PR-16 → 商用化フェーズのHA/冗長性
+
+---
+
+## リサーチに基づく追加検討項目
+
+- **エンティティ解決**: ベクトル類似度 + LLM検証のハイブリッドアプローチ
+- **エージェンティックワークフロー**: セッショングラフ、ワーキングメモリ (FalkorDB参考)
+- **コスト最適化**: LazyGraphRAG, FastGraphRAGの実装検討
+- **特化SLM**: Triplex (Phi-3ベース) や GLM-4-Flash の統合

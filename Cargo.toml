@@ -3,6 +3,8 @@ members = [
     "core",
     "storage",
     "ingestion",
+    "slm",
+    "jobs",
     "prototypes",
 ]
 resolver = "2"

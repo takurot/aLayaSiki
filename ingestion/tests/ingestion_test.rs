@@ -93,7 +93,7 @@ async fn test_ingestion_policy_forbidden_word() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: Requires valid PDF binary for lopdf
+#[ignore] // TODO: Requires valid PDF binary for pdf-extract (mock is too simple)
 async fn test_ingestion_pdf_extract() {
     let dir = tempdir().unwrap();
     let wal_path = dir.path().join("pdf.wal");
@@ -114,4 +114,53 @@ async fn test_ingestion_pdf_extract() {
     let node_ids = pipeline.ingest(request).await.unwrap();
     let node = repo.get_node(node_ids[0]).await.unwrap();
     assert!(node.data.contains("Hello PDF"));
+}
+
+#[tokio::test]
+async fn test_ingestion_with_job_queue() {
+    use jobs::queue::ChannelJobQueue;
+    use jobs::worker::Worker;
+    use slm::ner::MockEntityExtractor;
+    use tokio::sync::mpsc;
+
+    // 1. Setup Repo and Pipeline
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("full_flow.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    // 2. Setup Worker and Queue
+    let (tx, rx) = mpsc::channel(100);
+    let queue = Arc::new(ChannelJobQueue::new(tx));
+    let extractor = Arc::new(MockEntityExtractor::new());
+    
+    let worker = Worker::new(rx, repo.clone(), extractor);
+    
+    // Spawn worker in background
+    tokio::spawn(async move {
+        worker.run().await;
+    });
+
+    // 3. Setup Pipeline with Queue
+    let mut pipeline = IngestionPipeline::new(repo.clone());
+    pipeline.set_job_queue(queue);
+
+    // 4. Ingest Content with standard keywords ("Rust")
+    let request = IngestionRequest::Text {
+        content: "I love coding in Rust.".to_string(),
+        metadata: HashMap::new(),
+        idempotency_key: None,
+        model_id: None,
+    };
+
+    let node_ids = pipeline.ingest(request).await.unwrap();
+    let source_id = node_ids[0];
+
+    // 5. Wait for async processing
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // 6. Verify Edge Creation
+    let index = repo.hyper_index.read().await;
+    let neighbors = index.expand_graph(source_id, 1);
+    
+    assert!(!neighbors.is_empty(), "Should have created an edge to 'Rust' entity");
 }
