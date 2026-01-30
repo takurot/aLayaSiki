@@ -605,6 +605,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "serde",
+ "sha2",
  "slm",
  "storage",
  "thiserror",

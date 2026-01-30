@@ -174,13 +174,8 @@ impl IngestionPipeline {
                     content: chunk_content,
                 };
                 if let Err(e) = queue.enqueue(job).await {
-                    // Log error but don't fail ingestion? Or fail?
-                    // For now, fail or log. Ingestion is successful (saved), so maybe just log.
-                    // But IngestionError has JobQueue variant.
-                    // Let's log for now to avoid blocking ingestion success? 
-                    // Or return error? If queue is full, we might want backpressure.
-                    // Let's return error for now to be safe.
-                    return Err(IngestionError::JobQueue(e));
+                    // Best-effort: Log warning but continue ingestion to preserve idempotency
+                    tracing::warn!("Failed to enqueue job for node {}: {}", chunk_id, e);
                 }
             }
         }

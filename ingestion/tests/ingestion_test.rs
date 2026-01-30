@@ -155,12 +155,23 @@ async fn test_ingestion_with_job_queue() {
     let node_ids = pipeline.ingest(request).await.unwrap();
     let source_id = node_ids[0];
 
-    // 5. Wait for async processing
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // 5. Wait for async processing (Polling)
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(5);
+    let mut found = false;
+
+    while start.elapsed() < timeout {
+        let index = repo.hyper_index.read().await;
+        // Expand graph to see if edge created
+        let neighbors = index.expand_graph(source_id, 1);
+        if !neighbors.is_empty() {
+             found = true;
+             break;
+        }
+        drop(index); // Release lock
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
 
     // 6. Verify Edge Creation
-    let index = repo.hyper_index.read().await;
-    let neighbors = index.expand_graph(source_id, 1);
-    
-    assert!(!neighbors.is_empty(), "Should have created an edge to 'Rust' entity");
+    assert!(found, "Should have created an edge to 'Rust' entity within timeout");
 }
