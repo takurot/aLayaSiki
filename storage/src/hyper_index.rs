@@ -48,16 +48,9 @@ impl HyperIndex {
         self.vector_index.search(query, k)
     }
 
-    /// Graph expansion: get neighbors up to 2 hops
+    /// Graph expansion: get neighbors up to max_hops
     pub fn expand_graph(&self, id: u64, max_hops: u8) -> Vec<(u64, u8)> {
-        if max_hops >= 2 {
-            self.graph_index.neighbors_2hop(id)
-        } else {
-            self.graph_index.neighbors(id)
-                .iter()
-                .map(|(t, _, _)| (*t, 1u8))
-                .collect()
-        }
+        self.graph_index.expand(id, max_hops)
     }
 }
 

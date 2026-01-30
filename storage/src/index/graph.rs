@@ -47,27 +47,48 @@ impl AdjacencyGraph {
             .unwrap_or_default()
     }
 
-    /// Get 2-hop neighbors (includes 1-hop)
-    pub fn neighbors_2hop(&self, id: u64) -> Vec<(u64, u8)> {
-        let mut result: HashMap<u64, u8> = HashMap::new();
+    /// Get neighbors within max_hops (BFS)
+    /// Returns a list of (node_id, distance)
+    pub fn expand(&self, start_id: u64, max_hops: u8) -> Vec<(u64, u8)> {
+        if max_hops == 0 {
+            return vec![];
+        }
+
+        let mut visited = HashMap::new();
+        let mut queue = std::collections::VecDeque::new();
+
+        // (node_id, current_distance)
+        // Note: we track visited nodes but don't include start_id in result unless it's a cycle (which BFS wouldn't restart anyway)
+        // To strictly match "neighbors", we usually exclude start_id unless it has a self-loop.
+        // Here we just want unique neighbors found at dist 1..=max_hops.
         
-        // 1-hop
-        if let Some(edges) = self.adjacency.get(&id) {
-            for (target, _, _) in edges {
-                result.insert(*target, 1);
-                
-                // 2-hop
-                if let Some(edges2) = self.adjacency.get(target) {
-                    for (target2, _, _) in edges2 {
-                        if *target2 != id && !result.contains_key(target2) {
-                            result.insert(*target2, 2);
-                        }
+        visited.insert(start_id, 0); // Mark start as visited at dist 0
+        queue.push_back((start_id, 0));
+
+        let mut result = Vec::new();
+
+        while let Some((curr_id, dist)) = queue.pop_front() {
+            if dist >= max_hops {
+                continue;
+            }
+
+            if let Some(edges) = self.adjacency.get(&curr_id) {
+                for (target, _, _) in edges {
+                    if !visited.contains_key(target) {
+                        visited.insert(*target, dist + 1);
+                        result.push((*target, dist + 1));
+                        queue.push_back((*target, dist + 1));
                     }
                 }
             }
         }
-        
-        result.into_iter().collect()
+
+        result
+    }
+
+    /// Get 2-hop neighbors (includes 1-hop) - Legacy wrapper around expand
+    pub fn neighbors_2hop(&self, id: u64) -> Vec<(u64, u8)> {
+        self.expand(id, 2)
     }
 
     pub fn edge_count(&self) -> usize {

@@ -23,7 +23,9 @@ impl LinearAnnIndex {
     /// Find top-k nearest neighbors using cosine similarity
     pub fn search(&self, query: &[f32], k: usize) -> Vec<(u64, f32)> {
         let mut scores: Vec<(u64, f32)> = self.embeddings.iter()
-            .map(|(id, emb)| (*id, cosine_similarity(query, emb)))
+            .filter_map(|(id, emb)| {
+                cosine_similarity(query, emb).map(|score| (*id, score))
+            })
             .collect();
         
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -46,9 +48,9 @@ impl Default for LinearAnnIndex {
     }
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
     if a.len() != b.len() || a.is_empty() {
-        return 0.0;
+        return None;
     }
     
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
@@ -56,10 +58,10 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     
     if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
+        return Some(0.0);
     }
     
-    dot / (norm_a * norm_b)
+    Some(dot / (norm_a * norm_b))
 }
 
 #[cfg(test)]
