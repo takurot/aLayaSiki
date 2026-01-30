@@ -76,12 +76,17 @@
 
 * Depends on: PR-03
 
-- [ ] **[High] WAL Replay による再起動復元**: Repository 起動時に WAL を replay してノードを復元する (PR-03 レビュー指摘)
-- [ ] **[High] 削除トゥームストーン対応**: delete_node を WAL に記録し、クラッシュ後も削除を維持する (PR-03 レビュー指摘)
-- [ ] ANNインデックスの初期実装（挿入・検索・削除）
-- [ ] グラフ隣接リストの初期実装（1-hop/2-hop探索）
-- [ ] Hyper-Index の相互参照を実装（IDマップ経由の参照で開始）
+- [x] **[High] WAL Replay による再起動復元**: Repository 起動時に WAL を replay してノードを復元する (PR-03 レビュー指摘)
+- [x] **[High] 削除トゥームストーン対応**: delete_node を WAL に記録し、クラッシュ後も削除を維持する (PR-03 レビュー指摘)
+- [x] ANNインデックスの初期実装（挿入・検索・削除）
+- [x] グラフ隣接リストの初期実装（1-hop/2-hop探索）
+- [x] Hyper-Index の相互参照を実装（IDマップ経由の参照で開始）
 - [ ] インデックス更新の原子性保証（トランザクション境界の定義）
+- [x] **[Medium] AllocSerializer への切り替え**: to_bytes の固定サイズを動的シリアライザに変更 (PR-04 レビュー指摘)
+- [x] **[Medium] Repository と HyperIndex の連携**: 再起動後にインデックスも復元する (PR-04 レビュー指摘)
+- [x] **[Low] delete_node 順序修正**: 存在確認後に WAL 書き込み (PR-04 レビュー指摘)
+- [ ] **[Low] expand_graph 仕様明確化**: max_hops の挙動を修正 (PR-04 レビュー指摘)
+- [ ] **[Low] ANN 次元チェック**: 次元不一致を除外/エラー化 (PR-04 レビュー指摘)
 
 ---
 
