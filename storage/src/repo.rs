@@ -55,10 +55,8 @@ impl Repository {
 
         // Apply entries to in-memory state
         for payload in entries {
-            let entry: WalEntry = unsafe {
-                rkyv::from_bytes_unchecked(&payload)
-                    .map_err(|_| RepoError::Deserialization)?
-            };
+            let entry: WalEntry = rkyv::from_bytes(&payload)
+                .map_err(|_| RepoError::Deserialization)?;
 
             match entry {
                 WalEntry::Put(node) => {

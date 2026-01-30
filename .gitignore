@@ -4,3 +4,4 @@ target/
 __pycache__/
 .venv/
 .env
+test_failure.log
