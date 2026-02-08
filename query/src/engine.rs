@@ -1,5 +1,6 @@
 use crate::dsl::{QueryMode, QueryRequest, SearchMode};
 use crate::planner::{QueryPlan, QueryPlanner};
+use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::model::Node;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -88,6 +89,9 @@ pub struct QueryEngine {
     repo: Arc<Repository>,
 }
 
+const DEFAULT_EMBEDDING_MODEL_ID: &str = "embedding-default-v1";
+const UNICODE_NGRAM_SIZE: usize = 2;
+
 #[derive(Debug, Clone)]
 struct RankedNode {
     id: u64,
@@ -122,8 +126,15 @@ impl QueryEngine {
             .validate()
             .map_err(|err| QueryError::InvalidQuery(err.to_string()))?;
 
+        let effective_model_id = request
+            .model_id
+            .clone()
+            .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string());
+
         let mut plan = QueryPlanner::plan(&request);
-        let mut state = self.execute_with_plan(&request, &plan).await?;
+        let mut state = self
+            .execute_with_plan(&request, &plan, &effective_model_id)
+            .await?;
 
         if request.search_mode == SearchMode::Auto
             && plan.effective_search_mode == SearchMode::Local
@@ -133,7 +144,9 @@ impl QueryEngine {
             drift_plan.effective_search_mode = SearchMode::Drift;
             drift_plan.expansion_depth = drift_plan.expansion_depth.saturating_add(1).min(8);
 
-            let mut drift_state = self.execute_with_plan(&request, &drift_plan).await?;
+            let mut drift_state = self
+                .execute_with_plan(&request, &drift_plan, &effective_model_id)
+                .await?;
             drift_state.exclusions.push(ExclusionReason {
                 node_id: None,
                 reason: "auto_fallback_to_drift_due_to_insufficient_evidence".to_string(),
@@ -186,7 +199,7 @@ impl QueryEngine {
                 expansion_paths: state.expansion_paths,
                 exclusions: state.exclusions,
             },
-            model_id: request.model_id,
+            model_id: Some(effective_model_id),
             snapshot_id,
         })
     }
@@ -195,9 +208,18 @@ impl QueryEngine {
         &self,
         request: &QueryRequest,
         plan: &QueryPlan,
+        embedding_model_id: &str,
     ) -> Result<ExecutionState, QueryError> {
-        let all_nodes = self.repo.list_nodes().await;
-        if all_nodes.is_empty() {
+        let mut vector_hits = self
+            .collect_vector_scores(request, plan, embedding_model_id)
+            .await;
+        if vector_hits.is_empty() {
+            if let Some(node_id) = self.repo.list_node_ids().await.into_iter().next() {
+                vector_hits.push((node_id, 0.0));
+            }
+        }
+
+        if vector_hits.is_empty() {
             return Ok(ExecutionState {
                 anchors: Vec::new(),
                 expansion_paths: Vec::new(),
@@ -210,29 +232,8 @@ impl QueryEngine {
             });
         }
 
-        let node_lookup: HashMap<u64, Node> =
-            all_nodes.into_iter().map(|node| (node.id, node)).collect();
-        let vector_scores = self.collect_vector_scores(request, plan).await;
-        let lexical_scores = collect_lexical_scores(request, &node_lookup);
-
-        let mut ranked_candidates: Vec<(u64, f32)> = node_lookup
-            .keys()
-            .map(|node_id| {
-                let vector_score = vector_scores.get(node_id).copied().unwrap_or(0.0);
-                let lexical_score = lexical_scores.get(node_id).copied().unwrap_or(0.0);
-                let score = (vector_score * 0.75) + (lexical_score * 0.25);
-                (*node_id, score)
-            })
-            .collect();
-
-        ranked_candidates.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(Ordering::Equal)
-                .then(a.0.cmp(&b.0))
-        });
-
-        let anchor_limit = plan.vector_top_k.min(ranked_candidates.len()).max(1);
-        let mut anchors: Vec<Anchor> = ranked_candidates
+        let anchor_limit = plan.vector_top_k.min(vector_hits.len()).max(1);
+        let mut anchors: Vec<Anchor> = vector_hits
             .iter()
             .take(anchor_limit)
             .map(|(node_id, score)| Anchor {
@@ -240,15 +241,6 @@ impl QueryEngine {
                 score: *score,
             })
             .collect();
-
-        if anchors.is_empty() {
-            if let Some(node_id) = node_lookup.keys().min().copied() {
-                anchors.push(Anchor {
-                    node_id,
-                    score: 0.0,
-                });
-            }
-        }
 
         let relation_filter = collect_relation_filter(request);
         let mut candidate_hops: HashMap<u64, u8> = HashMap::new();
@@ -322,10 +314,27 @@ impl QueryEngine {
             }
         }
 
+        let mut candidate_ids: Vec<u64> = candidate_hops.keys().copied().collect();
+        candidate_ids.sort_unstable();
+        let fetched_nodes = self.repo.get_nodes_by_ids(&candidate_ids).await;
+        let node_lookup: HashMap<u64, Node> = fetched_nodes
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect();
+        for node_id in &candidate_ids {
+            if !node_lookup.contains_key(node_id) {
+                exclusions.push(ExclusionReason {
+                    node_id: Some(*node_id),
+                    reason: "missing_node".to_string(),
+                });
+            }
+        }
+
         let anchor_scores: HashMap<u64, f32> = anchors
             .iter()
             .map(|anchor| (anchor.node_id, anchor.score))
             .collect();
+        let query_tokens = tokenize(&request.query);
         let time_range = parse_time_range(request)?;
         let entity_filter: HashSet<&str> = request
             .filters
@@ -375,11 +384,11 @@ impl QueryEngine {
                 }
             }
 
-            let base_score = anchor_scores
-                .get(&node_id)
-                .copied()
-                .or_else(|| lexical_scores.get(&node_id).copied())
-                .unwrap_or(0.01)
+            let lexical_score =
+                lexical_similarity(&query_tokens, &tokenize(&node_lexical_text(node)));
+            let anchor_score = anchor_scores.get(&node_id).copied().unwrap_or(0.0);
+            let base_score = ((anchor_score * 0.8) + (lexical_score * 0.2))
+                .max(lexical_score)
                 .max(0.01);
             let score = base_score / (hop as f32 + 1.0);
 
@@ -451,12 +460,14 @@ impl QueryEngine {
         &self,
         request: &QueryRequest,
         plan: &QueryPlan,
-    ) -> HashMap<u64, f32> {
+        embedding_model_id: &str,
+    ) -> Vec<(u64, f32)> {
         let Some(embedding_dim) = self.repo.embedding_dimension().await else {
-            return HashMap::new();
+            return Vec::new();
         };
 
-        let query_embedding = deterministic_embedding(&request.query, embedding_dim);
+        let query_embedding =
+            deterministic_embedding(&request.query, embedding_model_id, embedding_dim);
         let vector_limit = match plan.effective_search_mode {
             SearchMode::Global => plan.vector_top_k.saturating_mul(2),
             _ => plan.vector_top_k,
@@ -464,33 +475,20 @@ impl QueryEngine {
         .max(1);
 
         let index = self.repo.hyper_index.read().await;
-        index
-            .search_vector(&query_embedding, vector_limit)
-            .into_iter()
-            .collect()
+        index.search_vector(&query_embedding, vector_limit)
     }
 }
 
-fn collect_lexical_scores(request: &QueryRequest, nodes: &HashMap<u64, Node>) -> HashMap<u64, f32> {
-    let query_tokens = tokenize(&request.query);
-    nodes
-        .iter()
-        .map(|(node_id, node)| {
-            let text = format!(
-                "{} {}",
-                node.data,
-                node.metadata
-                    .values()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            (
-                *node_id,
-                lexical_similarity(&query_tokens, &tokenize(&text)),
-            )
-        })
-        .collect()
+fn node_lexical_text(node: &Node) -> String {
+    format!(
+        "{} {}",
+        node.data,
+        node.metadata
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
 }
 
 fn tokenize(text: &str) -> HashSet<String> {
@@ -498,7 +496,7 @@ fn tokenize(text: &str) -> HashSet<String> {
     let mut buffer = String::new();
 
     for ch in text.chars().flat_map(|ch| ch.to_lowercase()) {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
+        if ch.is_alphanumeric() || ch == '_' {
             buffer.push(ch);
         } else if !buffer.is_empty() {
             out.insert(buffer.clone());
@@ -510,7 +508,33 @@ fn tokenize(text: &str) -> HashSet<String> {
         out.insert(buffer);
     }
 
+    let unicode_tokens: Vec<String> = out
+        .iter()
+        .filter(|token| !token.is_ascii())
+        .cloned()
+        .collect();
+    for token in unicode_tokens {
+        for ngram in char_ngrams(&token, UNICODE_NGRAM_SIZE) {
+            out.insert(ngram);
+        }
+    }
+
     out
+}
+
+fn char_ngrams(token: &str, n: usize) -> Vec<String> {
+    let chars: Vec<char> = token.chars().collect();
+    if chars.is_empty() || n == 0 {
+        return Vec::new();
+    }
+    if chars.len() <= n {
+        return vec![token.to_string()];
+    }
+
+    chars
+        .windows(n)
+        .map(|window| window.iter().collect::<String>())
+        .collect()
 }
 
 fn lexical_similarity(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
@@ -521,15 +545,6 @@ fn lexical_similarity(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
     let intersection = a.intersection(b).count() as f32;
     let denominator = a.len().max(b.len()) as f32;
     intersection / denominator
-}
-
-fn deterministic_embedding(text: &str, dim: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; dim.max(1)];
-    for (idx, byte) in text.as_bytes().iter().enumerate() {
-        let slot = idx % out.len();
-        out[slot] += (*byte as f32) / 255.0;
-    }
-    out
 }
 
 fn collect_relation_filter(request: &QueryRequest) -> HashSet<&str> {

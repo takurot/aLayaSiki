@@ -121,9 +121,16 @@ impl Repository {
         nodes.get(&id).cloned().ok_or(RepoError::NotFound)
     }
 
-    pub async fn list_nodes(&self) -> Vec<Node> {
+    pub async fn list_node_ids(&self) -> Vec<u64> {
         let nodes = self.nodes.read().await;
-        let mut out: Vec<Node> = nodes.values().cloned().collect();
+        let mut out: Vec<u64> = nodes.keys().copied().collect();
+        out.sort_unstable();
+        out
+    }
+
+    pub async fn get_nodes_by_ids(&self, ids: &[u64]) -> Vec<Node> {
+        let nodes = self.nodes.read().await;
+        let mut out: Vec<Node> = ids.iter().filter_map(|id| nodes.get(id).cloned()).collect();
         out.sort_by_key(|node| node.id);
         out
     }

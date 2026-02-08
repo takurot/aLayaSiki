@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::model::{Edge, Node};
 use query::{QueryEngine, QueryMode, QueryPlanner, QueryRequest, SearchMode};
 use storage::repo::Repository;
@@ -200,4 +201,122 @@ async fn test_query_engine_applies_entity_and_time_range_filters() {
         .exclusions
         .iter()
         .any(|ex| ex.node_id == Some(3)));
+}
+
+#[tokio::test]
+async fn test_query_engine_uses_model_id_for_vector_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("model_id.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let dims = 16;
+    repo.put_node(Node::new(
+        10,
+        deterministic_embedding("EV strategy", "embedding-default-v1", dims),
+        "default embedding space".to_string(),
+    ))
+    .await
+    .unwrap();
+    repo.put_node(Node::new(
+        20,
+        deterministic_embedding("EV strategy", "embedding-alt-v1", dims),
+        "alternate embedding space".to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let engine = QueryEngine::new(repo);
+
+    let default_req = QueryRequest::parse_json(
+        r#"{
+            "query": "EV strategy",
+            "mode": "evidence",
+            "search_mode": "local",
+            "top_k": 1,
+            "model_id": "embedding-default-v1"
+        }"#,
+    )
+    .unwrap();
+    let alt_req = QueryRequest::parse_json(
+        r#"{
+            "query": "EV strategy",
+            "mode": "evidence",
+            "search_mode": "local",
+            "top_k": 1,
+            "model_id": "embedding-alt-v1"
+        }"#,
+    )
+    .unwrap();
+
+    let default_res = engine.execute(default_req).await.unwrap();
+    let alt_res = engine.execute(alt_req).await.unwrap();
+
+    assert_eq!(default_res.evidence.nodes[0].id, 10);
+    assert_eq!(alt_res.evidence.nodes[0].id, 20);
+    assert_ne!(
+        default_res.evidence.nodes[0].id,
+        alt_res.evidence.nodes[0].id
+    );
+}
+
+#[tokio::test]
+async fn test_query_engine_keeps_japanese_lexical_signal() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("jp_lexical.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let dims = 12;
+    let query_text = "トヨタのEV戦略";
+    repo.put_node(Node::new(
+        100,
+        deterministic_embedding(query_text, "embedding-default-v1", dims),
+        "アンカーノード".to_string(),
+    ))
+    .await
+    .unwrap();
+    repo.put_node(Node::new(
+        200,
+        deterministic_embedding("irrelevant", "embedding-default-v1", dims),
+        "トヨタのEV戦略に関する分析レポート".to_string(),
+    ))
+    .await
+    .unwrap();
+    repo.put_node(Node::new(
+        300,
+        deterministic_embedding("unrelated", "embedding-default-v1", dims),
+        "天気予報と旅行計画".to_string(),
+    ))
+    .await
+    .unwrap();
+
+    repo.put_edge(Edge::new(100, 200, "related_to", 1.0))
+        .await
+        .unwrap();
+    repo.put_edge(Edge::new(100, 300, "related_to", 1.0))
+        .await
+        .unwrap();
+
+    let engine = QueryEngine::new(repo);
+    let req = QueryRequest::parse_json(
+        r#"{
+            "query": "トヨタのEV戦略",
+            "mode": "evidence",
+            "search_mode": "local",
+            "top_k": 2,
+            "traversal": {"depth": 1},
+            "model_id": "embedding-default-v1"
+        }"#,
+    )
+    .unwrap();
+
+    let res = engine.execute(req).await.unwrap();
+    let node_ids: Vec<u64> = res.evidence.nodes.iter().map(|n| n.id).collect();
+    assert!(
+        node_ids.contains(&200),
+        "Japanese lexical overlap should keep node 200"
+    );
+    assert!(
+        !node_ids.contains(&300),
+        "Unrelated Japanese text should be pruned by top_k"
+    );
 }
