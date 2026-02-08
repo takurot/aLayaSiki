@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 #[derive(Error, Debug)]
 pub enum RepoError {
@@ -31,6 +31,15 @@ pub enum WalEntry {
     PutEdge(Edge),
     Delete(u64),
     IdempotencyKey { key: String, node_ids: Vec<u64> },
+    Transaction(Vec<TxOperation>),
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[archive(check_bytes)]
+pub enum TxOperation {
+    Put(Node),
+    PutEdge(Edge),
+    Delete(u64),
 }
 
 #[derive(Debug, Clone)]
@@ -41,7 +50,8 @@ pub enum IndexMutation {
 }
 
 pub struct Repository {
-    wal: Arc<tokio::sync::Mutex<Wal>>,
+    wal: Arc<Mutex<Wal>>,
+    tx_lock: Arc<Mutex<()>>,
     nodes: Arc<RwLock<HashMap<u64, Node>>>,
     pub hyper_index: Arc<RwLock<HyperIndex>>,
     idempotency_index: Arc<RwLock<HashMap<String, Vec<u64>>>>,
@@ -49,9 +59,10 @@ pub struct Repository {
 
 impl Repository {
     /// Create a new empty Repository (no replay)
-    pub fn new(wal: Arc<tokio::sync::Mutex<Wal>>) -> Self {
+    pub fn new(wal: Arc<Mutex<Wal>>) -> Self {
         Self {
             wal,
+            tx_lock: Arc::new(Mutex::new(())),
             nodes: Arc::new(RwLock::new(HashMap::new())),
             hyper_index: Arc::new(RwLock::new(HyperIndex::new())),
             idempotency_index: Arc::new(RwLock::new(HashMap::new())),
@@ -61,7 +72,8 @@ impl Repository {
     /// Open a Repository with WAL replay to restore previous state
     pub async fn open(wal_path: impl AsRef<Path>) -> Result<Self, RepoError> {
         let wal_instance = Wal::open(&wal_path).await?;
-        let wal = Arc::new(tokio::sync::Mutex::new(wal_instance));
+        let wal = Arc::new(Mutex::new(wal_instance));
+        let tx_lock = Arc::new(Mutex::new(()));
         let nodes = Arc::new(RwLock::new(HashMap::new()));
         let hyper_index = Arc::new(RwLock::new(HyperIndex::new()));
         let idempotency_index = Arc::new(RwLock::new(HashMap::new()));
@@ -76,41 +88,10 @@ impl Repository {
             wal_lock
                 .replay(|_lsn, data| {
                     // Deserialize (zero-copy check)
-                    let entry = rkyv::check_archived_root::<WalEntry>(&data[..])
+                    let archived = rkyv::check_archived_root::<WalEntry>(&data[..])
                         .map_err(|_| WalError::CorruptEntry)?;
-
-                    match entry {
-                        ArchivedWalEntry::Put(node) => {
-                            let deserialized: Node =
-                                node.deserialize(&mut rkyv::Infallible).unwrap();
-                            let id = deserialized.id;
-                            let embedding = deserialized.embedding.clone();
-
-                            node_map.insert(id, deserialized);
-                            h_index.insert_node(id, embedding);
-                        }
-                        ArchivedWalEntry::Delete(id_archived) => {
-                            let id: u64 = id_archived.deserialize(&mut rkyv::Infallible).unwrap();
-                            node_map.remove(&id);
-                            h_index.remove_node(id);
-                        }
-                        ArchivedWalEntry::PutEdge(edge) => {
-                            let deserialized: Edge =
-                                edge.deserialize(&mut rkyv::Infallible).unwrap();
-                            h_index.insert_edge(
-                                deserialized.source,
-                                deserialized.target,
-                                deserialized.relation,
-                                deserialized.weight,
-                            );
-                        }
-                        ArchivedWalEntry::IdempotencyKey { key, node_ids } => {
-                            let key: String = key.deserialize(&mut rkyv::Infallible).unwrap();
-                            let node_ids: Vec<u64> =
-                                node_ids.deserialize(&mut rkyv::Infallible).unwrap();
-                            idem_map.insert(key, node_ids);
-                        }
-                    }
+                    let entry: WalEntry = archived.deserialize(&mut rkyv::Infallible).unwrap();
+                    apply_replayed_entry(&entry, &mut node_map, &mut h_index, &mut idem_map);
                     Ok(())
                 })
                 .await?;
@@ -118,6 +99,7 @@ impl Repository {
 
         Ok(Self {
             wal,
+            tx_lock,
             nodes,
             hyper_index,
             idempotency_index,
@@ -154,20 +136,19 @@ impl Repository {
             return Ok(());
         }
 
+        // Serialize transaction validation and apply to avoid TOCTOU between concurrent writers.
+        let _tx_guard = self.tx_lock.lock().await;
+
         self.validate_index_transaction(&mutations).await?;
 
-        let wal_entries = mutations_to_wal_entries(&mutations);
-        let mut bytes_entries = Vec::with_capacity(wal_entries.len());
-        for entry in wal_entries {
-            bytes_entries.push(serialize_wal_entry(&entry)?);
-        }
+        let tx_operations = mutations_to_tx_operations(&mutations);
+        let tx_entry = WalEntry::Transaction(tx_operations);
+        let tx_bytes = serialize_wal_entry(&tx_entry)?;
 
         // Durability first for the full transaction boundary.
         {
             let mut wal = self.wal.lock().await;
-            for bytes in &bytes_entries {
-                wal.append(bytes).await?;
-            }
+            wal.append(&tx_bytes).await?;
             wal.flush().await?;
         }
 
@@ -283,13 +264,13 @@ impl Repository {
     }
 }
 
-fn mutations_to_wal_entries(mutations: &[IndexMutation]) -> Vec<WalEntry> {
+fn mutations_to_tx_operations(mutations: &[IndexMutation]) -> Vec<TxOperation> {
     mutations
         .iter()
         .map(|mutation| match mutation {
-            IndexMutation::PutNode(node) => WalEntry::Put(node.clone()),
-            IndexMutation::PutEdge(edge) => WalEntry::PutEdge(edge.clone()),
-            IndexMutation::DeleteNode(id) => WalEntry::Delete(*id),
+            IndexMutation::PutNode(node) => TxOperation::Put(node.clone()),
+            IndexMutation::PutEdge(edge) => TxOperation::PutEdge(edge.clone()),
+            IndexMutation::DeleteNode(id) => TxOperation::Delete(*id),
         })
         .collect()
 }
@@ -300,6 +281,59 @@ fn serialize_wal_entry(entry: &WalEntry) -> Result<Vec<u8>, RepoError> {
         .serialize_value(entry)
         .map_err(|_| RepoError::Serialization)?;
     Ok(serializer.into_serializer().into_inner().to_vec())
+}
+
+fn apply_replayed_entry(
+    entry: &WalEntry,
+    node_map: &mut HashMap<u64, Node>,
+    h_index: &mut HyperIndex,
+    idem_map: &mut HashMap<String, Vec<u64>>,
+) {
+    match entry {
+        WalEntry::Put(node) => {
+            let id = node.id;
+            let embedding = node.embedding.clone();
+            node_map.insert(id, node.clone());
+            h_index.insert_node(id, embedding);
+        }
+        WalEntry::PutEdge(edge) => {
+            h_index.insert_edge(edge.source, edge.target, edge.relation.clone(), edge.weight);
+        }
+        WalEntry::Delete(id) => {
+            node_map.remove(id);
+            h_index.remove_node(*id);
+        }
+        WalEntry::IdempotencyKey { key, node_ids } => {
+            idem_map.insert(key.clone(), node_ids.clone());
+        }
+        WalEntry::Transaction(operations) => {
+            for operation in operations {
+                apply_replayed_tx_operation(operation, node_map, h_index);
+            }
+        }
+    }
+}
+
+fn apply_replayed_tx_operation(
+    operation: &TxOperation,
+    node_map: &mut HashMap<u64, Node>,
+    h_index: &mut HyperIndex,
+) {
+    match operation {
+        TxOperation::Put(node) => {
+            let id = node.id;
+            let embedding = node.embedding.clone();
+            node_map.insert(id, node.clone());
+            h_index.insert_node(id, embedding);
+        }
+        TxOperation::PutEdge(edge) => {
+            h_index.insert_edge(edge.source, edge.target, edge.relation.clone(), edge.weight);
+        }
+        TxOperation::Delete(id) => {
+            node_map.remove(id);
+            h_index.remove_node(*id);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -462,5 +496,100 @@ mod tests {
             reopened.get_node(1).await.is_err(),
             "node should not be recoverable after failed transaction"
         );
+    }
+
+    #[tokio::test]
+    async fn test_index_transaction_persists_single_wal_record() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("txn_single_record.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        repo.apply_index_transaction(vec![
+            IndexMutation::PutNode(Node::new(1, vec![1.0], "N1".to_string())),
+            IndexMutation::PutNode(Node::new(2, vec![2.0], "N2".to_string())),
+            IndexMutation::PutEdge(Edge::new(1, 2, "links", 1.0)),
+        ])
+        .await
+        .unwrap();
+
+        drop(repo);
+
+        let mut wal = Wal::open(&wal_path).await.unwrap();
+        let mut record_count = 0usize;
+        let mut tx_mutation_count = 0usize;
+
+        wal.replay(|_lsn, payload| {
+            record_count += 1;
+            let archived = rkyv::check_archived_root::<WalEntry>(&payload[..])
+                .map_err(|_| WalError::CorruptEntry)?;
+            let entry: WalEntry = archived.deserialize(&mut rkyv::Infallible).unwrap();
+
+            match entry {
+                WalEntry::Transaction(entries) => {
+                    tx_mutation_count = entries.len();
+                }
+                _ => return Err(WalError::CorruptEntry),
+            }
+
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(record_count, 1, "transaction should be written as one WAL record");
+        assert_eq!(tx_mutation_count, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_concurrent_delete_and_put_edge_do_not_leave_dangling_edge() {
+        use tokio::sync::Barrier;
+
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("txn_concurrency.wal");
+        let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+        repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+            .await
+            .unwrap();
+
+        for _ in 0..64 {
+            if repo.get_node(2).await.is_err() {
+                repo.put_node(Node::new(2, vec![2.0], "N2".to_string()))
+                    .await
+                    .unwrap();
+            }
+
+            let barrier = Arc::new(Barrier::new(3));
+
+            let repo_put = repo.clone();
+            let barrier_put = barrier.clone();
+            let put_task = tokio::spawn(async move {
+                barrier_put.wait().await;
+                let _ = repo_put.put_edge(Edge::new(1, 2, "links", 1.0)).await;
+            });
+
+            let repo_delete = repo.clone();
+            let barrier_delete = barrier.clone();
+            let delete_task = tokio::spawn(async move {
+                barrier_delete.wait().await;
+                let _ = repo_delete.delete_node(2).await;
+            });
+
+            barrier.wait().await;
+            put_task.await.unwrap();
+            delete_task.await.unwrap();
+
+            assert!(
+                repo.get_node(2).await.is_err(),
+                "node 2 should be deleted after concurrent operations"
+            );
+
+            let index = repo.hyper_index.read().await;
+            let neighbors = index.expand_graph(1, 1);
+            assert!(
+                !neighbors.iter().any(|(id, _)| *id == 2),
+                "dangling edge to deleted node must not remain"
+            );
+        }
     }
 }
