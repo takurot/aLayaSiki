@@ -121,6 +121,20 @@ impl Repository {
         nodes.get(&id).cloned().ok_or(RepoError::NotFound)
     }
 
+    pub async fn list_nodes(&self) -> Vec<Node> {
+        let nodes = self.nodes.read().await;
+        let mut out: Vec<Node> = nodes.values().cloned().collect();
+        out.sort_by_key(|node| node.id);
+        out
+    }
+
+    pub async fn embedding_dimension(&self) -> Option<usize> {
+        let nodes = self.nodes.read().await;
+        nodes
+            .values()
+            .find_map(|node| (!node.embedding.is_empty()).then_some(node.embedding.len()))
+    }
+
     pub async fn delete_node(&self, id: u64) -> Result<(), RepoError> {
         self.apply_index_transaction(vec![IndexMutation::DeleteNode(id)])
             .await
@@ -536,7 +550,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(record_count, 1, "transaction should be written as one WAL record");
+        assert_eq!(
+            record_count, 1,
+            "transaction should be written as one WAL record"
+        );
         assert_eq!(tx_mutation_count, 3);
     }
 

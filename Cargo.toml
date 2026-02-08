@@ -5,6 +5,7 @@ members = [
     "ingestion",
     "slm",
     "jobs",
+    "query",
     "prototypes",
 ]
 resolver = "2"
