@@ -4,6 +4,7 @@ use std::collections::HashMap;
 pub type EdgeData = (u64, String, f32);
 
 /// Simple adjacency list graph index
+#[derive(Clone, Debug)]
 pub struct AdjacencyGraph {
     adjacency: HashMap<u64, Vec<EdgeData>>,
 }
@@ -18,7 +19,7 @@ impl AdjacencyGraph {
     pub fn add_edge(&mut self, source: u64, target: u64, relation: impl Into<String>, weight: f32) {
         self.adjacency
             .entry(source)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((target, relation.into(), weight));
     }
 
@@ -42,7 +43,8 @@ impl AdjacencyGraph {
 
     /// Get 1-hop neighbors
     pub fn neighbors(&self, id: u64) -> Vec<&EdgeData> {
-        self.adjacency.get(&id)
+        self.adjacency
+            .get(&id)
             .map(|edges| edges.iter().collect())
             .unwrap_or_default()
     }
@@ -61,7 +63,7 @@ impl AdjacencyGraph {
         // Note: we track visited nodes but don't include start_id in result unless it's a cycle (which BFS wouldn't restart anyway)
         // To strictly match "neighbors", we usually exclude start_id unless it has a self-loop.
         // Here we just want unique neighbors found at dist 1..=max_hops.
-        
+
         visited.insert(start_id, 0); // Mark start as visited at dist 0
         queue.push_back((start_id, 0));
 
@@ -95,8 +97,39 @@ impl AdjacencyGraph {
         self.adjacency.values().map(|v| v.len()).sum()
     }
 
+    pub fn edges(&self) -> Vec<(u64, u64, f32)> {
+        let mut out = Vec::new();
+        for (source, edges) in &self.adjacency {
+            for (target, _relation, weight) in edges {
+                out.push((*source, *target, *weight));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        out
+    }
+
+    pub fn node_ids(&self) -> Vec<u64> {
+        let mut nodes = std::collections::BTreeSet::new();
+        for (source, edges) in &self.adjacency {
+            nodes.insert(*source);
+            for (target, _, _) in edges {
+                nodes.insert(*target);
+            }
+        }
+        nodes.into_iter().collect()
+    }
+
+    pub fn contains_node(&self, id: u64) -> bool {
+        if self.adjacency.contains_key(&id) {
+            return true;
+        }
+        self.adjacency
+            .values()
+            .any(|edges| edges.iter().any(|(target, _, _)| *target == id))
+    }
+
     pub fn node_count(&self) -> usize {
-        self.adjacency.len()
+        self.node_ids().len()
     }
 }
 
@@ -115,7 +148,7 @@ mod tests {
         let mut graph = AdjacencyGraph::new();
         graph.add_edge(1, 2, "knows", 1.0);
         graph.add_edge(1, 3, "likes", 0.8);
-        
+
         let neighbors = graph.neighbors(1);
         assert_eq!(neighbors.len(), 2);
     }
@@ -126,13 +159,13 @@ mod tests {
         graph.add_edge(1, 2, "knows", 1.0);
         graph.add_edge(2, 3, "knows", 1.0);
         graph.add_edge(2, 4, "knows", 1.0);
-        
+
         let result = graph.neighbors_2hop(1);
         assert_eq!(result.len(), 3); // 2, 3, 4
-        
+
         let hop1: Vec<_> = result.iter().filter(|(_, h)| *h == 1).collect();
         let hop2: Vec<_> = result.iter().filter(|(_, h)| *h == 2).collect();
-        
+
         assert_eq!(hop1.len(), 1); // Node 2
         assert_eq!(hop2.len(), 2); // Nodes 3, 4
     }
@@ -142,9 +175,9 @@ mod tests {
         let mut graph = AdjacencyGraph::new();
         graph.add_edge(1, 2, "knows", 1.0);
         graph.add_edge(2, 3, "knows", 1.0);
-        
+
         graph.remove_node(2);
-        
+
         assert!(graph.neighbors(1).is_empty());
         assert!(graph.neighbors(2).is_empty());
     }

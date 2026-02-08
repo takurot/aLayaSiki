@@ -1,9 +1,9 @@
-use std::path::{Path, PathBuf};
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt, BufWriter};
-use thiserror::Error;
 use crc32fast::Hasher;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use thiserror::Error;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
 
 #[derive(Error, Debug)]
 pub enum WalError {
@@ -17,7 +17,6 @@ pub enum WalError {
 
 pub struct Wal {
     file: BufWriter<File>,
-    path: PathBuf,
     current_lsn: AtomicU64,
 }
 
@@ -26,7 +25,7 @@ impl Wal {
     /// If it exists, it will be read to determine the next LSN.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, WalError> {
         let path = path.as_ref().to_path_buf();
-        
+
         // Ensure directory exists
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -40,11 +39,10 @@ impl Wal {
             .await?;
 
         // TODO: Scan existing file to recovery last LSN (simplified for now to 0)
-        let current_lsn = AtomicU64::new(0); 
+        let current_lsn = AtomicU64::new(0);
 
         Ok(Self {
             file: BufWriter::new(file),
-            path,
             current_lsn,
         })
     }
@@ -67,9 +65,9 @@ impl Wal {
         // Write Payload
         self.file.write_all(payload).await?;
 
-        // Note: We don't flush here by default for batch performance, 
+        // Note: We don't flush here by default for batch performance,
         // explicit flush() or periodic flush is expected.
-        
+
         Ok(lsn)
     }
 
@@ -79,7 +77,7 @@ impl Wal {
         self.file.get_ref().sync_all().await?; // fsync
         Ok(())
     }
-    
+
     pub fn current_lsn(&self) -> u64 {
         self.current_lsn.load(Ordering::SeqCst)
     }
@@ -87,21 +85,19 @@ impl Wal {
     /// Replays the WAL from the beginning.
     /// Returns the last valid LSN found.
     /// If an incomplete entry is found at the end, it is truncated.
-    pub async fn replay<F>(&mut self, mut callback: F) -> Result<u64, WalError> 
-    where F: FnMut(u64, Vec<u8>) -> Result<(), WalError>
+    pub async fn replay<F>(&mut self, mut callback: F) -> Result<u64, WalError>
+    where
+        F: FnMut(u64, Vec<u8>) -> Result<(), WalError>,
     {
         // Seek to start
         self.file.flush().await?; // Ensure everything is written before seeking
-        let mut file = self.file.get_mut();
+        let file = self.file.get_mut();
         file.seek(std::io::SeekFrom::Start(0)).await?;
 
         let mut last_lsn = 0;
         let mut valid_end_pos = 0;
 
         loop {
-            // Peek at current position to rollback if needed
-            let start_pos = file.stream_position().await?;
-
             // Read Header
             let lsn = match file.read_u64().await {
                 Ok(v) => v,
@@ -115,7 +111,7 @@ impl Wal {
             // Read Payload
             let mut payload = vec![0u8; len];
             match file.read_exact(&mut payload).await {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // Partial write
                 Err(e) => return Err(WalError::Io(e)),
             }
@@ -134,9 +130,9 @@ impl Wal {
 
         // Truncate partial writes at the end
         if valid_end_pos < file.metadata().await?.len() {
-             file.set_len(valid_end_pos).await?;
+            file.set_len(valid_end_pos).await?;
         }
-        
+
         // Restore cursor to end
         file.seek(std::io::SeekFrom::End(0)).await?;
         self.current_lsn.store(last_lsn, Ordering::SeqCst);
@@ -159,7 +155,7 @@ mod tests {
 
         let entry1 = b"Hello WAL";
         let lsn1 = wal.append(entry1).await.expect("append failed");
-        
+
         let entry2 = b"Second Entry";
         let lsn2 = wal.append(entry2).await.expect("append failed");
 
@@ -171,7 +167,10 @@ mod tests {
         // Simple file size check
         let metadata = tokio::fs::metadata(&path).await.unwrap();
         // Header (8+4+4=16) * 2 + Payload (9 + 12) = 32 + 21 = 53 bytes
-        assert_eq!(metadata.len(), (16 * 2) + entry1.len() as u64 + entry2.len() as u64);
+        assert_eq!(
+            metadata.len(),
+            (16 * 2) + entry1.len() as u64 + entry2.len() as u64
+        );
     }
 
     #[tokio::test]
@@ -191,11 +190,14 @@ mod tests {
         {
             let mut wal = Wal::open(&path).await.unwrap();
             let mut recovered = Vec::new();
-            
-            let last_lsn = wal.replay(|lsn, payload| {
-                recovered.push((lsn, payload));
-                Ok(())
-            }).await.unwrap();
+
+            let last_lsn = wal
+                .replay(|lsn, payload| {
+                    recovered.push((lsn, payload));
+                    Ok(())
+                })
+                .await
+                .unwrap();
 
             assert_eq!(last_lsn, 2);
             assert_eq!(recovered.len(), 2);
