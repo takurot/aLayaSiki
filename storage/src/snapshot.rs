@@ -25,13 +25,13 @@ impl SnapshotManager {
         if !self.dir.exists() {
             fs::create_dir_all(&self.dir).await?;
         }
-        
-        let mut path = self.dir.join(format!("snapshot_{:020}.rkyv", lsn));
+
+        let path = self.dir.join(format!("snapshot_{:020}.rkyv", lsn));
         let tmp_path = path.with_extension("tmp");
-        
+
         fs::write(&tmp_path, data).await?;
         fs::rename(&tmp_path, &path).await?;
-        
+
         Ok(path)
     }
 
@@ -51,7 +51,7 @@ impl SnapshotManager {
                 if file_name.starts_with("snapshot_") && file_name.ends_with(".rkyv") {
                     let lsn_str = &file_name[9..29]; // "snapshot_" len is 9, 20 digits
                     if let Ok(lsn) = lsn_str.parse::<u64>() {
-                        if max_lsn.map_or(true, |max| lsn > max) {
+                        if max_lsn.is_none_or(|max| lsn > max) {
                             max_lsn = Some(lsn);
                             max_path = Some(path);
                         }

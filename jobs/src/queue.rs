@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Job {
-    ExtractEntities { node_id: u64, content: String },
+    ExtractEntities {
+        node_id: u64,
+        content: String,
+        model_id: String,
+        snapshot_id: String,
+    },
 }
 
 #[async_trait::async_trait]
@@ -26,6 +30,9 @@ impl ChannelJobQueue {
 #[async_trait::async_trait]
 impl JobQueue for ChannelJobQueue {
     async fn enqueue(&self, job: Job) -> anyhow::Result<()> {
-        self.sender.send(job).await.map_err(|e| anyhow::anyhow!("Queue send error: {}", e))
+        self.sender
+            .send(job)
+            .await
+            .map_err(|e| anyhow::anyhow!("Queue send error: {}", e))
     }
 }

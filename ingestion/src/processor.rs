@@ -1,14 +1,14 @@
-use alayasiki_core::ingest::{IngestionRequest, ContentHash};
-use alayasiki_core::model::Node;
-use storage::repo::Repository;
-use crate::chunker::{Chunker, SemanticChunker, ChunkingConfig};
-use crate::embedding::{Embedder, DeterministicEmbedder};
+use crate::chunker::{Chunker, ChunkingConfig, SemanticChunker};
+use crate::embedding::{DeterministicEmbedder, Embedder};
 use crate::extract::{detect_content_kind, extract_pdf_text, extract_utf8, ContentKind};
 use crate::policy::{ContentPolicy, NoOpPolicy, PolicyError};
-use std::sync::Arc;
-use thiserror::Error;
-use sha2::{Digest, Sha256};
+use alayasiki_core::ingest::{ContentHash, IngestionRequest};
+use alayasiki_core::model::Node;
 use dashmap::DashMap;
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use storage::repo::Repository;
+use thiserror::Error;
 
 use jobs::queue::{Job, JobQueue};
 
@@ -47,6 +47,7 @@ pub struct IngestionPipeline {
     embedder: Box<dyn Embedder>,
     policy: Box<dyn ContentPolicy>,
     default_model_id: String,
+    default_extraction_model_id: String,
     // In-flight locks for idempotency keys
     locks: Arc<DashMap<String, ()>>,
     job_queue: Option<Arc<dyn JobQueue>>,
@@ -60,6 +61,7 @@ impl IngestionPipeline {
             embedder: Box::new(DeterministicEmbedder::default()),
             policy: Box::new(NoOpPolicy),
             default_model_id: "embedding-default-v1".to_string(),
+            default_extraction_model_id: "triplex-lite@1.0.0".to_string(),
             locks: Arc::new(DashMap::new()),
             job_queue: None,
         }
@@ -76,6 +78,7 @@ impl IngestionPipeline {
             // The `locks` field will be initialized by `new` or `with_components` if they were used.
             // For `with_chunker`, we'll add the default locks initialization.
             default_model_id: "embedding-default-v1".to_string(),
+            default_extraction_model_id: "triplex-lite@1.0.0".to_string(),
             locks: Arc::new(DashMap::new()),
             job_queue: None,
         }
@@ -94,6 +97,7 @@ impl IngestionPipeline {
             embedder,
             policy,
             default_model_id: default_model_id.to_string(),
+            default_extraction_model_id: "triplex-lite@1.0.0".to_string(),
             locks: Arc::new(DashMap::new()),
             job_queue: None,
         }
@@ -108,8 +112,10 @@ impl IngestionPipeline {
         let idempotency_key = request.idempotency_key().map(|key| key.to_string());
 
         // LOCKING: Prevent concurrent processing of same key
-        let lock_key = idempotency_key.clone().unwrap_or_else(|| content_hash.clone());
-        
+        let lock_key = idempotency_key
+            .clone()
+            .unwrap_or_else(|| content_hash.clone());
+
         {
             if self.locks.contains_key(&lock_key) {
                 return Err(IngestionError::IdempotencyConflict(lock_key));
@@ -132,14 +138,18 @@ impl IngestionPipeline {
             return Ok(ids);
         }
 
-        let model_id = request
+        let embedding_model_id = request
             .model_id()
             .unwrap_or(&self.default_model_id)
+            .to_string();
+        let extraction_model_id = request
+            .model_id()
+            .unwrap_or(&self.default_extraction_model_id)
             .to_string();
 
         let (text, mut metadata) = extract_request_text(request)?;
         metadata.insert("content_hash".to_string(), content_hash.clone());
-        metadata.insert("model_id".to_string(), model_id.clone());
+        metadata.insert("model_id".to_string(), embedding_model_id.clone());
         if let Some(key) = &idempotency_key {
             metadata.insert("idempotency_key".to_string(), key.clone());
         }
@@ -150,13 +160,16 @@ impl IngestionPipeline {
 
         let mut node_ids = Vec::new();
         for (i, mut chunk) in chunks.into_iter().enumerate() {
-            let embedding = self.embedder.embed(&chunk.content, &model_id).await;
+            let embedding = self
+                .embedder
+                .embed(&chunk.content, &embedding_model_id)
+                .await;
             chunk.embedding = Some(embedding.clone());
 
             let chunk_id = derive_chunk_id(&content_hash, i as u64);
 
             let chunk_content = chunk.content.clone();
-            
+
             let node = Node {
                 id: chunk_id,
                 embedding,
@@ -169,9 +182,12 @@ impl IngestionPipeline {
 
             // Enqueue Job if queue is present
             if let Some(queue) = &self.job_queue {
+                let snapshot_id = self.repo.current_snapshot_id().await;
                 let job = Job::ExtractEntities {
                     node_id: chunk_id,
                     content: chunk_content,
+                    model_id: extraction_model_id.clone(),
+                    snapshot_id,
                 };
                 if let Err(e) = queue.enqueue(job).await {
                     // Best-effort: Log warning but continue ingestion to preserve idempotency
@@ -184,7 +200,9 @@ impl IngestionPipeline {
         if let Some(key) = &idempotency_key {
             self.repo.record_idempotency(key, node_ids.clone()).await?;
         }
-        self.repo.record_idempotency(&content_hash, node_ids.clone()).await?;
+        self.repo
+            .record_idempotency(&content_hash, node_ids.clone())
+            .await?;
 
         // Guard will automatically remove lock on drop
         // self.locks.remove(&lock_key);
@@ -199,15 +217,24 @@ fn derive_chunk_id(content_hash: &str, index: u64) -> u64 {
     hasher.update(index.to_le_bytes());
     let digest = hasher.finalize();
     u64::from_le_bytes([
-        digest[0], digest[1], digest[2], digest[3],
-        digest[4], digest[5], digest[6], digest[7],
+        digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
     ])
 }
 
-fn extract_request_text(request: IngestionRequest) -> Result<(String, std::collections::HashMap<String, String>), IngestionError> {
+fn extract_request_text(
+    request: IngestionRequest,
+) -> Result<(String, std::collections::HashMap<String, String>), IngestionError> {
     match request {
-        IngestionRequest::Text { content, metadata, .. } => Ok((content, metadata)),
-        IngestionRequest::File { filename, content, mime_type, mut metadata, .. } => {
+        IngestionRequest::Text {
+            content, metadata, ..
+        } => Ok((content, metadata)),
+        IngestionRequest::File {
+            filename,
+            content,
+            mime_type,
+            mut metadata,
+            ..
+        } => {
             let kind = detect_content_kind(&mime_type, Some(&filename));
             metadata.insert("filename".to_string(), filename);
             metadata.insert("mime_type".to_string(), mime_type.clone());

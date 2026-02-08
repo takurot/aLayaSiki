@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use std::path::Path;
-use alayasiki_core::model::{Node, Edge};
-use crate::wal::{Wal, WalError};
 use crate::hyper_index::HyperIndex;
-use thiserror::Error;
-use rkyv::{Archive, Deserialize, Serialize};
+use crate::wal::{Wal, WalError};
+use alayasiki_core::model::{Edge, Node};
 use rkyv::ser::{serializers::AllocSerializer, Serializer};
+use rkyv::{Archive, Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::sync::RwLock;
 
 #[derive(Error, Debug)]
@@ -19,6 +19,8 @@ pub enum RepoError {
     Deserialization,
     #[error("Not found")]
     NotFound,
+    #[error("Invalid transaction: {0}")]
+    InvalidTransaction(String),
 }
 
 /// WAL Entry types for durability
@@ -29,6 +31,13 @@ pub enum WalEntry {
     PutEdge(Edge),
     Delete(u64),
     IdempotencyKey { key: String, node_ids: Vec<u64> },
+}
+
+#[derive(Debug, Clone)]
+pub enum IndexMutation {
+    PutNode(Node),
+    PutEdge(Edge),
+    DeleteNode(u64),
 }
 
 pub struct Repository {
@@ -56,7 +65,7 @@ impl Repository {
         let nodes = Arc::new(RwLock::new(HashMap::new()));
         let hyper_index = Arc::new(RwLock::new(HyperIndex::new()));
         let idempotency_index = Arc::new(RwLock::new(HashMap::new()));
-        
+
         // 1. Replay WAL
         {
             let mut wal_lock = wal.lock().await;
@@ -64,42 +73,47 @@ impl Repository {
             let mut h_index = hyper_index.write().await;
             let mut idem_map = idempotency_index.write().await;
 
-            wal_lock.replay(|_lsn, data| {
-                // Deserialize (zero-copy check)
-                let entry = rkyv::check_archived_root::<WalEntry>(&data[..])
-                    .map_err(|_| WalError::CorruptEntry)?;
+            wal_lock
+                .replay(|_lsn, data| {
+                    // Deserialize (zero-copy check)
+                    let entry = rkyv::check_archived_root::<WalEntry>(&data[..])
+                        .map_err(|_| WalError::CorruptEntry)?;
 
-                match entry {
-                    ArchivedWalEntry::Put(node) => {
-                        let deserialized: Node = node.deserialize(&mut rkyv::Infallible).unwrap();
-                        let id = deserialized.id;
-                        let embedding = deserialized.embedding.clone();
-                        
-                        node_map.insert(id, deserialized);
-                        h_index.insert_node(id, embedding);
+                    match entry {
+                        ArchivedWalEntry::Put(node) => {
+                            let deserialized: Node =
+                                node.deserialize(&mut rkyv::Infallible).unwrap();
+                            let id = deserialized.id;
+                            let embedding = deserialized.embedding.clone();
+
+                            node_map.insert(id, deserialized);
+                            h_index.insert_node(id, embedding);
+                        }
+                        ArchivedWalEntry::Delete(id_archived) => {
+                            let id: u64 = id_archived.deserialize(&mut rkyv::Infallible).unwrap();
+                            node_map.remove(&id);
+                            h_index.remove_node(id);
+                        }
+                        ArchivedWalEntry::PutEdge(edge) => {
+                            let deserialized: Edge =
+                                edge.deserialize(&mut rkyv::Infallible).unwrap();
+                            h_index.insert_edge(
+                                deserialized.source,
+                                deserialized.target,
+                                deserialized.relation,
+                                deserialized.weight,
+                            );
+                        }
+                        ArchivedWalEntry::IdempotencyKey { key, node_ids } => {
+                            let key: String = key.deserialize(&mut rkyv::Infallible).unwrap();
+                            let node_ids: Vec<u64> =
+                                node_ids.deserialize(&mut rkyv::Infallible).unwrap();
+                            idem_map.insert(key, node_ids);
+                        }
                     }
-                    ArchivedWalEntry::Delete(id_archived) => {
-                        let id: u64 = id_archived.deserialize(&mut rkyv::Infallible).unwrap();
-                        node_map.remove(&id);
-                        h_index.remove_node(id);
-                    }
-                    ArchivedWalEntry::PutEdge(edge) => {
-                        let deserialized: Edge = edge.deserialize(&mut rkyv::Infallible).unwrap();
-                        h_index.insert_edge(
-                            deserialized.source,
-                            deserialized.target,
-                            deserialized.relation,
-                            deserialized.weight
-                        );
-                    }
-                    ArchivedWalEntry::IdempotencyKey { key, node_ids } => {
-                        let key: String = key.deserialize(&mut rkyv::Infallible).unwrap();
-                        let node_ids: Vec<u64> = node_ids.deserialize(&mut rkyv::Infallible).unwrap();
-                        idem_map.insert(key, node_ids);
-                    }
-                }
-                Ok(())
-            }).await?;
+                    Ok(())
+                })
+                .await?;
         }
 
         Ok(Self {
@@ -111,53 +125,13 @@ impl Repository {
     }
 
     pub async fn put_node(&self, node: Node) -> Result<(), RepoError> {
-        // 1. Create WalEntry
-        let entry = WalEntry::Put(node.clone());
-        let mut serializer = AllocSerializer::<256>::default();
-        serializer.serialize_value(&entry).map_err(|_| RepoError::Serialization)?;
-        let bytes = serializer.into_serializer().into_inner();
-        
-        // 2. Append to WAL (Durability First)
-        {
-            let mut wal = self.wal.lock().await;
-            wal.append(&bytes).await?;
-            wal.flush().await?;
-        }
-
-        // 3. Update In-Memory State
-        {
-            let mut nodes = self.nodes.write().await;
-            nodes.insert(node.id, node.clone());
-        }
-        {
-            let mut index = self.hyper_index.write().await;
-            index.insert_node(node.id, node.embedding);
-        }
-
-        Ok(())
+        self.apply_index_transaction(vec![IndexMutation::PutNode(node)])
+            .await
     }
 
     pub async fn put_edge(&self, edge: Edge) -> Result<(), RepoError> {
-        // 1. Create WalEntry
-        let entry = WalEntry::PutEdge(edge.clone());
-        let mut serializer = AllocSerializer::<128>::default();
-        serializer.serialize_value(&entry).map_err(|_| RepoError::Serialization)?;
-        let bytes = serializer.into_serializer().into_inner();
-
-        // 2. Append to WAL
-        {
-            let mut wal = self.wal.lock().await;
-            wal.append(&bytes).await?;
-            wal.flush().await?;
-        }
-
-        // 3. Update Index (Edges are currently only in HyperIndex)
-        {
-            let mut index = self.hyper_index.write().await;
-            index.insert_edge(edge.source, edge.target, edge.relation, edge.weight);
-        }
-
-        Ok(())
+        self.apply_index_transaction(vec![IndexMutation::PutEdge(edge)])
+            .await
     }
 
     pub async fn get_node(&self, id: u64) -> Result<Node, RepoError> {
@@ -166,35 +140,57 @@ impl Repository {
     }
 
     pub async fn delete_node(&self, id: u64) -> Result<(), RepoError> {
-        // 1. Check existence first
-        {
-            let nodes = self.nodes.read().await;
-            if !nodes.contains_key(&id) {
-                return Err(RepoError::NotFound);
-            }
+        self.apply_index_transaction(vec![IndexMutation::DeleteNode(id)])
+            .await
+    }
+
+    /// Apply index updates atomically within one transaction boundary.
+    /// If validation fails, nothing is written to WAL or in-memory indexes.
+    pub async fn apply_index_transaction(
+        &self,
+        mutations: Vec<IndexMutation>,
+    ) -> Result<(), RepoError> {
+        if mutations.is_empty() {
+            return Ok(());
         }
 
-        // 2. Create WalEntry for tombstone
-        let entry = WalEntry::Delete(id);
-        let mut serializer = AllocSerializer::<64>::default();
-        serializer.serialize_value(&entry).map_err(|_| RepoError::Serialization)?;
-        let bytes = serializer.into_serializer().into_inner();
+        self.validate_index_transaction(&mutations).await?;
 
-        // 3. Append to WAL
+        let wal_entries = mutations_to_wal_entries(&mutations);
+        let mut bytes_entries = Vec::with_capacity(wal_entries.len());
+        for entry in wal_entries {
+            bytes_entries.push(serialize_wal_entry(&entry)?);
+        }
+
+        // Durability first for the full transaction boundary.
         {
             let mut wal = self.wal.lock().await;
-            wal.append(&bytes).await?;
+            for bytes in &bytes_entries {
+                wal.append(bytes).await?;
+            }
             wal.flush().await?;
         }
 
-        // 4. Remove from memory
-        {
-            let mut nodes = self.nodes.write().await;
-            nodes.remove(&id);
-        }
-        {
-            let mut index = self.hyper_index.write().await;
-            index.remove_node(id);
+        // Apply in-memory updates under write locks so readers don't observe partial state.
+        let mut nodes = self.nodes.write().await;
+        let mut index = self.hyper_index.write().await;
+
+        for mutation in mutations {
+            match mutation {
+                IndexMutation::PutNode(node) => {
+                    let id = node.id;
+                    let embedding = node.embedding.clone();
+                    nodes.insert(id, node);
+                    index.insert_node(id, embedding);
+                }
+                IndexMutation::PutEdge(edge) => {
+                    index.insert_edge(edge.source, edge.target, edge.relation, edge.weight);
+                }
+                IndexMutation::DeleteNode(id) => {
+                    nodes.remove(&id);
+                    index.remove_node(id);
+                }
+            }
         }
 
         Ok(())
@@ -204,12 +200,17 @@ impl Repository {
         index.get(key).cloned()
     }
 
+    pub async fn current_snapshot_id(&self) -> String {
+        let wal = self.wal.lock().await;
+        format!("wal-lsn-{}", wal.current_lsn())
+    }
+
     pub async fn record_idempotency(&self, key: &str, node_ids: Vec<u64>) -> Result<(), RepoError> {
         // Optimization: Lock once and check.
         // Review feedback suggests removing double-check pattern if racy or checking under write lock.
-        // We will just acquire write lock immediately to be atomic and safe. 
+        // We will just acquire write lock immediately to be atomic and safe.
         // Read check optimization is good for read-heavy, but here we expect write if we got this far.
-        
+
         {
             let mut index = self.idempotency_index.write().await;
             if index.contains_key(key) {
@@ -220,27 +221,85 @@ impl Repository {
             // Actually, we should serialize first to avoid holding lock during serialization?
             // But we can't check-then-serialize-then-lock-then-write without race.
             // So we hold lock.
-            
-            let entry = WalEntry::IdempotencyKey { 
-                key: key.to_string(), 
-                node_ids: node_ids.clone() 
+
+            let entry = WalEntry::IdempotencyKey {
+                key: key.to_string(),
+                node_ids: node_ids.clone(),
             };
             // Increase buffer size for large ID lists
             let mut serializer = AllocSerializer::<4096>::default();
-            serializer.serialize_value(&entry).map_err(|_| RepoError::Serialization)?;
+            serializer
+                .serialize_value(&entry)
+                .map_err(|_| RepoError::Serialization)?;
             let bytes = serializer.into_serializer().into_inner();
-            
+
             {
-                 let mut wal = self.wal.lock().await;
-                 wal.append(&bytes).await?;
-                 wal.flush().await?;
+                let mut wal = self.wal.lock().await;
+                wal.append(&bytes).await?;
+                wal.flush().await?;
             }
-            
+
             index.insert(key.to_string(), node_ids);
         }
 
         Ok(())
     }
+
+    async fn validate_index_transaction(
+        &self,
+        mutations: &[IndexMutation],
+    ) -> Result<(), RepoError> {
+        let nodes = self.nodes.read().await;
+        let mut visible_nodes: HashSet<u64> = nodes.keys().copied().collect();
+
+        for mutation in mutations {
+            match mutation {
+                IndexMutation::PutNode(node) => {
+                    visible_nodes.insert(node.id);
+                }
+                IndexMutation::PutEdge(edge) => {
+                    if !visible_nodes.contains(&edge.source) {
+                        return Err(RepoError::InvalidTransaction(format!(
+                            "edge source {} does not exist",
+                            edge.source
+                        )));
+                    }
+                    if !visible_nodes.contains(&edge.target) {
+                        return Err(RepoError::InvalidTransaction(format!(
+                            "edge target {} does not exist",
+                            edge.target
+                        )));
+                    }
+                }
+                IndexMutation::DeleteNode(id) => {
+                    if !visible_nodes.remove(id) {
+                        return Err(RepoError::NotFound);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn mutations_to_wal_entries(mutations: &[IndexMutation]) -> Vec<WalEntry> {
+    mutations
+        .iter()
+        .map(|mutation| match mutation {
+            IndexMutation::PutNode(node) => WalEntry::Put(node.clone()),
+            IndexMutation::PutEdge(edge) => WalEntry::PutEdge(edge.clone()),
+            IndexMutation::DeleteNode(id) => WalEntry::Delete(*id),
+        })
+        .collect()
+}
+
+fn serialize_wal_entry(entry: &WalEntry) -> Result<Vec<u8>, RepoError> {
+    let mut serializer = AllocSerializer::<4096>::default();
+    serializer
+        .serialize_value(entry)
+        .map_err(|_| RepoError::Serialization)?;
+    Ok(serializer.into_serializer().into_inner().to_vec())
 }
 
 #[cfg(test)]
@@ -252,7 +311,7 @@ mod tests {
     async fn test_repo_put_get() {
         let dir = tempdir().unwrap();
         let wal_path = dir.path().join("test.wal");
-        
+
         let repo = Repository::open(&wal_path).await.unwrap();
 
         let node = Node::new(1, vec![0.1, 0.2, 0.3], "Test Node".to_string());
@@ -270,8 +329,12 @@ mod tests {
         // 1. Create and populate
         {
             let repo = Repository::open(&wal_path).await.unwrap();
-            repo.put_node(Node::new(1, vec![1.0], "Node 1".to_string())).await.unwrap();
-            repo.put_node(Node::new(2, vec![2.0], "Node 2".to_string())).await.unwrap();
+            repo.put_node(Node::new(1, vec![1.0], "Node 1".to_string()))
+                .await
+                .unwrap();
+            repo.put_node(Node::new(2, vec![2.0], "Node 2".to_string()))
+                .await
+                .unwrap();
         }
 
         // 2. Reopen and verify replay
@@ -290,7 +353,9 @@ mod tests {
         // 1. Create, put, delete
         {
             let repo = Repository::open(&wal_path).await.unwrap();
-            repo.put_node(Node::new(1, vec![1.0], "Node 1".to_string())).await.unwrap();
+            repo.put_node(Node::new(1, vec![1.0], "Node 1".to_string()))
+                .await
+                .unwrap();
             repo.delete_node(1).await.unwrap();
         }
 
@@ -309,8 +374,12 @@ mod tests {
         // 1. Create Data (Node + Edge)
         {
             let repo = Repository::open(&wal_path).await.unwrap();
-            repo.put_node(Node::new(1, vec![1.0, 0.0], "N1".to_string())).await.unwrap();
-            repo.put_node(Node::new(2, vec![0.0, 1.0], "N2".to_string())).await.unwrap();
+            repo.put_node(Node::new(1, vec![1.0, 0.0], "N1".to_string()))
+                .await
+                .unwrap();
+            repo.put_node(Node::new(2, vec![0.0, 1.0], "N2".to_string()))
+                .await
+                .unwrap();
             repo.put_edge(Edge::new(1, 2, "links", 1.0)).await.unwrap();
 
             // Verify in-memory index
@@ -323,10 +392,10 @@ mod tests {
         // 2. Restart and Verify Restoration
         {
             let repo = Repository::open(&wal_path).await.unwrap();
-            
+
             // Check HyperIndex restored
             let index = repo.hyper_index.read().await;
-            
+
             // Validation 1: Vector Index
             let search_res = index.search_vector(&[1.0, 0.0], 1);
             assert_eq!(search_res.len(), 1);
@@ -337,5 +406,61 @@ mod tests {
             assert_eq!(neighbors.len(), 1);
             assert_eq!(neighbors[0].0, 2);
         }
+    }
+
+    #[tokio::test]
+    async fn test_index_transaction_commits_all_mutations() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("txn_commit.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        let n1 = Node::new(1, vec![1.0, 0.0], "N1".to_string());
+        let n2 = Node::new(2, vec![0.0, 1.0], "N2".to_string());
+        let e = Edge::new(1, 2, "links", 1.0);
+
+        repo.apply_index_transaction(vec![
+            IndexMutation::PutNode(n1),
+            IndexMutation::PutNode(n2),
+            IndexMutation::PutEdge(e),
+        ])
+        .await
+        .unwrap();
+
+        assert_eq!(repo.get_node(1).await.unwrap().data, "N1");
+        assert_eq!(repo.get_node(2).await.unwrap().data, "N2");
+
+        let index = repo.hyper_index.read().await;
+        let neighbors = index.expand_graph(1, 1);
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].0, 2);
+    }
+
+    #[tokio::test]
+    async fn test_index_transaction_rollback_on_validation_error() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("txn_rollback.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        let n1 = Node::new(1, vec![1.0], "N1".to_string());
+        let invalid_edge = Edge::new(1, 999, "links", 1.0);
+
+        let result = repo
+            .apply_index_transaction(vec![
+                IndexMutation::PutNode(n1),
+                IndexMutation::PutEdge(invalid_edge),
+            ])
+            .await;
+
+        assert!(result.is_err());
+        assert!(
+            repo.get_node(1).await.is_err(),
+            "node should not be partially committed"
+        );
+
+        let reopened = Repository::open(&wal_path).await.unwrap();
+        assert!(
+            reopened.get_node(1).await.is_err(),
+            "node should not be recoverable after failed transaction"
+        );
     }
 }
