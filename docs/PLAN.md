@@ -135,11 +135,11 @@
 
 * Depends on: PR-03, PR-04
 
-- [ ] JSON DSL のパーサーとバリデーション
-- [ ] **search_mode** (local/global/drift/auto) のパラメータ追加とバリデーション
-- [ ] Query Planner（Vector Search → Graph Expansion → Context Pruning）
-- [ ] Explain Plan 出力（アンカー/経路/除外理由）
-- [ ] Query Mode（answer/evidence）の切替実装
+- [x] JSON DSL のパーサーとバリデーション
+- [x] **search_mode** (local/global/drift/auto) のパラメータ追加とバリデーション
+- [x] Query Planner（Vector Search → Graph Expansion → Context Pruning）
+- [x] Explain Plan 出力（アンカー/経路/除外理由）
+- [x] Query Mode（answer/evidence）の切替実装
 
 ---
 

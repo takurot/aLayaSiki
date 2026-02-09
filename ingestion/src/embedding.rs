@@ -1,6 +1,5 @@
-use std::pin::Pin;
 use std::future::Future;
-use sha2::{Digest, Sha256};
+use std::pin::Pin;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -29,20 +28,9 @@ impl Embedder for DeterministicEmbedder {
         let text = text.to_string();
         let model_id = model_id.to_string();
         let dims = self.dims; // Capture copy
-        
-        Box::pin(async move {
-            let mut hasher = Sha256::new();
-            hasher.update(model_id.as_bytes());
-            hasher.update(text.as_bytes());
-            let digest = hasher.finalize();
 
-            let mut out = Vec::with_capacity(dims);
-            for i in 0..dims {
-                let byte = digest[i % digest.len()];
-                let value = (byte as f32 / 127.5) - 1.0;
-                out.push(value);
-            }
-            out
+        Box::pin(async move {
+            alayasiki_core::embedding::deterministic_embedding(&text, &model_id, dims)
         })
     }
 }
