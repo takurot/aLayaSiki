@@ -268,9 +268,7 @@ impl QueryEngine {
                     }
 
                     for (target, relation, weight) in index.graph_index.neighbors(current_id) {
-                        if !relation_filter.is_empty()
-                            && !relation_filter.contains(relation.as_str())
-                        {
+                        if !relation_is_allowed(relation.as_str(), &relation_filter) {
                             exclusions.push(ExclusionReason {
                                 node_id: Some(*target),
                                 reason: format!("relation_filtered:{}", relation),
@@ -314,21 +312,12 @@ impl QueryEngine {
             }
         }
 
-        let mut candidate_ids: Vec<u64> = candidate_hops.keys().copied().collect();
-        candidate_ids.sort_unstable();
+        let candidate_ids: Vec<u64> = candidate_hops.keys().copied().collect();
         let fetched_nodes = self.repo.get_nodes_by_ids(&candidate_ids).await;
         let node_lookup: HashMap<u64, Node> = fetched_nodes
             .into_iter()
             .map(|node| (node.id, node))
             .collect();
-        for node_id in &candidate_ids {
-            if !node_lookup.contains_key(node_id) {
-                exclusions.push(ExclusionReason {
-                    node_id: Some(*node_id),
-                    reason: "missing_node".to_string(),
-                });
-            }
-        }
 
         let anchor_scores: HashMap<u64, f32> = anchors
             .iter()
@@ -419,22 +408,13 @@ impl QueryEngine {
         }
 
         let selected_ids: HashSet<u64> = ranked_nodes.iter().map(|node| node.id).collect();
-        let relation_type_filter: HashSet<&str> = request
-            .filters
-            .relation_type
-            .iter()
-            .map(|value| value.as_str())
-            .collect();
 
         let mut edges: Vec<EvidenceEdge> = traversed_edges
             .into_iter()
             .filter(|edge| {
                 selected_ids.contains(&edge.source) && selected_ids.contains(&edge.target)
             })
-            .filter(|edge| {
-                relation_type_filter.is_empty()
-                    || relation_type_filter.contains(edge.relation.as_str())
-            })
+            .filter(|edge| relation_is_allowed(edge.relation.as_str(), &relation_filter))
             .collect();
 
         edges = dedup_edges(edges);
@@ -561,6 +541,10 @@ fn collect_relation_filter(request: &QueryRequest) -> HashSet<&str> {
                 .map(|value| value.as_str()),
         )
         .collect()
+}
+
+fn relation_is_allowed(relation: &str, relation_filter: &HashSet<&str>) -> bool {
+    relation_filter.is_empty() || relation_filter.contains(relation)
 }
 
 fn reconstruct_path(
