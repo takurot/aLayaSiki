@@ -1,4 +1,8 @@
 use crate::dsl::{QueryMode, QueryRequest, SearchMode};
+use crate::graphrag::{
+    collect_global_node_ids, compute_groundedness, map_community_summaries,
+    reduce_community_summaries, GroundednessInput, DRIFT_EVIDENCE_THRESHOLD, DRIFT_MAX_ITERATIONS,
+};
 use crate::planner::{QueryPlan, QueryPlanner};
 use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::model::Node;
@@ -7,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use storage::community::CommunitySummary;
 use storage::repo::{RepoError, Repository};
 use thiserror::Error;
 
@@ -87,32 +92,42 @@ pub enum QueryError {
 
 pub struct QueryEngine {
     repo: Arc<Repository>,
+    community_summaries: Vec<CommunitySummary>,
 }
 
 const DEFAULT_EMBEDDING_MODEL_ID: &str = "embedding-default-v1";
 const UNICODE_NGRAM_SIZE: usize = 2;
 
 #[derive(Debug, Clone)]
-struct RankedNode {
-    id: u64,
-    data: String,
-    score: f32,
-    hop: u8,
-    source: Option<String>,
+pub struct RankedNode {
+    pub id: u64,
+    pub data: String,
+    pub score: f32,
+    pub hop: u8,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct ExecutionState {
-    anchors: Vec<Anchor>,
-    expansion_paths: Vec<ExpansionPath>,
-    exclusions: Vec<ExclusionReason>,
-    nodes: Vec<RankedNode>,
-    edges: Vec<EvidenceEdge>,
+pub struct ExecutionState {
+    pub anchors: Vec<Anchor>,
+    pub expansion_paths: Vec<ExpansionPath>,
+    pub exclusions: Vec<ExclusionReason>,
+    pub nodes: Vec<RankedNode>,
+    pub edges: Vec<EvidenceEdge>,
 }
 
 impl QueryEngine {
     pub fn new(repo: Arc<Repository>) -> Self {
-        Self { repo }
+        Self {
+            repo,
+            community_summaries: Vec::new(),
+        }
+    }
+
+    /// Attach pre-computed community summaries for global search support.
+    pub fn with_community_summaries(mut self, summaries: Vec<CommunitySummary>) -> Self {
+        self.community_summaries = summaries;
+        self
     }
 
     pub async fn execute_json(&self, raw: &str) -> Result<QueryResponse, QueryError> {
@@ -132,30 +147,28 @@ impl QueryEngine {
             .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string());
 
         let mut plan = QueryPlanner::plan(&request);
-        let mut state = self
-            .execute_with_plan(&request, &plan, &effective_model_id)
-            .await?;
 
-        if request.search_mode == SearchMode::Auto
-            && plan.effective_search_mode == SearchMode::Local
-            && state.nodes.len() < 2
-        {
-            let mut drift_plan = plan.clone();
-            drift_plan.effective_search_mode = SearchMode::Drift;
-            drift_plan.expansion_depth = drift_plan.expansion_depth.saturating_add(1).min(8);
+        // Dispatch to the appropriate search mode pipeline.
+        let (state, plan, global_answer) = match plan.effective_search_mode {
+            SearchMode::Global => {
+                self.execute_global(&request, &mut plan, &effective_model_id)
+                    .await?
+            }
+            SearchMode::Drift => {
+                let (state, plan) = self
+                    .execute_drift(&request, &mut plan, &effective_model_id)
+                    .await?;
+                (state, plan, None)
+            }
+            SearchMode::Local | SearchMode::Auto => {
+                let (state, plan) = self
+                    .execute_local_with_auto_fallback(&request, plan, &effective_model_id)
+                    .await?;
+                (state, plan, None)
+            }
+        };
 
-            let mut drift_state = self
-                .execute_with_plan(&request, &drift_plan, &effective_model_id)
-                .await?;
-            drift_state.exclusions.push(ExclusionReason {
-                node_id: None,
-                reason: "auto_fallback_to_drift_due_to_insufficient_evidence".to_string(),
-            });
-
-            plan = drift_plan;
-            state = drift_state;
-        }
-
+        // Build evidence nodes from execution state.
         let evidence_nodes: Vec<EvidenceNode> = state
             .nodes
             .iter()
@@ -168,15 +181,36 @@ impl QueryEngine {
             .collect();
 
         let citations = build_citations(&state.nodes);
-        let groundedness = if evidence_nodes.is_empty() {
-            0.0
-        } else {
-            (evidence_nodes.len() as f32 / request.top_k as f32).min(1.0)
-        };
 
+        // Improved groundedness scoring.
+        let evidence_scores: Vec<f32> = state.nodes.iter().map(|n| n.score).collect();
+        let source_diversity = {
+            let sources: HashSet<&str> = state
+                .nodes
+                .iter()
+                .filter_map(|n| n.source.as_deref())
+                .collect();
+            sources.len()
+        };
+        let has_graph_support = !state.edges.is_empty();
+        let groundedness = compute_groundedness(&GroundednessInput {
+            query: &request.query,
+            evidence_scores: &evidence_scores,
+            evidence_count: evidence_nodes.len(),
+            source_diversity,
+            has_graph_support,
+        });
+
+        // Generate answer based on mode.
         let answer = match request.mode {
             QueryMode::Evidence => None,
-            QueryMode::Answer => Some(generate_answer(&request.query, &evidence_nodes)),
+            QueryMode::Answer => {
+                if let Some(global_ans) = global_answer {
+                    Some(global_ans)
+                } else {
+                    Some(generate_answer(&request.query, &evidence_nodes))
+                }
+            }
         };
 
         let snapshot_id = match request.snapshot_id.clone() {
@@ -202,6 +236,206 @@ impl QueryEngine {
             model_id: Some(effective_model_id),
             snapshot_id,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Local Search with Auto-fallback to DRIFT
+    // -----------------------------------------------------------------------
+    async fn execute_local_with_auto_fallback(
+        &self,
+        request: &QueryRequest,
+        mut plan: QueryPlan,
+        embedding_model_id: &str,
+    ) -> Result<(ExecutionState, QueryPlan), QueryError> {
+        let mut state = self
+            .execute_with_plan(request, &plan, embedding_model_id)
+            .await?;
+
+        // Record vector-only fallback when graph expansion added nothing.
+        if state.edges.is_empty() && !state.nodes.is_empty() {
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "no_graph_expansion_vector_only_fallback".to_string(),
+            });
+        }
+
+        // Auto mode: fall back to DRIFT if local yields insufficient evidence.
+        if request.search_mode == SearchMode::Auto
+            && plan.effective_search_mode == SearchMode::Local
+            && state.nodes.len() < 2
+        {
+            let (drift_state, drift_plan) = self
+                .execute_drift(request, &mut plan, embedding_model_id)
+                .await?;
+            let mut drift_state = drift_state;
+            drift_state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "auto_fallback_to_drift_due_to_insufficient_evidence".to_string(),
+            });
+
+            return Ok((drift_state, drift_plan));
+        }
+
+        Ok((state, plan))
+    }
+
+    // -----------------------------------------------------------------------
+    // Global Search: Community Summary Map-Reduce
+    // -----------------------------------------------------------------------
+    async fn execute_global(
+        &self,
+        request: &QueryRequest,
+        plan: &mut QueryPlan,
+        embedding_model_id: &str,
+    ) -> Result<(ExecutionState, QueryPlan, Option<String>), QueryError> {
+        if self.community_summaries.is_empty() {
+            // Fallback: no community data available — run expanded vector search.
+            plan.steps = vec![
+                "vector_search",
+                "graph_expansion",
+                "context_pruning",
+                "global_fallback_no_community_data",
+            ];
+            let mut state = self
+                .execute_with_plan(request, plan, embedding_model_id)
+                .await?;
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "no_community_data_fallback_to_vector".to_string(),
+            });
+            return Ok((state, plan.clone(), None));
+        }
+
+        // MAP: Score community summaries.
+        let ranked = map_community_summaries(&request.query, &self.community_summaries);
+
+        // REDUCE: Synthesize answer from top communities.
+        let max_communities = 5;
+        let global_answer = reduce_community_summaries(&request.query, &ranked, max_communities);
+
+        // Collect evidence nodes from top-ranked community members.
+        let community_node_ids = collect_global_node_ids(&ranked, max_communities);
+
+        // Also run vector search for additional evidence.
+        let mut state = self
+            .execute_with_plan(request, plan, embedding_model_id)
+            .await?;
+
+        // Augment state with community member nodes not already included.
+        let existing_ids: HashSet<u64> = state.nodes.iter().map(|n| n.id).collect();
+        let extra_ids: Vec<u64> = community_node_ids
+            .into_iter()
+            .filter(|id| !existing_ids.contains(id))
+            .collect();
+
+        if !extra_ids.is_empty() {
+            let extra_nodes = self.repo.get_nodes_by_ids(&extra_ids).await;
+            for node in extra_nodes {
+                state.nodes.push(RankedNode {
+                    id: node.id,
+                    data: node.data.clone(),
+                    score: 0.05, // Community membership baseline score.
+                    hop: 0,
+                    source: node.metadata.get("source").cloned(),
+                });
+            }
+
+            // Re-sort and re-prune to top_k.
+            state.nodes.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(Ordering::Equal)
+                    .then(a.id.cmp(&b.id))
+            });
+            if state.nodes.len() > request.top_k {
+                let pruned = state.nodes.split_off(request.top_k);
+                for node in pruned {
+                    state.exclusions.push(ExclusionReason {
+                        node_id: Some(node.id),
+                        reason: "pruned_by_top_k".to_string(),
+                    });
+                }
+            }
+        }
+
+        plan.steps = vec![
+            "vector_search",
+            "community_map_reduce",
+            "graph_expansion",
+            "context_pruning",
+        ];
+
+        Ok((state, plan.clone(), Some(global_answer)))
+    }
+
+    // -----------------------------------------------------------------------
+    // DRIFT Search: Dynamic Reasoning via Iterative Feedback and Traversals
+    // -----------------------------------------------------------------------
+    async fn execute_drift(
+        &self,
+        request: &QueryRequest,
+        plan: &mut QueryPlan,
+        embedding_model_id: &str,
+    ) -> Result<(ExecutionState, QueryPlan), QueryError> {
+        plan.effective_search_mode = SearchMode::Drift;
+
+        let mut best_state: Option<ExecutionState> = None;
+        let initial_depth = plan.expansion_depth;
+
+        for iteration in 0..DRIFT_MAX_ITERATIONS {
+            let mut iter_plan = plan.clone();
+            // Each DRIFT iteration expands the search depth progressively.
+            iter_plan.expansion_depth = (initial_depth + iteration as u8).min(8);
+            // Increase vector candidates each round.
+            iter_plan.vector_top_k = plan.vector_top_k.saturating_add(iteration * 2).min(50);
+
+            let state = self
+                .execute_with_plan(request, &iter_plan, embedding_model_id)
+                .await?;
+
+            let is_sufficient = state.nodes.len() >= DRIFT_EVIDENCE_THRESHOLD
+                || (iteration > 0
+                    && best_state
+                        .as_ref()
+                        .map(|prev| state.nodes.len() <= prev.nodes.len())
+                        .unwrap_or(false));
+
+            if state.nodes.len() > best_state.as_ref().map(|s| s.nodes.len()).unwrap_or(0) {
+                best_state = Some(state);
+            }
+
+            if is_sufficient {
+                break;
+            }
+        }
+
+        let mut state = best_state.unwrap_or(ExecutionState {
+            anchors: Vec::new(),
+            expansion_paths: Vec::new(),
+            exclusions: vec![ExclusionReason {
+                node_id: None,
+                reason: "drift_no_evidence_found".to_string(),
+            }],
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        });
+
+        plan.steps = vec![
+            "vector_search",
+            "drift_iterative_expansion",
+            "graph_expansion",
+            "context_pruning",
+        ];
+
+        // If drift still yielded nothing, note it in exclusions.
+        if state.nodes.is_empty() {
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "drift_exhausted_no_evidence".to_string(),
+            });
+        }
+
+        Ok((state, plan.clone()))
     }
 
     async fn execute_with_plan(
