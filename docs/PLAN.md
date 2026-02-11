@@ -32,11 +32,11 @@
 
 * Depends on: なし
 
-- [ ] ANNインデックスの候補評価（検索精度/速度/更新性能）
-- [ ] グラフ隣接ストレージの最小プロトタイプ（1-hop/2-hop性能）
-- [ ] GPUメモリ常駐とティアリングの概念検証（GPUなしでも動作可能な設計）
-- [ ] SLM推論の最小パイプライン試作（非同期ジョブ前提）
-- [ ] ADR（Architecture Decision Record）として選定結果を記録
+- [x] ANNインデックスの候補評価（検索精度/速度/更新性能）
+- [x] グラフ隣接ストレージの最小プロトタイプ（1-hop/2-hop性能）
+- [x] GPUメモリ常駐とティアリングの概念検証（GPUなしでも動作可能な設計）
+- [x] SLM推論の最小パイプライン試作（非同期ジョブ前提）
+- [x] ADR（Architecture Decision Record）として選定結果を記録
 
 ---
 
@@ -44,10 +44,10 @@
 
 * Depends on: なし
 
-- [ ] プロジェクト構成の確定（core / storage / ingestion / query / api / sdk など）
-- [ ] ビルド設定・CIワークフロー追加（lint/test/build）
-- [ ] 設定管理の骨格（設定ファイル、環境変数、起動オプション）
-- [ ] ログ基盤（構造化ログ、ログレベル、出力先）
+- [x] プロジェクト構成の確定（core / storage / ingestion / query / api / sdk など）
+- [x] ビルド設定・CIワークフロー追加（lint/test/build）
+- [x] 設定管理の骨格（設定ファイル、環境変数、起動オプション）
+- [x] ログ基盤（構造化ログ、ログレベル、出力先）
 
 ---
 
@@ -55,10 +55,10 @@
 
 * Depends on: PR-01
 
-- [ ] WALのインターフェース定義と永続化実装（書き込みACK条件を明文化）
-- [ ] スナップショット作成/復元の最小実装（メタ情報保存含む）
-- [ ] 単一ノード前提の耐障害性（クラッシュリカバリの検証）
-- [ ] ストレージ障害時のエラーハンドリング定義
+- [x] WALのインターフェース定義と永続化実装（書き込みACK条件を明文化）
+- [x] スナップショット作成/復元の最小実装（メタ情報保存含む）
+- [x] 単一ノード前提の耐障害性（クラッシュリカバリの検証）
+- [x] ストレージ障害時のエラーハンドリング定義
 
 ---
 
@@ -66,11 +66,11 @@
 
 * Depends on: PR-01, PR-02
 
-- [ ] Node/Edge スキーマ定義（raw_data/embedding/metadata/provenance/confidence/model_id 等）
-- [ ] Entity Resolution の最小実装（同一性スコア・正規化ルール）
-- [ ] Hyper-Index のメタデータ構造定義（ANN + adjacency 共存）
-- [ ] CRUD API の最小セット（Node/Edge の作成・取得・削除）
-- [ ] ID設計（安定ID/バージョン/スナップショット参照）
+- [x] Node/Edge スキーマ定義（raw_data/embedding/metadata/provenance/confidence/model_id 等）
+- [x] Entity Resolution の最小実装（同一性スコア・正規化ルール）
+- [x] Hyper-Index のメタデータ構造定義（ANN + adjacency 共存）
+- [x] CRUD API の最小セット（Node/Edge の作成・取得・削除）
+- [x] ID設計（安定ID/バージョン/スナップショット参照）
 
 ---
 
@@ -147,14 +147,14 @@
 
 * Depends on: PR-07, PR-06, PR-06.5
 
-- [ ] Vector Search のアンカー特定
-- [ ] Graph Expansion の hop 探索
-- [ ] Context Pruning の初期実装（ノイズ除外）
-- [ ] **ローカル検索**: エンティティ中心の探索 (1-2 hop)
-- [ ] **グローバル検索**: コミュニティ要約を活用したMap-Reduceスタイル回答
-- [ ] **DRIFT検索**: フィードバックループによる動的グラフ拡張
-- [ ] 生成回答の groundedness スコア付与
-- [ ] GraphRAG失敗時のフォールバック（Vector-only回答）
+- [x] Vector Search のアンカー特定
+- [x] Graph Expansion の hop 探索
+- [x] Context Pruning の初期実装（ノイズ除外）
+- [x] **ローカル検索**: エンティティ中心の探索 (1-2 hop)
+- [x] **グローバル検索**: コミュニティ要約を活用したMap-Reduceスタイル回答
+- [x] **DRIFT検索**: フィードバックループによる動的グラフ拡張
+- [x] 生成回答の groundedness スコア付与
+- [x] GraphRAG失敗時のフォールバック（Vector-only回答）
 
 ---
 
