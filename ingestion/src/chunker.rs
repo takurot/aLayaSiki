@@ -1,6 +1,6 @@
 use alayasiki_core::ingest::Chunk;
-use text_splitter::TextSplitter;
 use std::collections::HashMap;
+use text_splitter::TextSplitter;
 
 #[derive(Debug, Clone)]
 pub struct ChunkingConfig {
@@ -17,13 +17,17 @@ impl Default for ChunkingConfig {
     }
 }
 
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait Chunker: Send + Sync {
-    fn chunk<'a>(&'a self, content: &'a str, base_metadata: HashMap<String, String>) -> BoxFuture<'a, Vec<Chunk>>;
+    fn chunk<'a>(
+        &'a self,
+        content: &'a str,
+        base_metadata: HashMap<String, String>,
+    ) -> BoxFuture<'a, Vec<Chunk>>;
 }
 
 pub struct SemanticChunker {
@@ -47,7 +51,11 @@ impl Default for SemanticChunker {
 }
 
 impl Chunker for SemanticChunker {
-    fn chunk<'a>(&'a self, content: &'a str, base_metadata: HashMap<String, String>) -> BoxFuture<'a, Vec<Chunk>> {
+    fn chunk<'a>(
+        &'a self,
+        content: &'a str,
+        base_metadata: HashMap<String, String>,
+    ) -> BoxFuture<'a, Vec<Chunk>> {
         Box::pin(async move {
             let max_chars = self.config.max_chars.max(1);
             let overlap_chars = self.config.overlap_chars.min(max_chars);
@@ -62,19 +70,19 @@ impl Chunker for SemanticChunker {
             for (i, text) in base_chunks.iter().enumerate() {
                 let mut chunk_text = text.clone();
                 if overlap_chars > 0 && i > 0 {
-                    // Logic simplification: if we need overlap, we just grab prev. 
-                    // Note: original code called tail_chars on prev. 
+                    // Logic simplification: if we need overlap, we just grab prev.
+                    // Note: original code called tail_chars on prev.
                     // We need to keep implementation logic same.
                     // But 'self' is captured in async block.
                     // 'content' is used in splitter.
                     // 'base_metadata' moved.
-                    
+
                     if i > 0 {
-                         let prev = &base_chunks[i - 1];
-                         let overlap = tail_chars(prev, overlap_chars);
-                         if !overlap.is_empty() {
+                        let prev = &base_chunks[i - 1];
+                        let overlap = tail_chars(prev, overlap_chars);
+                        if !overlap.is_empty() {
                             chunk_text = format!("{}{}", overlap, chunk_text);
-                         }
+                        }
                     }
                 }
 

@@ -6,8 +6,8 @@ use std::collections::HashMap;
 pub struct Node {
     pub id: u64,
     pub embedding: Vec<f32>,
-    pub data: String,               // Raw text or JSON content
-    pub metadata: HashMap<String, String>, 
+    pub data: String, // Raw text or JSON content
+    pub metadata: HashMap<String, String>,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]

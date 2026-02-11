@@ -10,7 +10,12 @@ pub enum ContentKind {
 }
 
 pub fn detect_content_kind(mime_type: &str, filename: Option<&str>) -> ContentKind {
-    let mime = mime_type.split(';').next().unwrap_or("").trim().to_lowercase();
+    let mime = mime_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
     match mime.as_str() {
         "text/plain" => ContentKind::Text,
         "text/markdown" => ContentKind::Markdown,
@@ -44,7 +49,7 @@ pub fn extract_utf8(bytes: &[u8]) -> Result<String, std::string::FromUtf8Error> 
 pub fn extract_pdf_text(bytes: &[u8]) -> Option<String> {
     // pdf-extract panics on some errors/signals, and handles bytes via Cursor?
     // pdf_extract::extract_text_from_mem (if available) or generic read
-    
+
     // pdf-extract 0.7 API: extract_text(path) or extract_text_from_mem(bytes)
     match pdf_extract::extract_text_from_mem(bytes) {
         Ok(text) => {
@@ -53,7 +58,7 @@ pub fn extract_pdf_text(bytes: &[u8]) -> Option<String> {
             } else {
                 Some(text)
             }
-        },
+        }
         Err(_) => None,
     }
 }

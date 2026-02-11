@@ -44,7 +44,7 @@ impl EntityExtractor for MockEntityExtractor {
         let mut entities = Vec::new();
         // Simple case-insensitive match
         let lower_text = text.to_lowercase();
-        
+
         for (keyword, label) in &self.keywords {
             if lower_text.contains(&keyword.to_lowercase()) {
                 entities.push(Entity {
@@ -54,7 +54,7 @@ impl EntityExtractor for MockEntityExtractor {
                 });
             }
         }
-        
+
         Ok(entities)
     }
 }
@@ -68,8 +68,12 @@ mod tests {
         let extractor = MockEntityExtractor::new();
         let text = "I love programming in Rust and building AI systems.";
         let entities = extractor.extract(text).await.unwrap();
-        
-        assert!(entities.iter().any(|e| e.text == "Rust" && e.label == "Language"));
-        assert!(entities.iter().any(|e| e.text == "AI" && e.label == "Topic"));
+
+        assert!(entities
+            .iter()
+            .any(|e| e.text == "Rust" && e.label == "Language"));
+        assert!(entities
+            .iter()
+            .any(|e| e.text == "AI" && e.label == "Topic"));
     }
 }
