@@ -1,7 +1,7 @@
 use crate::dsl::{QueryMode, QueryRequest, SearchMode};
 use crate::graphrag::{
-    collect_global_node_ids, compute_groundedness, map_community_summaries,
-    reduce_community_summaries, GroundednessInput, DRIFT_EVIDENCE_THRESHOLD, DRIFT_MAX_ITERATIONS,
+    compute_groundedness, map_community_summaries, reduce_community_summaries, GroundednessInput,
+    DRIFT_EVIDENCE_THRESHOLD, DRIFT_MAX_ITERATIONS,
 };
 use crate::planner::{QueryPlan, QueryPlanner};
 use alayasiki_core::embedding::deterministic_embedding;
@@ -306,57 +306,78 @@ impl QueryEngine {
             return Ok((state, plan.clone(), None));
         }
 
-        // MAP: Score community summaries.
-        let ranked = map_community_summaries(&request.query, &self.community_summaries);
-
-        // REDUCE: Synthesize answer from top communities.
-        let max_communities = 5;
-        let global_answer = reduce_community_summaries(&request.query, &ranked, max_communities);
-
-        // Collect evidence nodes from top-ranked community members.
-        let community_node_ids = collect_global_node_ids(&ranked, max_communities);
-
-        // Also run vector search for additional evidence.
+        // Always build filtered evidence first so global synthesis can respect request filters.
         let mut state = self
             .execute_with_plan(request, plan, embedding_model_id)
             .await?;
 
-        // Augment state with community member nodes not already included.
-        let existing_ids: HashSet<u64> = state.nodes.iter().map(|n| n.id).collect();
-        let extra_ids: Vec<u64> = community_node_ids
-            .into_iter()
-            .filter(|id| !existing_ids.contains(id))
+        // MAP: Score community summaries.
+        let ranked = map_community_summaries(&request.query, &self.community_summaries);
+        let relation_filter = collect_relation_filter(request);
+        let time_range = parse_time_range(request)?;
+        let entity_filter: HashSet<&str> = request
+            .filters
+            .entity_type
+            .iter()
+            .map(|value| value.as_str())
             .collect();
 
-        if !extra_ids.is_empty() {
-            let extra_nodes = self.repo.get_nodes_by_ids(&extra_ids).await;
-            for node in extra_nodes {
-                state.nodes.push(RankedNode {
-                    id: node.id,
-                    data: node.data.clone(),
-                    score: 0.05, // Community membership baseline score.
-                    hop: 0,
-                    source: node.metadata.get("source").cloned(),
-                });
-            }
-
-            // Re-sort and re-prune to top_k.
-            state.nodes.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(Ordering::Equal)
-                    .then(a.id.cmp(&b.id))
-            });
-            if state.nodes.len() > request.top_k {
-                let pruned = state.nodes.split_off(request.top_k);
-                for node in pruned {
-                    state.exclusions.push(ExclusionReason {
-                        node_id: Some(node.id),
-                        reason: "pruned_by_top_k".to_string(),
-                    });
+        // Build lookup for top nodes referenced by summaries so we can enforce filters
+        // before producing global synthesis.
+        let all_top_node_ids: Vec<u64> = {
+            let mut seen = HashSet::new();
+            let mut out = Vec::new();
+            for (summary, _) in &ranked {
+                for node_id in &summary.top_nodes {
+                    if seen.insert(*node_id) {
+                        out.push(*node_id);
+                    }
                 }
             }
-        }
+            out
+        };
+        let top_nodes = self.repo.get_nodes_by_ids(&all_top_node_ids).await;
+        let top_node_lookup: HashMap<u64, Node> =
+            top_nodes.into_iter().map(|node| (node.id, node)).collect();
+
+        // Restrict summary candidates by relevance (>0) and request filters.
+        // Relation filters are edge/path-level constraints and cannot be validated
+        // purely from summary top nodes, so summary synthesis is disabled in that case.
+        let relevant_ranked: Vec<(&CommunitySummary, f32)> = if relation_filter.is_empty() {
+            ranked
+                .into_iter()
+                .filter(|(summary, score)| {
+                    *score > 0.0
+                        && summary.top_nodes.iter().any(|node_id| {
+                            top_node_lookup.get(node_id).is_some_and(|node| {
+                                node_passes_filters(node, &entity_filter, time_range)
+                            })
+                        })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let max_communities = 5;
+        let global_answer = if relevant_ranked.is_empty() {
+            let reason = if relation_filter.is_empty() {
+                "global_no_relevant_community_summary"
+            } else {
+                "global_summary_disabled_by_relation_filter"
+            };
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: reason.to_string(),
+            });
+            None
+        } else {
+            Some(reduce_community_summaries(
+                &request.query,
+                &relevant_ranked,
+                max_communities,
+            ))
+        };
 
         plan.steps = vec![
             "vector_search",
@@ -365,7 +386,7 @@ impl QueryEngine {
             "context_pruning",
         ];
 
-        Ok((state, plan.clone(), Some(global_answer)))
+        Ok((state, plan.clone(), global_answer))
     }
 
     // -----------------------------------------------------------------------
@@ -576,35 +597,12 @@ impl QueryEngine {
                 continue;
             };
 
-            if !entity_filter.is_empty() {
-                let entity_type = node.metadata.get("entity_type").map(|value| value.as_str());
-                if entity_type
-                    .map(|value| !entity_filter.contains(value))
-                    .unwrap_or(true)
-                {
-                    exclusions.push(ExclusionReason {
-                        node_id: Some(node_id),
-                        reason: "entity_type_filtered".to_string(),
-                    });
-                    continue;
-                }
-            }
-
-            if let Some((from, to)) = time_range {
-                let timestamp = node
-                    .metadata
-                    .get("timestamp")
-                    .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok());
-                match timestamp {
-                    Some(value) if value >= from && value <= to => {}
-                    _ => {
-                        exclusions.push(ExclusionReason {
-                            node_id: Some(node_id),
-                            reason: "time_range_filtered".to_string(),
-                        });
-                        continue;
-                    }
-                }
+            if let Some(reason) = node_filter_exclusion_reason(node, &entity_filter, time_range) {
+                exclusions.push(ExclusionReason {
+                    node_id: Some(node_id),
+                    reason,
+                });
+                continue;
             }
 
             let lexical_score =
@@ -812,6 +810,43 @@ fn parse_time_range(request: &QueryRequest) -> Result<Option<(NaiveDate, NaiveDa
     })?;
 
     Ok(Some((from, to)))
+}
+
+fn node_filter_exclusion_reason(
+    node: &Node,
+    entity_filter: &HashSet<&str>,
+    time_range: Option<(NaiveDate, NaiveDate)>,
+) -> Option<String> {
+    if !entity_filter.is_empty() {
+        let entity_type = node.metadata.get("entity_type").map(|value| value.as_str());
+        if entity_type
+            .map(|value| !entity_filter.contains(value))
+            .unwrap_or(true)
+        {
+            return Some("entity_type_filtered".to_string());
+        }
+    }
+
+    if let Some((from, to)) = time_range {
+        let timestamp = node
+            .metadata
+            .get("timestamp")
+            .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok());
+        match timestamp {
+            Some(value) if value >= from && value <= to => {}
+            _ => return Some("time_range_filtered".to_string()),
+        }
+    }
+
+    None
+}
+
+fn node_passes_filters(
+    node: &Node,
+    entity_filter: &HashSet<&str>,
+    time_range: Option<(NaiveDate, NaiveDate)>,
+) -> bool {
+    node_filter_exclusion_reason(node, entity_filter, time_range).is_none()
 }
 
 fn generate_answer(query: &str, nodes: &[EvidenceNode]) -> String {

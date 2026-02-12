@@ -297,7 +297,7 @@ async fn test_global_search_uses_community_summaries_for_answer() {
 
     let request = QueryRequest::parse_json(
         r#"{
-            "query": "What are the major themes in this dataset?",
+            "query": "EV production and battery themes",
             "mode": "answer",
             "search_mode": "global",
             "top_k": 10,
@@ -321,6 +321,7 @@ async fn test_global_search_uses_community_summaries_for_answer() {
             .any(|s| s.contains("community")),
         "global search explain should mention community-based processing"
     );
+    assert!(!answer.is_empty());
 }
 
 #[tokio::test]
@@ -352,6 +353,141 @@ async fn test_global_search_without_community_data_falls_back_to_expanded_vector
             .any(|ex| ex.reason.contains("no_community_data")),
         "should note absence of community data in exclusions"
     );
+}
+
+#[tokio::test]
+async fn test_global_search_applies_entity_filters_to_evidence_and_answer() {
+    let (_dir, repo, summaries) = graphrag_repo().await;
+    let engine = QueryEngine::new(repo).with_community_summaries(summaries);
+
+    let request = QueryRequest::parse_json(
+        r#"{
+            "query": "overall themes",
+            "mode": "answer",
+            "search_mode": "global",
+            "top_k": 10,
+            "filters": {
+                "entity_type": ["Company"]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let response = engine.execute(request).await.unwrap();
+
+    // Evidence should not include regulator/university nodes when Company filter is set.
+    let ids: Vec<u64> = response.evidence.nodes.iter().map(|n| n.id).collect();
+    assert!(!ids.contains(&4), "Regulator node must be filtered out");
+    assert!(!ids.contains(&5), "Regulator node must be filtered out");
+    assert!(!ids.contains(&6), "University node must be filtered out");
+    assert!(!ids.contains(&7), "University node must be filtered out");
+}
+
+#[tokio::test]
+async fn test_global_search_answer_respects_filters_when_no_filtered_evidence() {
+    let (_dir, repo, summaries) = graphrag_repo().await;
+    let engine = QueryEngine::new(repo).with_community_summaries(summaries);
+
+    let request = QueryRequest::parse_json(
+        r#"{
+            "query": "overall themes",
+            "mode": "answer",
+            "search_mode": "global",
+            "top_k": 10,
+            "filters": {
+                "entity_type": ["Company"],
+                "time_range": {"from":"2025-01-01","to":"2025-12-31"}
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let response = engine.execute(request).await.unwrap();
+    assert!(
+        response.evidence.nodes.is_empty(),
+        "strict filters should leave no evidence in this fixture"
+    );
+    assert!(
+        response
+            .explain
+            .exclusions
+            .iter()
+            .any(|ex| ex.reason == "global_no_relevant_community_summary"),
+        "global synthesis must be skipped when filtered evidence is empty"
+    );
+    if let Some(answer) = &response.answer {
+        assert!(
+            !answer.contains("Global synthesis"),
+            "answer must not include unfiltered community synthesis"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_global_search_skips_zero_score_community_summaries() {
+    let (_dir, repo, summaries) = graphrag_repo().await;
+    let engine = QueryEngine::new(repo).with_community_summaries(summaries);
+
+    let request = QueryRequest::parse_json(
+        r#"{
+            "query": "quantum medicine genome surgery",
+            "mode": "answer",
+            "search_mode": "global",
+            "top_k": 5
+        }"#,
+    )
+    .unwrap();
+
+    let response = engine.execute(request).await.unwrap();
+    assert!(
+        response
+            .explain
+            .exclusions
+            .iter()
+            .any(|ex| ex.reason == "global_no_relevant_community_summary"),
+        "global mode should skip unrelated zero-score summaries"
+    );
+    if let Some(answer) = &response.answer {
+        assert!(
+            !answer.contains("Global synthesis"),
+            "unrelated query must not produce misleading global synthesis"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_global_search_disables_summary_when_relation_filter_present() {
+    let (_dir, repo, summaries) = graphrag_repo().await;
+    let engine = QueryEngine::new(repo).with_community_summaries(summaries);
+
+    let request = QueryRequest::parse_json(
+        r#"{
+            "query": "EV production",
+            "mode": "answer",
+            "search_mode": "global",
+            "top_k": 5,
+            "filters": {
+                "relation_type": ["competitor_of"]
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let response = engine.execute(request).await.unwrap();
+    assert!(
+        response
+            .explain
+            .exclusions
+            .iter()
+            .any(|ex| ex.reason == "global_summary_disabled_by_relation_filter"),
+        "global summary must be disabled when relation filter is specified"
+    );
+    if let Some(answer) = &response.answer {
+        assert!(
+            !answer.contains("Global synthesis"),
+            "answer must not use community synthesis under relation filter"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
