@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use sha2::{Sha256, Digest};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IngestionRequest {
@@ -48,8 +48,12 @@ impl IngestionRequest {
 
     pub fn idempotency_key(&self) -> Option<&str> {
         match self {
-            IngestionRequest::Text { idempotency_key, .. } => idempotency_key.as_deref(),
-            IngestionRequest::File { idempotency_key, .. } => idempotency_key.as_deref(),
+            IngestionRequest::Text {
+                idempotency_key, ..
+            } => idempotency_key.as_deref(),
+            IngestionRequest::File {
+                idempotency_key, ..
+            } => idempotency_key.as_deref(),
         }
     }
 
@@ -87,7 +91,12 @@ impl ContentHash for IngestionRequest {
                 hasher.update(b"text");
                 hasher.update(content.as_bytes());
             }
-            IngestionRequest::File { content, mime_type, filename, .. } => {
+            IngestionRequest::File {
+                content,
+                mime_type,
+                filename,
+                ..
+            } => {
                 hasher.update(b"file");
                 hasher.update(mime_type.as_bytes());
                 hasher.update(filename.as_bytes());

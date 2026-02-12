@@ -1,4 +1,8 @@
 use crate::dsl::{QueryMode, QueryRequest, SearchMode};
+use crate::graphrag::{
+    compute_groundedness, map_community_summaries, reduce_community_summaries, GroundednessInput,
+    DRIFT_EVIDENCE_THRESHOLD, DRIFT_MAX_ITERATIONS,
+};
 use crate::planner::{QueryPlan, QueryPlanner};
 use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::model::Node;
@@ -7,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use storage::community::CommunitySummary;
 use storage::repo::{RepoError, Repository};
 use thiserror::Error;
 
@@ -87,32 +92,42 @@ pub enum QueryError {
 
 pub struct QueryEngine {
     repo: Arc<Repository>,
+    community_summaries: Vec<CommunitySummary>,
 }
 
 const DEFAULT_EMBEDDING_MODEL_ID: &str = "embedding-default-v1";
 const UNICODE_NGRAM_SIZE: usize = 2;
 
 #[derive(Debug, Clone)]
-struct RankedNode {
-    id: u64,
-    data: String,
-    score: f32,
-    hop: u8,
-    source: Option<String>,
+pub struct RankedNode {
+    pub id: u64,
+    pub data: String,
+    pub score: f32,
+    pub hop: u8,
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct ExecutionState {
-    anchors: Vec<Anchor>,
-    expansion_paths: Vec<ExpansionPath>,
-    exclusions: Vec<ExclusionReason>,
-    nodes: Vec<RankedNode>,
-    edges: Vec<EvidenceEdge>,
+pub struct ExecutionState {
+    pub anchors: Vec<Anchor>,
+    pub expansion_paths: Vec<ExpansionPath>,
+    pub exclusions: Vec<ExclusionReason>,
+    pub nodes: Vec<RankedNode>,
+    pub edges: Vec<EvidenceEdge>,
 }
 
 impl QueryEngine {
     pub fn new(repo: Arc<Repository>) -> Self {
-        Self { repo }
+        Self {
+            repo,
+            community_summaries: Vec::new(),
+        }
+    }
+
+    /// Attach pre-computed community summaries for global search support.
+    pub fn with_community_summaries(mut self, summaries: Vec<CommunitySummary>) -> Self {
+        self.community_summaries = summaries;
+        self
     }
 
     pub async fn execute_json(&self, raw: &str) -> Result<QueryResponse, QueryError> {
@@ -132,30 +147,28 @@ impl QueryEngine {
             .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string());
 
         let mut plan = QueryPlanner::plan(&request);
-        let mut state = self
-            .execute_with_plan(&request, &plan, &effective_model_id)
-            .await?;
 
-        if request.search_mode == SearchMode::Auto
-            && plan.effective_search_mode == SearchMode::Local
-            && state.nodes.len() < 2
-        {
-            let mut drift_plan = plan.clone();
-            drift_plan.effective_search_mode = SearchMode::Drift;
-            drift_plan.expansion_depth = drift_plan.expansion_depth.saturating_add(1).min(8);
+        // Dispatch to the appropriate search mode pipeline.
+        let (state, plan, global_answer) = match plan.effective_search_mode {
+            SearchMode::Global => {
+                self.execute_global(&request, &mut plan, &effective_model_id)
+                    .await?
+            }
+            SearchMode::Drift => {
+                let (state, plan) = self
+                    .execute_drift(&request, &mut plan, &effective_model_id)
+                    .await?;
+                (state, plan, None)
+            }
+            SearchMode::Local | SearchMode::Auto => {
+                let (state, plan) = self
+                    .execute_local_with_auto_fallback(&request, plan, &effective_model_id)
+                    .await?;
+                (state, plan, None)
+            }
+        };
 
-            let mut drift_state = self
-                .execute_with_plan(&request, &drift_plan, &effective_model_id)
-                .await?;
-            drift_state.exclusions.push(ExclusionReason {
-                node_id: None,
-                reason: "auto_fallback_to_drift_due_to_insufficient_evidence".to_string(),
-            });
-
-            plan = drift_plan;
-            state = drift_state;
-        }
-
+        // Build evidence nodes from execution state.
         let evidence_nodes: Vec<EvidenceNode> = state
             .nodes
             .iter()
@@ -168,15 +181,36 @@ impl QueryEngine {
             .collect();
 
         let citations = build_citations(&state.nodes);
-        let groundedness = if evidence_nodes.is_empty() {
-            0.0
-        } else {
-            (evidence_nodes.len() as f32 / request.top_k as f32).min(1.0)
-        };
 
+        // Improved groundedness scoring.
+        let evidence_scores: Vec<f32> = state.nodes.iter().map(|n| n.score).collect();
+        let source_diversity = {
+            let sources: HashSet<&str> = state
+                .nodes
+                .iter()
+                .filter_map(|n| n.source.as_deref())
+                .collect();
+            sources.len()
+        };
+        let has_graph_support = !state.edges.is_empty();
+        let groundedness = compute_groundedness(&GroundednessInput {
+            query: &request.query,
+            evidence_scores: &evidence_scores,
+            evidence_count: evidence_nodes.len(),
+            source_diversity,
+            has_graph_support,
+        });
+
+        // Generate answer based on mode.
         let answer = match request.mode {
             QueryMode::Evidence => None,
-            QueryMode::Answer => Some(generate_answer(&request.query, &evidence_nodes)),
+            QueryMode::Answer => {
+                if let Some(global_ans) = global_answer {
+                    Some(global_ans)
+                } else {
+                    Some(generate_answer(&request.query, &evidence_nodes))
+                }
+            }
         };
 
         let snapshot_id = match request.snapshot_id.clone() {
@@ -202,6 +236,227 @@ impl QueryEngine {
             model_id: Some(effective_model_id),
             snapshot_id,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Local Search with Auto-fallback to DRIFT
+    // -----------------------------------------------------------------------
+    async fn execute_local_with_auto_fallback(
+        &self,
+        request: &QueryRequest,
+        mut plan: QueryPlan,
+        embedding_model_id: &str,
+    ) -> Result<(ExecutionState, QueryPlan), QueryError> {
+        let mut state = self
+            .execute_with_plan(request, &plan, embedding_model_id)
+            .await?;
+
+        // Record vector-only fallback when graph expansion added nothing.
+        if state.edges.is_empty() && !state.nodes.is_empty() {
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "no_graph_expansion_vector_only_fallback".to_string(),
+            });
+        }
+
+        // Auto mode: fall back to DRIFT if local yields insufficient evidence.
+        if request.search_mode == SearchMode::Auto
+            && plan.effective_search_mode == SearchMode::Local
+            && state.nodes.len() < 2
+        {
+            let (drift_state, drift_plan) = self
+                .execute_drift(request, &mut plan, embedding_model_id)
+                .await?;
+            let mut drift_state = drift_state;
+            drift_state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "auto_fallback_to_drift_due_to_insufficient_evidence".to_string(),
+            });
+
+            return Ok((drift_state, drift_plan));
+        }
+
+        Ok((state, plan))
+    }
+
+    // -----------------------------------------------------------------------
+    // Global Search: Community Summary Map-Reduce
+    // -----------------------------------------------------------------------
+    async fn execute_global(
+        &self,
+        request: &QueryRequest,
+        plan: &mut QueryPlan,
+        embedding_model_id: &str,
+    ) -> Result<(ExecutionState, QueryPlan, Option<String>), QueryError> {
+        if self.community_summaries.is_empty() {
+            // Fallback: no community data available — run expanded vector search.
+            plan.steps = vec![
+                "vector_search",
+                "graph_expansion",
+                "context_pruning",
+                "global_fallback_no_community_data",
+            ];
+            let mut state = self
+                .execute_with_plan(request, plan, embedding_model_id)
+                .await?;
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "no_community_data_fallback_to_vector".to_string(),
+            });
+            return Ok((state, plan.clone(), None));
+        }
+
+        // Always build filtered evidence first so global synthesis can respect request filters.
+        let mut state = self
+            .execute_with_plan(request, plan, embedding_model_id)
+            .await?;
+
+        // MAP: Score community summaries.
+        let ranked = map_community_summaries(&request.query, &self.community_summaries);
+        let relation_filter = collect_relation_filter(request);
+        let time_range = parse_time_range(request)?;
+        let entity_filter: HashSet<&str> = request
+            .filters
+            .entity_type
+            .iter()
+            .map(|value| value.as_str())
+            .collect();
+
+        // Build lookup for top nodes referenced by summaries so we can enforce filters
+        // before producing global synthesis.
+        let all_top_node_ids: Vec<u64> = {
+            let mut seen = HashSet::new();
+            let mut out = Vec::new();
+            for (summary, _) in &ranked {
+                for node_id in &summary.top_nodes {
+                    if seen.insert(*node_id) {
+                        out.push(*node_id);
+                    }
+                }
+            }
+            out
+        };
+        let top_nodes = self.repo.get_nodes_by_ids(&all_top_node_ids).await;
+        let top_node_lookup: HashMap<u64, Node> =
+            top_nodes.into_iter().map(|node| (node.id, node)).collect();
+
+        // Restrict summary candidates by relevance (>0) and request filters.
+        // Relation filters are edge/path-level constraints and cannot be validated
+        // purely from summary top nodes, so summary synthesis is disabled in that case.
+        let relevant_ranked: Vec<(&CommunitySummary, f32)> = if relation_filter.is_empty() {
+            ranked
+                .into_iter()
+                .filter(|(summary, score)| {
+                    *score > 0.0
+                        && summary.top_nodes.iter().any(|node_id| {
+                            top_node_lookup.get(node_id).is_some_and(|node| {
+                                node_passes_filters(node, &entity_filter, time_range)
+                            })
+                        })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let max_communities = 5;
+        let global_answer = if relevant_ranked.is_empty() {
+            let reason = if relation_filter.is_empty() {
+                "global_no_relevant_community_summary"
+            } else {
+                "global_summary_disabled_by_relation_filter"
+            };
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: reason.to_string(),
+            });
+            None
+        } else {
+            Some(reduce_community_summaries(
+                &request.query,
+                &relevant_ranked,
+                max_communities,
+            ))
+        };
+
+        plan.steps = vec![
+            "vector_search",
+            "community_map_reduce",
+            "graph_expansion",
+            "context_pruning",
+        ];
+
+        Ok((state, plan.clone(), global_answer))
+    }
+
+    // -----------------------------------------------------------------------
+    // DRIFT Search: Dynamic Reasoning via Iterative Feedback and Traversals
+    // -----------------------------------------------------------------------
+    async fn execute_drift(
+        &self,
+        request: &QueryRequest,
+        plan: &mut QueryPlan,
+        embedding_model_id: &str,
+    ) -> Result<(ExecutionState, QueryPlan), QueryError> {
+        plan.effective_search_mode = SearchMode::Drift;
+
+        let mut best_state: Option<ExecutionState> = None;
+        let initial_depth = plan.expansion_depth;
+
+        for iteration in 0..DRIFT_MAX_ITERATIONS {
+            let mut iter_plan = plan.clone();
+            // Each DRIFT iteration expands the search depth progressively.
+            iter_plan.expansion_depth = (initial_depth + iteration as u8).min(8);
+            // Increase vector candidates each round.
+            iter_plan.vector_top_k = plan.vector_top_k.saturating_add(iteration * 2).min(50);
+
+            let state = self
+                .execute_with_plan(request, &iter_plan, embedding_model_id)
+                .await?;
+
+            let is_sufficient = state.nodes.len() >= DRIFT_EVIDENCE_THRESHOLD
+                || (iteration > 0
+                    && best_state
+                        .as_ref()
+                        .map(|prev| state.nodes.len() <= prev.nodes.len())
+                        .unwrap_or(false));
+
+            if state.nodes.len() > best_state.as_ref().map(|s| s.nodes.len()).unwrap_or(0) {
+                best_state = Some(state);
+            }
+
+            if is_sufficient {
+                break;
+            }
+        }
+
+        let mut state = best_state.unwrap_or(ExecutionState {
+            anchors: Vec::new(),
+            expansion_paths: Vec::new(),
+            exclusions: vec![ExclusionReason {
+                node_id: None,
+                reason: "drift_no_evidence_found".to_string(),
+            }],
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        });
+
+        plan.steps = vec![
+            "vector_search",
+            "drift_iterative_expansion",
+            "graph_expansion",
+            "context_pruning",
+        ];
+
+        // If drift still yielded nothing, note it in exclusions.
+        if state.nodes.is_empty() {
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "drift_exhausted_no_evidence".to_string(),
+            });
+        }
+
+        Ok((state, plan.clone()))
     }
 
     async fn execute_with_plan(
@@ -342,35 +597,12 @@ impl QueryEngine {
                 continue;
             };
 
-            if !entity_filter.is_empty() {
-                let entity_type = node.metadata.get("entity_type").map(|value| value.as_str());
-                if entity_type
-                    .map(|value| !entity_filter.contains(value))
-                    .unwrap_or(true)
-                {
-                    exclusions.push(ExclusionReason {
-                        node_id: Some(node_id),
-                        reason: "entity_type_filtered".to_string(),
-                    });
-                    continue;
-                }
-            }
-
-            if let Some((from, to)) = time_range {
-                let timestamp = node
-                    .metadata
-                    .get("timestamp")
-                    .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok());
-                match timestamp {
-                    Some(value) if value >= from && value <= to => {}
-                    _ => {
-                        exclusions.push(ExclusionReason {
-                            node_id: Some(node_id),
-                            reason: "time_range_filtered".to_string(),
-                        });
-                        continue;
-                    }
-                }
+            if let Some(reason) = node_filter_exclusion_reason(node, &entity_filter, time_range) {
+                exclusions.push(ExclusionReason {
+                    node_id: Some(node_id),
+                    reason,
+                });
+                continue;
             }
 
             let lexical_score =
@@ -578,6 +810,43 @@ fn parse_time_range(request: &QueryRequest) -> Result<Option<(NaiveDate, NaiveDa
     })?;
 
     Ok(Some((from, to)))
+}
+
+fn node_filter_exclusion_reason(
+    node: &Node,
+    entity_filter: &HashSet<&str>,
+    time_range: Option<(NaiveDate, NaiveDate)>,
+) -> Option<String> {
+    if !entity_filter.is_empty() {
+        let entity_type = node.metadata.get("entity_type").map(|value| value.as_str());
+        if entity_type
+            .map(|value| !entity_filter.contains(value))
+            .unwrap_or(true)
+        {
+            return Some("entity_type_filtered".to_string());
+        }
+    }
+
+    if let Some((from, to)) = time_range {
+        let timestamp = node
+            .metadata
+            .get("timestamp")
+            .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok());
+        match timestamp {
+            Some(value) if value >= from && value <= to => {}
+            _ => return Some("time_range_filtered".to_string()),
+        }
+    }
+
+    None
+}
+
+fn node_passes_filters(
+    node: &Node,
+    entity_filter: &HashSet<&str>,
+    time_range: Option<(NaiveDate, NaiveDate)>,
+) -> bool {
+    node_filter_exclusion_reason(node, entity_filter, time_range).is_none()
 }
 
 fn generate_answer(query: &str, nodes: &[EvidenceNode]) -> String {

@@ -1,5 +1,5 @@
-use rkyv::{Archive, Deserialize, Serialize};
 use bytecheck::CheckBytes;
+use rkyv::{Archive, Deserialize, Serialize};
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, CheckBytes)]
 #[archive_attr(repr(C))]
@@ -37,8 +37,8 @@ mod tests {
 
         // Deserialize (Zero-copy access with validation)
         // check_archived_root verifies the archive's integrity without full deserialization
-        let archived = rkyv::check_archived_root::<Node>(&bytes[..])
-            .expect("failed to verify archive");
+        let archived =
+            rkyv::check_archived_root::<Node>(&bytes[..]).expect("failed to verify archive");
 
         assert_eq!(archived.id, 1);
         assert_eq!(archived.embedding.len(), 3);

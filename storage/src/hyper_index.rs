@@ -1,4 +1,4 @@
-use crate::index::{LinearAnnIndex, AdjacencyGraph};
+use crate::index::{AdjacencyGraph, LinearAnnIndex};
 use std::collections::HashMap;
 
 /// HyperIndex combines Vector and Graph indexes with ID mapping
@@ -22,7 +22,13 @@ impl HyperIndex {
         self.vector_index.insert(id, embedding);
     }
 
-    pub fn insert_edge(&mut self, source: u64, target: u64, relation: impl Into<String>, weight: f32) {
+    pub fn insert_edge(
+        &mut self,
+        source: u64,
+        target: u64,
+        relation: impl Into<String>,
+        weight: f32,
+    ) {
         self.graph_index.add_edge(source, target, relation, weight);
     }
 
@@ -67,15 +73,15 @@ mod tests {
     #[test]
     fn test_hyper_index_vector_graph() {
         let mut index = HyperIndex::new();
-        
+
         index.insert_node(1, vec![1.0, 0.0]);
         index.insert_node(2, vec![0.0, 1.0]);
         index.insert_edge(1, 2, "related", 1.0);
-        
+
         // Vector search
         let results = index.search_vector(&[1.0, 0.0], 1);
         assert_eq!(results[0].0, 1);
-        
+
         // Graph expansion
         let neighbors = index.expand_graph(1, 1);
         assert_eq!(neighbors.len(), 1);
@@ -87,7 +93,7 @@ mod tests {
         let mut index = HyperIndex::new();
         index.insert_node(1, vec![1.0]);
         index.register_alias("Alice", 1);
-        
+
         assert_eq!(index.resolve_alias("Alice"), Some(1));
         assert_eq!(index.resolve_alias("Bob"), None);
     }
