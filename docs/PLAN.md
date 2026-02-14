@@ -246,6 +246,18 @@
 
 ---
 
+## PR-14.5: E2E/CI/ベンチ基盤拡充 (NEW)
+
+* Depends on: PR-05, PR-07, PR-14
+
+- [x] **E2E統合テスト追加**: ingest -> query の一気通貫テスト（フィルタ/引用/再現性）を追加
+- [x] **CIワークフロー拡充**: `fmt` / `clippy` / `cargo test --workspace` を必須化
+- [x] **E2Eジョブ追加**: `cargo test -p ingestion --test e2e_pipeline_test` をCIで常時実行
+- [x] **ベンチスモーク追加**: Criterionベースのストレージ検索ベンチをCIで定期実行
+- [ ] Python ANNベンチ（faiss/usearch）のCIジョブ化と成果物保存
+
+---
+
 ## PR-15: ドキュメント整備
 
 * Depends on: PR-13, PR-14
@@ -285,6 +297,7 @@
 - PR-13 → PR-13.5/15
 - PR-13.5 → PR-15 (NEW: 可視化UI)
 - PR-14 → PR-15
+- PR-14.5 → PR-15 (NEW: 品質ゲートと性能計測の継続運用)
 - PR-16 → 商用化フェーズのHA/冗長性
 
 ---

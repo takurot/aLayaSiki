@@ -21,3 +21,4 @@ anyhow = "1.0"
 tempfile = "3.3"
 slm = { path = "../slm" }
 async-trait = "0.1"
+query = { path = "../query" }
