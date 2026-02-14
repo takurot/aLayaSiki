@@ -255,7 +255,9 @@
 - [x] **E2Eジョブ追加**: `cargo test -p ingestion --test e2e_pipeline_test` をCIで常時実行
 - [x] **ベンチスモーク追加**: Criterionベースのストレージ検索ベンチをCIで定期実行
 - [x] **実運用レイテンシ評価ベンチ追加**: read:write=9:1 / 並列ワーカーで p50/p95/p99 を算出
-- [ ] Python ANNベンチ（faiss/usearch）のCIジョブ化と成果物保存
+- [x] **ベンチ回帰ゲート追加**: 実運用レイテンシベンチで p95/throughput 閾値超過時にCI fail
+- [x] Python ANNベンチ（faiss/usearch）のCIジョブ化と成果物保存
+- [x] Python ANNベンチの baseline 比較（回帰率チェック）をCIに追加
 
 ---
 

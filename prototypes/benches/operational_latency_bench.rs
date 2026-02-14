@@ -27,6 +27,10 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn env_f64(key: &str) -> Option<f64> {
+    env::var(key).ok().and_then(|v| v.parse::<f64>().ok())
+}
+
 fn percentile_ns(samples: &[u128], p: f64) -> u128 {
     if samples.is_empty() {
         return 0;
@@ -201,4 +205,35 @@ async fn main() {
         fmt_ns(percentile_ns(&write_samples, 0.95)),
         fmt_ns(percentile_ns(&write_samples, 0.99))
     );
+
+    let read_p95_ms = percentile_ns(&read_samples, 0.95) as f64 / 1_000_000.0;
+    let write_p95_ms = percentile_ns(&write_samples, 0.95) as f64 / 1_000_000.0;
+    let min_throughput = env_f64("ALAYASIKI_BENCH_MIN_THROUGHPUT");
+    let max_read_p95_ms = env_f64("ALAYASIKI_BENCH_MAX_READ_P95_MS");
+    let max_write_p95_ms = env_f64("ALAYASIKI_BENCH_MAX_WRITE_P95_MS");
+
+    if let Some(limit) = min_throughput {
+        assert!(
+            throughput >= limit,
+            "throughput regression: {:.2} ops/s < {:.2} ops/s",
+            throughput,
+            limit
+        );
+    }
+    if let Some(limit) = max_read_p95_ms {
+        assert!(
+            read_p95_ms <= limit,
+            "read p95 regression: {:.3} ms > {:.3} ms",
+            read_p95_ms,
+            limit
+        );
+    }
+    if let Some(limit) = max_write_p95_ms {
+        assert!(
+            write_p95_ms <= limit,
+            "write p95 regression: {:.3} ms > {:.3} ms",
+            write_p95_ms,
+            limit
+        );
+    }
 }

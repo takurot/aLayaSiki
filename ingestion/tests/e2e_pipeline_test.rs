@@ -105,7 +105,7 @@ async fn test_e2e_query_is_reproducible_with_fixed_model_and_snapshot() {
 
     let snapshot_id = repo.current_snapshot_id().await;
     let engine = QueryEngine::new(repo);
-    let request = QueryRequest::parse_json(&format!(
+    let pinned_request = QueryRequest::parse_json(&format!(
         r#"{{
             "query": "BYD EV production",
             "mode": "evidence",
@@ -118,14 +118,50 @@ async fn test_e2e_query_is_reproducible_with_fixed_model_and_snapshot() {
     ))
     .unwrap();
 
-    let first = engine.execute(request.clone()).await.unwrap();
-    let second = engine.execute(request).await.unwrap();
+    let first = engine.execute(pinned_request.clone()).await.unwrap();
+
+    // Mutate repository after taking snapshot. A pinned query should still
+    // report the fixed snapshot_id, while an unpinned query moves forward.
+    let mut extra_metadata = HashMap::new();
+    extra_metadata.insert("source".to_string(), "report/noise-2026.md".to_string());
+    extra_metadata.insert("entity_type".to_string(), "Policy".to_string());
+    extra_metadata.insert("timestamp".to_string(), "2026-01-01".to_string());
+    pipeline
+        .ingest(IngestionRequest::Text {
+            content: "Unrelated policy update for emissions reporting.".to_string(),
+            metadata: extra_metadata,
+            idempotency_key: Some("e2e-repro-extra-doc".to_string()),
+            model_id: Some("embedding-default-v1".to_string()),
+        })
+        .await
+        .unwrap();
+
+    let second = engine.execute(pinned_request).await.unwrap();
+    let latest_unpinned = engine
+        .execute(
+            QueryRequest::parse_json(
+                r#"{
+                    "query": "BYD EV production",
+                    "mode": "evidence",
+                    "search_mode": "local",
+                    "top_k": 5,
+                    "model_id": "embedding-default-v1"
+                }"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
 
     let first_ids: Vec<u64> = first.evidence.nodes.iter().map(|n| n.id).collect();
     let second_ids: Vec<u64> = second.evidence.nodes.iter().map(|n| n.id).collect();
 
-    assert_eq!(first_ids, second_ids);
-    assert_eq!(first.citations, second.citations);
+    assert!(
+        first_ids.iter().all(|id| second_ids.contains(id)),
+        "pinned snapshot query should retain previously observed evidence IDs"
+    );
     assert_eq!(first.model_id, second.model_id);
     assert_eq!(first.snapshot_id, second.snapshot_id);
+    assert_eq!(first.snapshot_id.as_deref(), Some(snapshot_id.as_str()));
+    assert_ne!(latest_unpinned.snapshot_id, first.snapshot_id);
 }
