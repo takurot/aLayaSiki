@@ -32,6 +32,12 @@ impl HyperIndex {
         self.graph_index.add_edge(source, target, relation, weight);
     }
 
+    /// Insert or update an edge. Replaces weight if same (source, target, relation) exists.
+    pub fn upsert_edge(&mut self, source: u64, target: u64, relation: &str, weight: f32) {
+        self.graph_index
+            .upsert_edge(source, target, relation, weight);
+    }
+
     pub fn remove_node(&mut self, id: u64) {
         self.vector_index.delete(id);
         self.graph_index.remove_node(id);

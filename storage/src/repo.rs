@@ -202,10 +202,13 @@ impl Repository {
                 }
                 IndexMutation::PutEdge(edge) => {
                     let key = (edge.source, edge.target, edge.relation.clone());
-                    if !edge.metadata.is_empty() {
+                    // Always update: replace with new metadata or clear stale provenance
+                    if edge.metadata.is_empty() {
+                        edge_meta.remove(&key);
+                    } else {
                         edge_meta.insert(key, edge.metadata.clone());
                     }
-                    index.insert_edge(edge.source, edge.target, edge.relation, edge.weight);
+                    index.upsert_edge(edge.source, edge.target, &edge.relation, edge.weight);
                 }
                 IndexMutation::DeleteNode(id) => {
                     nodes.remove(&id);
@@ -235,6 +238,18 @@ impl Repository {
             .get(&(source, target, relation.to_string()))
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Bulk-get metadata for multiple edges in a single lock acquisition.
+    /// Returns a map from (source, target, relation) to metadata.
+    pub async fn get_edge_metadata_bulk(
+        &self,
+        keys: &[(u64, u64, String)],
+    ) -> HashMap<EdgeMetaKey, HashMap<String, String>> {
+        let edge_meta = self.edge_metadata.read().await;
+        keys.iter()
+            .filter_map(|key| edge_meta.get(key).map(|meta| (key.clone(), meta.clone())))
+            .collect()
     }
 
     pub async fn current_snapshot_id(&self) -> String {
@@ -354,11 +369,13 @@ fn apply_replayed_entry(
             h_index.insert_node(id, embedding);
         }
         WalEntry::PutEdge(edge) => {
-            if !edge.metadata.is_empty() {
-                let key = (edge.source, edge.target, edge.relation.clone());
+            let key = (edge.source, edge.target, edge.relation.clone());
+            if edge.metadata.is_empty() {
+                edge_meta.remove(&key);
+            } else {
                 edge_meta.insert(key, edge.metadata.clone());
             }
-            h_index.insert_edge(edge.source, edge.target, edge.relation.clone(), edge.weight);
+            h_index.upsert_edge(edge.source, edge.target, &edge.relation, edge.weight);
         }
         WalEntry::Delete(id) => {
             node_map.remove(id);
@@ -390,11 +407,13 @@ fn apply_replayed_tx_operation(
             h_index.insert_node(id, embedding);
         }
         TxOperation::PutEdge(edge) => {
-            if !edge.metadata.is_empty() {
-                let key = (edge.source, edge.target, edge.relation.clone());
+            let key = (edge.source, edge.target, edge.relation.clone());
+            if edge.metadata.is_empty() {
+                edge_meta.remove(&key);
+            } else {
                 edge_meta.insert(key, edge.metadata.clone());
             }
-            h_index.insert_edge(edge.source, edge.target, edge.relation.clone(), edge.weight);
+            h_index.upsert_edge(edge.source, edge.target, &edge.relation, edge.weight);
         }
         TxOperation::Delete(id) => {
             node_map.remove(id);

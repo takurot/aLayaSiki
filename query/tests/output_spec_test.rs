@@ -618,3 +618,203 @@ async fn test_response_json_matches_spec_structure() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// 7. Edge update boundary cases (review feedback)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_edge_update_with_empty_metadata_clears_old_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("edge_clear.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    repo.put_node(Node::new(
+        1,
+        deterministic_embedding("A", MODEL_ID, DIMS),
+        "NodeA".to_string(),
+    ))
+    .await
+    .unwrap();
+    repo.put_node(Node::new(
+        2,
+        deterministic_embedding("B", MODEL_ID, DIMS),
+        "NodeB".to_string(),
+    ))
+    .await
+    .unwrap();
+
+    // Insert edge WITH provenance metadata
+    let mut edge_v1 = Edge::new(1, 2, "links", 0.9);
+    edge_v1.metadata.insert(
+        "extraction_model_id".to_string(),
+        "old-model-v1".to_string(),
+    );
+    repo.put_edge(edge_v1).await.unwrap();
+
+    // Verify provenance is stored
+    let meta = repo.get_edge_metadata(1, 2, "links").await;
+    assert_eq!(meta.get("extraction_model_id").unwrap(), "old-model-v1");
+
+    // Update edge with EMPTY metadata — must clear old provenance
+    let edge_v2 = Edge::new(1, 2, "links", 0.95);
+    repo.put_edge(edge_v2).await.unwrap();
+
+    let meta_after = repo.get_edge_metadata(1, 2, "links").await;
+    assert!(
+        meta_after.is_empty(),
+        "empty metadata update must clear stale provenance, got: {:?}",
+        meta_after
+    );
+}
+
+#[tokio::test]
+async fn test_edge_update_replaces_provenance_not_appends() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("edge_replace.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    repo.put_node(Node::new(
+        1,
+        deterministic_embedding("A", MODEL_ID, DIMS),
+        "NodeA".to_string(),
+    ))
+    .await
+    .unwrap();
+    repo.put_node(Node::new(
+        2,
+        deterministic_embedding("B", MODEL_ID, DIMS),
+        "NodeB".to_string(),
+    ))
+    .await
+    .unwrap();
+
+    // V1: old model
+    let mut edge_v1 = Edge::new(1, 2, "links", 0.8);
+    edge_v1
+        .metadata
+        .insert("extraction_model_id".to_string(), "old-model".to_string());
+    edge_v1
+        .metadata
+        .insert("source".to_string(), "old-source.pdf".to_string());
+    repo.put_edge(edge_v1).await.unwrap();
+
+    // V2: new model, different metadata
+    let mut edge_v2 = Edge::new(1, 2, "links", 0.95);
+    edge_v2.metadata.insert(
+        "extraction_model_id".to_string(),
+        "new-model-v2".to_string(),
+    );
+    // Note: no "source" key in v2
+    repo.put_edge(edge_v2).await.unwrap();
+
+    let meta = repo.get_edge_metadata(1, 2, "links").await;
+    assert_eq!(
+        meta.get("extraction_model_id").unwrap(),
+        "new-model-v2",
+        "provenance must be fully replaced"
+    );
+    assert!(
+        !meta.contains_key("source"),
+        "old 'source' key must not persist after replacement"
+    );
+}
+
+#[tokio::test]
+async fn test_edge_upsert_updates_weight_in_graph_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("edge_upsert.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    repo.put_node(Node::new(
+        1,
+        deterministic_embedding("A", MODEL_ID, DIMS),
+        "NodeA".to_string(),
+    ))
+    .await
+    .unwrap();
+    repo.put_node(Node::new(
+        2,
+        deterministic_embedding("B", MODEL_ID, DIMS),
+        "NodeB".to_string(),
+    ))
+    .await
+    .unwrap();
+
+    // Insert edge with weight 0.5
+    repo.put_edge(Edge::new(1, 2, "links", 0.5)).await.unwrap();
+
+    // Upsert same edge with weight 0.9
+    repo.put_edge(Edge::new(1, 2, "links", 0.9)).await.unwrap();
+
+    // Graph index should have exactly 1 edge (not 2)
+    let index = repo.hyper_index.read().await;
+    let neighbors = index.graph_index.neighbors(1);
+    let matching: Vec<_> = neighbors
+        .iter()
+        .filter(|(t, r, _)| *t == 2 && r == "links")
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "upsert should produce exactly one edge, not duplicate"
+    );
+    assert!(
+        (matching[0].2 - 0.9).abs() < f32::EPSILON,
+        "weight should be updated to 0.9, got {}",
+        matching[0].2
+    );
+}
+
+#[tokio::test]
+async fn test_edge_upsert_survives_wal_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("edge_upsert_replay.wal");
+
+    // 1. Insert then update edge
+    {
+        let repo = Repository::open(&wal_path).await.unwrap();
+        repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+            .await
+            .unwrap();
+        repo.put_node(Node::new(2, vec![2.0], "N2".to_string()))
+            .await
+            .unwrap();
+
+        let mut edge_v1 = Edge::new(1, 2, "links", 0.5);
+        edge_v1
+            .metadata
+            .insert("extraction_model_id".to_string(), "old".to_string());
+        repo.put_edge(edge_v1).await.unwrap();
+
+        let mut edge_v2 = Edge::new(1, 2, "links", 0.95);
+        edge_v2
+            .metadata
+            .insert("extraction_model_id".to_string(), "new".to_string());
+        repo.put_edge(edge_v2).await.unwrap();
+    }
+
+    // 2. Reopen — replay must produce upserted state
+    {
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        let index = repo.hyper_index.read().await;
+        let neighbors = index.graph_index.neighbors(1);
+        let matching: Vec<_> = neighbors
+            .iter()
+            .filter(|(t, r, _)| *t == 2 && r == "links")
+            .collect();
+        assert_eq!(matching.len(), 1, "replay must upsert, not append");
+        assert!(
+            (matching[0].2 - 0.95).abs() < f32::EPSILON,
+            "replayed weight should be 0.95"
+        );
+
+        let meta = repo.get_edge_metadata(1, 2, "links").await;
+        assert_eq!(
+            meta.get("extraction_model_id").unwrap(),
+            "new",
+            "replayed provenance should be the latest"
+        );
+    }
+}

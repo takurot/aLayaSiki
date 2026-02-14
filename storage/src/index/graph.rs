@@ -23,6 +23,20 @@ impl AdjacencyGraph {
             .push((target, relation.into(), weight));
     }
 
+    /// Insert or update an edge. If an edge with the same (source, target, relation) exists,
+    /// its weight is replaced. Otherwise a new entry is appended.
+    pub fn upsert_edge(&mut self, source: u64, target: u64, relation: &str, weight: f32) {
+        let edges = self.adjacency.entry(source).or_default();
+        if let Some(existing) = edges
+            .iter_mut()
+            .find(|(t, r, _)| *t == target && r == relation)
+        {
+            existing.2 = weight;
+        } else {
+            edges.push((target, relation.to_string(), weight));
+        }
+    }
+
     pub fn remove_edge(&mut self, source: u64, target: u64) -> bool {
         if let Some(edges) = self.adjacency.get_mut(&source) {
             let len_before = edges.len();

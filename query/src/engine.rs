@@ -744,19 +744,23 @@ impl QueryEngine {
             .filter(|edge| relation_is_allowed(edge.relation.as_str(), &relation_filter))
             .collect();
 
-        // Enrich edges with provenance from repository edge metadata
-        for edge in &mut edges {
-            let meta = self
-                .repo
-                .get_edge_metadata(edge.source, edge.target, &edge.relation)
-                .await;
-            if !meta.is_empty() {
-                edge.provenance = Provenance {
-                    source: meta.get("source").cloned(),
-                    extraction_model_id: meta.get("extraction_model_id").cloned(),
-                    snapshot_id: meta.get("snapshot_id").cloned(),
-                    ingested_at: meta.get("ingested_at").cloned(),
-                };
+        // Enrich edges with provenance — single lock acquisition via bulk API
+        {
+            let edge_keys: Vec<(u64, u64, String)> = edges
+                .iter()
+                .map(|e| (e.source, e.target, e.relation.clone()))
+                .collect();
+            let all_meta = self.repo.get_edge_metadata_bulk(&edge_keys).await;
+            for edge in &mut edges {
+                let key = (edge.source, edge.target, edge.relation.clone());
+                if let Some(meta) = all_meta.get(&key) {
+                    edge.provenance = Provenance {
+                        source: meta.get("source").cloned(),
+                        extraction_model_id: meta.get("extraction_model_id").cloned(),
+                        snapshot_id: meta.get("snapshot_id").cloned(),
+                        ingested_at: meta.get("ingested_at").cloned(),
+                    };
+                }
             }
         }
 
@@ -1003,16 +1007,22 @@ fn build_citations(nodes: &[RankedNode]) -> Vec<Citation> {
     out
 }
 
-fn dedup_edges(mut edges: Vec<InternalEdge>) -> Vec<InternalEdge> {
-    let mut seen = BTreeSet::new();
-    edges.retain(|edge| seen.insert((edge.source, edge.target, edge.relation.clone())));
-    edges.sort_by(|a, b| {
+fn dedup_edges(edges: Vec<InternalEdge>) -> Vec<InternalEdge> {
+    // Last-wins dedup: when the same (source, target, relation) appears multiple times,
+    // keep the last occurrence which has the most up-to-date weight/provenance.
+    let mut map: HashMap<(u64, u64, String), InternalEdge> = HashMap::new();
+    for edge in edges {
+        let key = (edge.source, edge.target, edge.relation.clone());
+        map.insert(key, edge);
+    }
+    let mut out: Vec<InternalEdge> = map.into_values().collect();
+    out.sort_by(|a, b| {
         a.source
             .cmp(&b.source)
             .then(a.target.cmp(&b.target))
             .then(a.relation.cmp(&b.relation))
     });
-    edges
+    out
 }
 
 fn dedup_paths(mut paths: Vec<ExpansionPath>) -> Vec<ExpansionPath> {
