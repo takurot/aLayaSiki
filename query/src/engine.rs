@@ -11,9 +11,28 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 use storage::community::CommunitySummary;
 use storage::repo::{RepoError, Repository};
 use thiserror::Error;
+
+/// Provenance metadata attached to evidence items.
+/// Captures the data lineage: where it came from and how it was extracted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Provenance {
+    /// Original source document (e.g. "s3://bucket/file.pdf")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Model that extracted/processed this data
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extraction_model_id: Option<String>,
+    /// Snapshot when this data was ingested
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    /// Timestamp of ingestion (RFC3339)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ingested_at: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceNode {
@@ -21,6 +40,8 @@ pub struct EvidenceNode {
     pub data: String,
     pub score: f32,
     pub hop: u8,
+    pub provenance: Provenance,
+    pub confidence: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,6 +50,8 @@ pub struct EvidenceEdge {
     pub target: u64,
     pub relation: String,
     pub weight: f32,
+    pub provenance: Provenance,
+    pub confidence: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,6 +64,8 @@ pub struct EvidenceSubgraph {
 pub struct Citation {
     pub source: String,
     pub span: [usize; 2],
+    pub node_id: u64,
+    pub confidence: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +105,9 @@ pub struct QueryResponse {
     pub explain: ExplainPlan,
     pub model_id: Option<String>,
     pub snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_travel: Option<String>,
+    pub latency_ms: u64,
 }
 
 #[derive(Debug, Error)]
@@ -105,6 +133,21 @@ pub struct RankedNode {
     pub score: f32,
     pub hop: u8,
     pub source: Option<String>,
+    pub extraction_model_id: Option<String>,
+    pub node_snapshot_id: Option<String>,
+    pub ingested_at: Option<String>,
+    pub confidence: f32,
+}
+
+/// Internal edge representation during query execution (before final output).
+#[derive(Debug, Clone)]
+pub struct InternalEdge {
+    pub source: u64,
+    pub target: u64,
+    pub relation: String,
+    pub weight: f32,
+    pub provenance: Provenance,
+    pub confidence: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -113,7 +156,7 @@ pub struct ExecutionState {
     pub expansion_paths: Vec<ExpansionPath>,
     pub exclusions: Vec<ExclusionReason>,
     pub nodes: Vec<RankedNode>,
-    pub edges: Vec<EvidenceEdge>,
+    pub edges: Vec<InternalEdge>,
 }
 
 impl QueryEngine {
@@ -137,6 +180,8 @@ impl QueryEngine {
     }
 
     pub async fn execute(&self, request: QueryRequest) -> Result<QueryResponse, QueryError> {
+        let start = Instant::now();
+
         request
             .validate()
             .map_err(|err| QueryError::InvalidQuery(err.to_string()))?;
@@ -168,7 +213,7 @@ impl QueryEngine {
             }
         };
 
-        // Build evidence nodes from execution state.
+        // Build evidence nodes with provenance from execution state.
         let evidence_nodes: Vec<EvidenceNode> = state
             .nodes
             .iter()
@@ -177,6 +222,31 @@ impl QueryEngine {
                 data: node.data.clone(),
                 score: node.score,
                 hop: node.hop,
+                provenance: Provenance {
+                    source: node.source.clone(),
+                    extraction_model_id: node.extraction_model_id.clone(),
+                    snapshot_id: node.node_snapshot_id.clone(),
+                    ingested_at: node.ingested_at.clone(),
+                },
+                confidence: node.confidence,
+            })
+            .collect();
+
+        // Build evidence edges with provenance.
+        let evidence_edges: Vec<EvidenceEdge> = state
+            .edges
+            .iter()
+            .map(|edge| {
+                // Look up edge metadata from the graph index via repo nodes
+                // Edge confidence defaults to weight
+                EvidenceEdge {
+                    source: edge.source,
+                    target: edge.target,
+                    relation: edge.relation.clone(),
+                    weight: edge.weight,
+                    provenance: edge.provenance.clone(),
+                    confidence: edge.confidence,
+                }
             })
             .collect();
 
@@ -192,7 +262,7 @@ impl QueryEngine {
                 .collect();
             sources.len()
         };
-        let has_graph_support = !state.edges.is_empty();
+        let has_graph_support = !evidence_edges.is_empty();
         let groundedness = compute_groundedness(&GroundednessInput {
             query: &request.query,
             evidence_scores: &evidence_scores,
@@ -213,16 +283,26 @@ impl QueryEngine {
             }
         };
 
+        // snapshot_id takes priority over time_travel (SPEC 4.1)
         let snapshot_id = match request.snapshot_id.clone() {
             Some(snapshot_id) => Some(snapshot_id),
             None => Some(self.repo.current_snapshot_id().await),
         };
 
+        // Reflect time_travel in response when provided (without snapshot_id override)
+        let time_travel = if request.snapshot_id.is_none() {
+            request.time_travel.clone()
+        } else {
+            None
+        };
+
+        let latency_ms = start.elapsed().as_millis() as u64;
+
         Ok(QueryResponse {
             answer,
             evidence: EvidenceSubgraph {
                 nodes: evidence_nodes,
-                edges: state.edges,
+                edges: evidence_edges,
             },
             citations,
             groundedness,
@@ -235,6 +315,8 @@ impl QueryEngine {
             },
             model_id: Some(effective_model_id),
             snapshot_id,
+            time_travel,
+            latency_ms,
         })
     }
 
@@ -531,11 +613,13 @@ impl QueryEngine {
                             continue;
                         }
 
-                        traversed_edges.push(EvidenceEdge {
+                        traversed_edges.push(InternalEdge {
                             source: current_id,
                             target: *target,
                             relation: relation.clone(),
                             weight: *weight,
+                            provenance: Provenance::default(),
+                            confidence: *weight,
                         });
 
                         let next_hop = current_hop + 1;
@@ -613,12 +697,23 @@ impl QueryEngine {
                 .max(0.01);
             let score = base_score / (hop as f32 + 1.0);
 
+            // Extract confidence: prefer explicit metadata, fall back to score
+            let confidence = node
+                .metadata
+                .get("confidence")
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(score);
+
             ranked_nodes.push(RankedNode {
                 id: node_id,
                 data: node.data.clone(),
                 score,
                 hop,
                 source: node.metadata.get("source").cloned(),
+                extraction_model_id: node.metadata.get("extraction_model_id").cloned(),
+                node_snapshot_id: node.metadata.get("snapshot_id").cloned(),
+                ingested_at: node.metadata.get("ingested_at").cloned(),
+                confidence,
             });
         }
 
@@ -641,13 +736,33 @@ impl QueryEngine {
 
         let selected_ids: HashSet<u64> = ranked_nodes.iter().map(|node| node.id).collect();
 
-        let mut edges: Vec<EvidenceEdge> = traversed_edges
+        let mut edges: Vec<InternalEdge> = traversed_edges
             .into_iter()
             .filter(|edge| {
                 selected_ids.contains(&edge.source) && selected_ids.contains(&edge.target)
             })
             .filter(|edge| relation_is_allowed(edge.relation.as_str(), &relation_filter))
             .collect();
+
+        // Enrich edges with provenance — single lock acquisition via bulk API
+        {
+            let edge_keys: Vec<(u64, u64, String)> = edges
+                .iter()
+                .map(|e| (e.source, e.target, e.relation.clone()))
+                .collect();
+            let all_meta = self.repo.get_edge_metadata_bulk(&edge_keys).await;
+            for edge in &mut edges {
+                let key = (edge.source, edge.target, edge.relation.clone());
+                if let Some(meta) = all_meta.get(&key) {
+                    edge.provenance = Provenance {
+                        source: meta.get("source").cloned(),
+                        extraction_model_id: meta.get("extraction_model_id").cloned(),
+                        snapshot_id: meta.get("snapshot_id").cloned(),
+                        ingested_at: meta.get("ingested_at").cloned(),
+                    };
+                }
+            }
+        }
 
         edges = dedup_edges(edges);
         expansion_paths = dedup_paths(expansion_paths);
@@ -880,26 +995,34 @@ fn build_citations(nodes: &[RankedNode]) -> Vec<Citation> {
             continue;
         }
 
-        let end = node.data.len().min(80);
+        let end = node.data.len();
         out.push(Citation {
             source: source.clone(),
             span: [0, end],
+            node_id: node.id,
+            confidence: node.confidence,
         });
     }
 
     out
 }
 
-fn dedup_edges(mut edges: Vec<EvidenceEdge>) -> Vec<EvidenceEdge> {
-    let mut seen = BTreeSet::new();
-    edges.retain(|edge| seen.insert((edge.source, edge.target, edge.relation.clone())));
-    edges.sort_by(|a, b| {
+fn dedup_edges(edges: Vec<InternalEdge>) -> Vec<InternalEdge> {
+    // Last-wins dedup: when the same (source, target, relation) appears multiple times,
+    // keep the last occurrence which has the most up-to-date weight/provenance.
+    let mut map: HashMap<(u64, u64, String), InternalEdge> = HashMap::new();
+    for edge in edges {
+        let key = (edge.source, edge.target, edge.relation.clone());
+        map.insert(key, edge);
+    }
+    let mut out: Vec<InternalEdge> = map.into_values().collect();
+    out.sort_by(|a, b| {
         a.source
             .cmp(&b.source)
             .then(a.target.cmp(&b.target))
             .then(a.relation.cmp(&b.relation))
     });
-    edges
+    out
 }
 
 fn dedup_paths(mut paths: Vec<ExpansionPath>) -> Vec<ExpansionPath> {

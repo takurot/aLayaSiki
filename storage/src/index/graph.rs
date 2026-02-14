@@ -23,6 +23,15 @@ impl AdjacencyGraph {
             .push((target, relation.into(), weight));
     }
 
+    /// Insert or update an edge. All existing entries matching (source, target, relation)
+    /// are removed first, then exactly one entry is inserted. This guarantees uniqueness
+    /// even when pre-existing duplicates were created by `add_edge`.
+    pub fn upsert_edge(&mut self, source: u64, target: u64, relation: &str, weight: f32) {
+        let edges = self.adjacency.entry(source).or_default();
+        edges.retain(|(t, r, _)| !(*t == target && r == relation));
+        edges.push((target, relation.to_string(), weight));
+    }
+
     pub fn remove_edge(&mut self, source: u64, target: u64) -> bool {
         if let Some(edges) = self.adjacency.get_mut(&source) {
             let len_before = edges.len();
@@ -180,5 +189,58 @@ mod tests {
 
         assert!(graph.neighbors(1).is_empty());
         assert!(graph.neighbors(2).is_empty());
+    }
+
+    #[test]
+    fn test_upsert_collapses_preexisting_duplicates_to_one() {
+        let mut graph = AdjacencyGraph::new();
+        // Simulate pre-existing duplicates created by old add_edge calls
+        graph.add_edge(1, 2, "links", 0.3);
+        graph.add_edge(1, 2, "links", 0.5);
+        graph.add_edge(1, 2, "links", 0.7);
+        assert_eq!(
+            graph.neighbors(1).len(),
+            3,
+            "precondition: 3 duplicate edges"
+        );
+
+        // upsert must collapse all duplicates into exactly 1 entry
+        graph.upsert_edge(1, 2, "links", 0.95);
+
+        let neighbors = graph.neighbors(1);
+        let matching: Vec<_> = neighbors
+            .iter()
+            .filter(|(t, r, _)| *t == 2 && r == "links")
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "upsert must collapse duplicates to exactly one edge"
+        );
+        assert!(
+            (matching[0].2 - 0.95).abs() < f32::EPSILON,
+            "weight should be the upserted value 0.95, got {}",
+            matching[0].2
+        );
+    }
+
+    #[test]
+    fn test_upsert_preserves_other_relations() {
+        let mut graph = AdjacencyGraph::new();
+        graph.add_edge(1, 2, "knows", 1.0);
+        graph.add_edge(1, 2, "likes", 0.8);
+
+        graph.upsert_edge(1, 2, "knows", 0.5);
+
+        let neighbors = graph.neighbors(1);
+        assert_eq!(neighbors.len(), 2, "other relation must be preserved");
+
+        let knows: Vec<_> = neighbors.iter().filter(|(_, r, _)| r == "knows").collect();
+        assert_eq!(knows.len(), 1);
+        assert!((knows[0].2 - 0.5).abs() < f32::EPSILON);
+
+        let likes: Vec<_> = neighbors.iter().filter(|(_, r, _)| r == "likes").collect();
+        assert_eq!(likes.len(), 1);
+        assert!((likes[0].2 - 0.8).abs() < f32::EPSILON);
     }
 }
