@@ -254,6 +254,7 @@
 - [x] **CIワークフロー拡充**: `fmt` / `clippy` / `cargo test --workspace` を必須化
 - [x] **E2Eジョブ追加**: `cargo test -p ingestion --test e2e_pipeline_test` をCIで常時実行
 - [x] **ベンチスモーク追加**: Criterionベースのストレージ検索ベンチをCIで定期実行
+- [x] **実運用レイテンシ評価ベンチ追加**: read:write=9:1 / 並列ワーカーで p50/p95/p99 を算出
 - [ ] Python ANNベンチ（faiss/usearch）のCIジョブ化と成果物保存
 
 ---
@@ -265,6 +266,18 @@
 - [ ] 運用ガイド（バックアップ/復元/監査ログ）
 - [ ] APIリファレンス（JSON DSL スキーマ/レスポンス）
 - [ ] 実運用の制約（GPUメモリ逼迫時の挙動）を明文化
+
+---
+
+## PR-14.6: 実運用レイテンシ改善と評価拡張 (NEW)
+
+* Depends on: PR-14.5
+
+- [ ] **Writeレイテンシ改善**: ingest の WAL flush 周りを計測し、group commit / バッチ書き込みの改善案を検証
+- [ ] **スケール検証拡張**: `10^5 -> 10^6` ノードで read/write p50/p95/p99 と throughput を比較
+- [ ] **並列度検証**: worker 数（8/32/128）別に read:write=9:1 の劣化カーブを取得
+- [ ] **結果保存の標準化**: ベンチ結果を `benchmarks/results/*.json` に出力し、比較可能な履歴を残す
+- [ ] **回帰ガード**: CI に p95 閾値チェック（read/write）を導入し、悪化時に失敗させる
 
 ---
 
@@ -298,6 +311,7 @@
 - PR-13.5 → PR-15 (NEW: 可視化UI)
 - PR-14 → PR-15
 - PR-14.5 → PR-15 (NEW: 品質ゲートと性能計測の継続運用)
+- PR-14.6 → PR-15 (NEW: 実運用レイテンシ改善と回帰防止)
 - PR-16 → 商用化フェーズのHA/冗長性
 
 ---
