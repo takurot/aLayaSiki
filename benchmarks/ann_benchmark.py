@@ -1,36 +1,60 @@
-import numpy as np
+import argparse
+import json
 import time
-import usearch
+from pathlib import Path
+
 import faiss
 import matplotlib.pyplot as plt
+import numpy as np
+import usearch
 
-def benchmark_ann(n_samples=10000, n_dims=128):
-    print(f"Benchmarking with N={n_samples}, Dims={n_dims}")
-    
-    # Generate random data
+
+def create_usearch_index(n_dims):
+    if hasattr(usearch, "Index"):
+        return usearch.Index(ndim=n_dims, metric="cos", dtype="f32")
+    if hasattr(usearch, "index") and hasattr(usearch.index, "Index"):
+        return usearch.index.Index(ndim=n_dims, metric="cos", dtype="f32")
+    try:
+        from usearch.index import Index
+
+        return Index(ndim=n_dims, metric="cos", dtype="f32")
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("Unable to locate USEARCH Index class") from exc
+
+
+def benchmark_ann(n_samples=10000, n_dims=128, n_queries=100, top_k=10, seed=42):
+    print(f"Benchmarking with N={n_samples}, Dims={n_dims}, Queries={n_queries}")
+    np.random.seed(seed)
+
     data = np.random.rand(n_samples, n_dims).astype(np.float32)
-    queries = np.random.rand(100, n_dims).astype(np.float32)
+    queries = np.random.rand(n_queries, n_dims).astype(np.float32)
 
-    # Normalize vectors for Cosine Similarity validity (Dot Product == Cosine)
     faiss.normalize_L2(data)
     faiss.normalize_L2(queries)
 
-    results = {}
+    results = {
+        "config": {
+            "n_samples": n_samples,
+            "n_dims": n_dims,
+            "n_queries": n_queries,
+            "top_k": top_k,
+            "seed": seed,
+        },
+        "metrics": {},
+    }
 
-    # USEARCH
     print("Benchmarking USEARCH...")
     start = time.time()
-    index_usearch = usearch.Index(ndim=n_dims, metric="cos", dtype="f32")
+    index_usearch = create_usearch_index(n_dims)
     index_usearch.add(np.arange(n_samples), data)
     build_time = time.time() - start
-    
+
     start = time.time()
-    matches = index_usearch.search(queries, 10)
+    index_usearch.search(queries, top_k)
     search_time = time.time() - start
-    results['usearch'] = {'build': build_time, 'search': search_time}
+    results["metrics"]["usearch"] = {"build_sec": build_time, "search_sec": search_time}
     print(f"USEARCH: Build={build_time:.4f}s, Search={search_time:.4f}s")
 
-    # FAISS (Flat IP - Brute Force for baseline)
     print("Benchmarking FAISS (Flat)...")
     start = time.time()
     index_faiss = faiss.IndexFlatIP(n_dims)
@@ -38,20 +62,55 @@ def benchmark_ann(n_samples=10000, n_dims=128):
     build_time = time.time() - start
 
     start = time.time()
-    D, I = index_faiss.search(queries, 10)
+    index_faiss.search(queries, top_k)
     search_time = time.time() - start
-    results['faiss_flat'] = {'build': build_time, 'search': search_time}
+    results["metrics"]["faiss_flat"] = {"build_sec": build_time, "search_sec": search_time}
     print(f"FAISS Flat: Build={build_time:.4f}s, Search={search_time:.4f}s")
-    
-    # Simple plot
-    names = list(results.keys())
-    search_times = [results[n]['search'] for n in names]
-    
+
+    return results
+
+
+def write_outputs(results, json_output: Path, png_output: Path):
+    json_output.parent.mkdir(parents=True, exist_ok=True)
+    with json_output.open("w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    print(f"Saved results to {json_output}")
+
+    names = list(results["metrics"].keys())
+    search_times = [results["metrics"][name]["search_sec"] for name in names]
     plt.bar(names, search_times)
-    plt.title('Search Time (100 queries)')
-    plt.ylabel('Seconds')
-    plt.savefig('ann_benchmark_results.png')
-    print("Saved plot to ann_benchmark_results.png")
+    plt.title("Search Time")
+    plt.ylabel("Seconds")
+    plt.savefig(png_output)
+    print(f"Saved plot to {png_output}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n-samples", type=int, default=10000)
+    parser.add_argument("--n-dims", type=int, default=128)
+    parser.add_argument("--n-queries", type=int, default=100)
+    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--json-output",
+        default="benchmarks/results/ann_latest.json",
+    )
+    parser.add_argument(
+        "--png-output",
+        default="benchmarks/results/ann_benchmark_results.png",
+    )
+    args = parser.parse_args()
+
+    results = benchmark_ann(
+        n_samples=args.n_samples,
+        n_dims=args.n_dims,
+        n_queries=args.n_queries,
+        top_k=args.top_k,
+        seed=args.seed,
+    )
+    write_outputs(results, Path(args.json_output), Path(args.png_output))
+
 
 if __name__ == "__main__":
-    benchmark_ann()
+    main()

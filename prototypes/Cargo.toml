@@ -9,7 +9,17 @@ bytecheck = "0.6" # Required for rkyv validation
 
 [dev-dependencies]
 criterion = "0.5"
+alayasiki-core = { path = "../core" }
+ingestion = { path = "../ingestion" }
+query = { path = "../query" }
+storage = { path = "../storage" }
+tempfile = "3.3"
+tokio = { version = "1.0", features = ["rt-multi-thread"] }
 
 [[bench]]
 name = "storage_bench"
+harness = false
+
+[[bench]]
+name = "operational_latency_bench"
 harness = false

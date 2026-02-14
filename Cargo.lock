@@ -620,6 +620,7 @@ dependencies = [
  "dashmap",
  "jobs",
  "pdf-extract",
+ "query",
  "serde",
  "sha2",
  "slm",
@@ -1020,9 +1021,15 @@ dependencies = [
 name = "prototypes"
 version = "0.1.0"
 dependencies = [
+ "alayasiki-core",
  "bytecheck",
  "criterion",
+ "ingestion",
+ "query",
  "rkyv",
+ "storage",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

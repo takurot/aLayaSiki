@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/**
+  pull_request:
+
+jobs:
+  rust-quality:
+    name: Rust Quality (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-tests:
+    name: Rust Tests (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace
+
+  e2e-tests:
+    name: E2E Tests (ingest -> query)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ingestion E2E integration tests
+        run: cargo test -p ingestion --test e2e_pipeline_test -- --nocapture
+
+  bench-smoke:
+    name: Benchmark Gate (operational latency)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run operational latency benchmark with thresholds
+        env:
+          ALAYASIKI_BENCH_NODES: "3000"
+          ALAYASIKI_BENCH_WORKERS: "6"
+          ALAYASIKI_BENCH_OPS_PER_WORKER: "80"
+          ALAYASIKI_BENCH_WRITE_EVERY: "10"
+          ALAYASIKI_BENCH_MAX_READ_P95_MS: "120"
+          ALAYASIKI_BENCH_MAX_WRITE_P95_MS: "700"
+          ALAYASIKI_BENCH_MIN_THROUGHPUT: "80"
+        run: cargo bench -p prototypes --bench operational_latency_bench
+
+  python-ann-bench:
+    name: Python ANN Benchmark + Baseline Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Python benchmark dependencies
+        run: pip install -r benchmarks/requirements.txt
+      - name: Run Python ANN benchmark
+        run: python benchmarks/ann_benchmark.py --n-samples 6000 --n-dims 128 --n-queries 100 --top-k 10 --seed 42 --json-output benchmarks/results/ann_latest.json --png-output benchmarks/results/ann_benchmark_results.png
+      - name: Check ANN regression against baseline
+        run: python benchmarks/check_ann_regression.py --baseline benchmarks/baselines/ann_baseline.json --current benchmarks/results/ann_latest.json --max-regression-ratio 10.0
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-ann-benchmark-results
+          path: benchmarks/results/*
