@@ -162,10 +162,19 @@
 
 * Depends on: PR-08
 
-- [ ] Evidence サブグラフ返却形式の実装
-- [ ] Provenance/Confidence を返却に含める
-- [ ] Citation 形式（source + span）を定義・返却
-- [ ] time_travel / snapshot_id の優先順序を反映
+- [x] Evidence サブグラフ返却形式の実装
+- [x] Provenance/Confidence を返却に含める
+- [x] Citation 形式（source + span）を定義・返却
+- [x] time_travel / snapshot_id の優先順序を反映
+
+**Notes:**
+- `EvidenceNode`/`EvidenceEdge` に `Provenance` 構造体と `confidence` フィールドを追加
+- `Citation` に `node_id`/`confidence` を追加、`span` をデータ全長ベースに改善
+- `QueryRequest` に `time_travel` フィールド追加（YYYY-MM-DD / RFC3339）、`snapshot_id` が優先
+- `QueryResponse` に `latency_ms`/`time_travel` を追加（SPEC 4.1 準拠）
+- Repository にエッジメタデータストアを追加し、エッジ provenance の WAL 永続化・復元を実装
+- `Provenance` は `source`, `extraction_model_id`, `snapshot_id`, `ingested_at` を保持
+- `confidence` はノードメタデータの明示値がある場合はそれを使用、なければスコアにフォールバック
 
 ---
 

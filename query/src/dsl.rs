@@ -74,6 +74,10 @@ pub struct QueryRequest {
     pub model_id: Option<String>,
     #[serde(default)]
     pub snapshot_id: Option<String>,
+    /// Time-travel target: YYYY-MM-DD or RFC3339.
+    /// When both snapshot_id and time_travel are provided, snapshot_id takes priority.
+    #[serde(default)]
+    pub time_travel: Option<String>,
 }
 
 const fn default_depth() -> u8 {
@@ -106,6 +110,8 @@ pub enum QueryValidationError {
     InvalidModelId,
     #[error("snapshot_id must not be empty when provided")]
     InvalidSnapshotId,
+    #[error("time_travel must be YYYY-MM-DD or RFC3339 format")]
+    InvalidTimeTravelFormat,
 }
 
 impl QueryRequest {
@@ -149,6 +155,11 @@ impl QueryRequest {
                 return Err(QueryValidationError::InvalidTimeRangeOrder);
             }
         }
+        if let Some(time_travel) = &self.time_travel {
+            if time_travel.trim().is_empty() || !is_valid_time_travel(time_travel) {
+                return Err(QueryValidationError::InvalidTimeTravelFormat);
+            }
+        }
         Ok(())
     }
 }
@@ -160,4 +171,17 @@ fn has_empty_values(values: &[String]) -> bool {
 fn parse_date(input: &str) -> Result<chrono::NaiveDate, QueryValidationError> {
     chrono::NaiveDate::parse_from_str(input, "%Y-%m-%d")
         .map_err(|_| QueryValidationError::InvalidTimeRangeFormat)
+}
+
+/// Validate time_travel format: accepts YYYY-MM-DD or RFC3339.
+fn is_valid_time_travel(input: &str) -> bool {
+    // Try YYYY-MM-DD first
+    if chrono::NaiveDate::parse_from_str(input, "%Y-%m-%d").is_ok() {
+        return true;
+    }
+    // Try RFC3339 (e.g. "2024-06-01T10:00:00Z")
+    if chrono::DateTime::parse_from_rfc3339(input).is_ok() {
+        return true;
+    }
+    false
 }

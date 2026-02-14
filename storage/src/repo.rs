@@ -49,12 +49,16 @@ pub enum IndexMutation {
     DeleteNode(u64),
 }
 
+/// Key for edge metadata lookup: (source, target, relation)
+pub type EdgeMetaKey = (u64, u64, String);
+
 pub struct Repository {
     wal: Arc<Mutex<Wal>>,
     tx_lock: Arc<Mutex<()>>,
     nodes: Arc<RwLock<HashMap<u64, Node>>>,
     pub hyper_index: Arc<RwLock<HyperIndex>>,
     idempotency_index: Arc<RwLock<HashMap<String, Vec<u64>>>>,
+    edge_metadata: Arc<RwLock<HashMap<EdgeMetaKey, HashMap<String, String>>>>,
 }
 
 impl Repository {
@@ -66,6 +70,7 @@ impl Repository {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             hyper_index: Arc::new(RwLock::new(HyperIndex::new())),
             idempotency_index: Arc::new(RwLock::new(HashMap::new())),
+            edge_metadata: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -77,6 +82,7 @@ impl Repository {
         let nodes = Arc::new(RwLock::new(HashMap::new()));
         let hyper_index = Arc::new(RwLock::new(HyperIndex::new()));
         let idempotency_index = Arc::new(RwLock::new(HashMap::new()));
+        let edge_metadata = Arc::new(RwLock::new(HashMap::new()));
 
         // 1. Replay WAL
         {
@@ -84,6 +90,7 @@ impl Repository {
             let mut node_map = nodes.write().await;
             let mut h_index = hyper_index.write().await;
             let mut idem_map = idempotency_index.write().await;
+            let mut edge_meta = edge_metadata.write().await;
 
             wal_lock
                 .replay(|_lsn, data| {
@@ -91,7 +98,13 @@ impl Repository {
                     let archived = rkyv::check_archived_root::<WalEntry>(&data[..])
                         .map_err(|_| WalError::CorruptEntry)?;
                     let entry: WalEntry = archived.deserialize(&mut rkyv::Infallible).unwrap();
-                    apply_replayed_entry(&entry, &mut node_map, &mut h_index, &mut idem_map);
+                    apply_replayed_entry(
+                        &entry,
+                        &mut node_map,
+                        &mut h_index,
+                        &mut idem_map,
+                        &mut edge_meta,
+                    );
                     Ok(())
                 })
                 .await?;
@@ -103,6 +116,7 @@ impl Repository {
             nodes,
             hyper_index,
             idempotency_index,
+            edge_metadata,
         })
     }
 
@@ -176,6 +190,7 @@ impl Repository {
         // Apply in-memory updates under write locks so readers don't observe partial state.
         let mut nodes = self.nodes.write().await;
         let mut index = self.hyper_index.write().await;
+        let mut edge_meta = self.edge_metadata.write().await;
 
         for mutation in mutations {
             match mutation {
@@ -186,11 +201,17 @@ impl Repository {
                     index.insert_node(id, embedding);
                 }
                 IndexMutation::PutEdge(edge) => {
+                    let key = (edge.source, edge.target, edge.relation.clone());
+                    if !edge.metadata.is_empty() {
+                        edge_meta.insert(key, edge.metadata.clone());
+                    }
                     index.insert_edge(edge.source, edge.target, edge.relation, edge.weight);
                 }
                 IndexMutation::DeleteNode(id) => {
                     nodes.remove(&id);
                     index.remove_node(id);
+                    // Remove edge metadata for edges involving the deleted node
+                    edge_meta.retain(|(src, tgt, _), _| *src != id && *tgt != id);
                 }
             }
         }
@@ -200,6 +221,20 @@ impl Repository {
     pub async fn check_idempotency(&self, key: &str) -> Option<Vec<u64>> {
         let index = self.idempotency_index.read().await;
         index.get(key).cloned()
+    }
+
+    /// Get metadata for an edge identified by (source, target, relation).
+    pub async fn get_edge_metadata(
+        &self,
+        source: u64,
+        target: u64,
+        relation: &str,
+    ) -> HashMap<String, String> {
+        let edge_meta = self.edge_metadata.read().await;
+        edge_meta
+            .get(&(source, target, relation.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub async fn current_snapshot_id(&self) -> String {
@@ -309,6 +344,7 @@ fn apply_replayed_entry(
     node_map: &mut HashMap<u64, Node>,
     h_index: &mut HyperIndex,
     idem_map: &mut HashMap<String, Vec<u64>>,
+    edge_meta: &mut HashMap<EdgeMetaKey, HashMap<String, String>>,
 ) {
     match entry {
         WalEntry::Put(node) => {
@@ -318,18 +354,23 @@ fn apply_replayed_entry(
             h_index.insert_node(id, embedding);
         }
         WalEntry::PutEdge(edge) => {
+            if !edge.metadata.is_empty() {
+                let key = (edge.source, edge.target, edge.relation.clone());
+                edge_meta.insert(key, edge.metadata.clone());
+            }
             h_index.insert_edge(edge.source, edge.target, edge.relation.clone(), edge.weight);
         }
         WalEntry::Delete(id) => {
             node_map.remove(id);
             h_index.remove_node(*id);
+            edge_meta.retain(|(src, tgt, _), _| *src != *id && *tgt != *id);
         }
         WalEntry::IdempotencyKey { key, node_ids } => {
             idem_map.insert(key.clone(), node_ids.clone());
         }
         WalEntry::Transaction(operations) => {
             for operation in operations {
-                apply_replayed_tx_operation(operation, node_map, h_index);
+                apply_replayed_tx_operation(operation, node_map, h_index, edge_meta);
             }
         }
     }
@@ -339,6 +380,7 @@ fn apply_replayed_tx_operation(
     operation: &TxOperation,
     node_map: &mut HashMap<u64, Node>,
     h_index: &mut HyperIndex,
+    edge_meta: &mut HashMap<EdgeMetaKey, HashMap<String, String>>,
 ) {
     match operation {
         TxOperation::Put(node) => {
@@ -348,11 +390,16 @@ fn apply_replayed_tx_operation(
             h_index.insert_node(id, embedding);
         }
         TxOperation::PutEdge(edge) => {
+            if !edge.metadata.is_empty() {
+                let key = (edge.source, edge.target, edge.relation.clone());
+                edge_meta.insert(key, edge.metadata.clone());
+            }
             h_index.insert_edge(edge.source, edge.target, edge.relation.clone(), edge.weight);
         }
         TxOperation::Delete(id) => {
             node_map.remove(id);
             h_index.remove_node(*id);
+            edge_meta.retain(|(src, tgt, _), _| *src != *id && *tgt != *id);
         }
     }
 }
