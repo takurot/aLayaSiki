@@ -9,6 +9,19 @@ import numpy as np
 import usearch
 
 
+def create_usearch_index(n_dims):
+    if hasattr(usearch, "Index"):
+        return usearch.Index(ndim=n_dims, metric="cos", dtype="f32")
+    if hasattr(usearch, "index") and hasattr(usearch.index, "Index"):
+        return usearch.index.Index(ndim=n_dims, metric="cos", dtype="f32")
+    try:
+        from usearch.index import Index
+
+        return Index(ndim=n_dims, metric="cos", dtype="f32")
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("Unable to locate USEARCH Index class") from exc
+
+
 def benchmark_ann(n_samples=10000, n_dims=128, n_queries=100, top_k=10, seed=42):
     print(f"Benchmarking with N={n_samples}, Dims={n_dims}, Queries={n_queries}")
     np.random.seed(seed)
@@ -32,7 +45,7 @@ def benchmark_ann(n_samples=10000, n_dims=128, n_queries=100, top_k=10, seed=42)
 
     print("Benchmarking USEARCH...")
     start = time.time()
-    index_usearch = usearch.Index(ndim=n_dims, metric="cos", dtype="f32")
+    index_usearch = create_usearch_index(n_dims)
     index_usearch.add(np.arange(n_samples), data)
     build_time = time.time() - start
 
