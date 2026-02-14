@@ -1024,6 +1024,8 @@ dependencies = [
  "alayasiki-core",
  "bytecheck",
  "criterion",
+ "ingestion",
+ "query",
  "rkyv",
  "storage",
  "tempfile",
