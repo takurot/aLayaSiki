@@ -97,7 +97,7 @@
 * Depends on: PR-01, PR-03
 
 - [x] Ingestion API のエンドポイント定義（PDF/JSON/Markdown）
-- [ ] Ingestion API のエンドポイント定義（画像/音声）
+- [x] Ingestion API のエンドポイント定義（画像/音声）
 - [x] Auto-Chunking のルール実装（意味区切り/最大長/オーバーラップ）
 - [x] Embedding 生成フローの実装（model_id を付与）
 - [x] Idempotency/Dedup（content_hash + idempotency_key）
