@@ -144,9 +144,7 @@ impl From<MultipartIngestionPayload> for AudioIngestionPayload {
 }
 
 fn with_modality(mut metadata: HashMap<String, String>, modality: &str) -> HashMap<String, String> {
-    metadata
-        .entry("modality".to_string())
-        .or_insert_with(|| modality.to_string());
+    metadata.insert("modality".to_string(), modality.to_string());
     metadata
 }
 

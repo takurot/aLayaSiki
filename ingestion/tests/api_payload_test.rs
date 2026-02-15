@@ -85,7 +85,7 @@ fn test_audio_payload_into_request_sets_audio_modality() {
 }
 
 #[test]
-fn test_media_payload_from_multipart_preserves_existing_modality() {
+fn test_media_payload_from_multipart_overwrites_conflicting_modality() {
     let mut metadata = HashMap::new();
     metadata.insert("modality".to_string(), "custom-modality".to_string());
 
@@ -101,10 +101,7 @@ fn test_media_payload_from_multipart_preserves_existing_modality() {
     let audio_payload: AudioIngestionPayload = multipart.into();
     match audio_payload.try_into_request().unwrap() {
         IngestionRequest::File { metadata, .. } => {
-            assert_eq!(
-                metadata.get("modality").map(String::as_str),
-                Some("custom-modality")
-            );
+            assert_eq!(metadata.get("modality").map(String::as_str), Some("audio"));
         }
         other => panic!("expected file request, got {:?}", other),
     }
