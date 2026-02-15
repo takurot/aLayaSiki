@@ -1,6 +1,7 @@
 use alayasiki_core::ingest::IngestionRequest;
 use ingestion::api::{
-    AudioIngestionPayload, ImageIngestionPayload, JsonIngestionPayload, MultipartIngestionPayload,
+    ApiPayloadError, AudioIngestionPayload, ImageIngestionPayload, JsonIngestionPayload,
+    MultipartIngestionPayload,
 };
 use std::collections::HashMap;
 
@@ -42,7 +43,7 @@ fn test_image_payload_into_request_sets_image_modality() {
         model_id: None,
     };
 
-    match payload.into_request() {
+    match payload.try_into_request().unwrap() {
         IngestionRequest::File {
             metadata,
             mime_type,
@@ -68,7 +69,7 @@ fn test_audio_payload_into_request_sets_audio_modality() {
         model_id: Some("embedding-default-v1".to_string()),
     };
 
-    match payload.into_request() {
+    match payload.try_into_request().unwrap() {
         IngestionRequest::File {
             metadata,
             model_id,
@@ -98,7 +99,7 @@ fn test_media_payload_from_multipart_preserves_existing_modality() {
     };
 
     let audio_payload: AudioIngestionPayload = multipart.into();
-    match audio_payload.into_request() {
+    match audio_payload.try_into_request().unwrap() {
         IngestionRequest::File { metadata, .. } => {
             assert_eq!(
                 metadata.get("modality").map(String::as_str),
@@ -107,4 +108,46 @@ fn test_media_payload_from_multipart_preserves_existing_modality() {
         }
         other => panic!("expected file request, got {:?}", other),
     }
+}
+
+#[test]
+fn test_image_payload_rejects_non_image_mime_type() {
+    let payload = ImageIngestionPayload {
+        filename: "wrong.pdf".to_string(),
+        content: vec![0x25, 0x50, 0x44, 0x46],
+        mime_type: "application/pdf".to_string(),
+        metadata: HashMap::new(),
+        idempotency_key: None,
+        model_id: None,
+    };
+
+    let err = payload.try_into_request().unwrap_err();
+    assert_eq!(
+        err,
+        ApiPayloadError::InvalidMediaMimeType {
+            expected_modality: "image",
+            actual_mime_type: "application/pdf".to_string(),
+        }
+    );
+}
+
+#[test]
+fn test_audio_payload_rejects_non_audio_mime_type() {
+    let payload = AudioIngestionPayload {
+        filename: "wrong.png".to_string(),
+        content: vec![0x89, 0x50, 0x4e, 0x47],
+        mime_type: "image/png".to_string(),
+        metadata: HashMap::new(),
+        idempotency_key: None,
+        model_id: None,
+    };
+
+    let err = payload.try_into_request().unwrap_err();
+    assert_eq!(
+        err,
+        ApiPayloadError::InvalidMediaMimeType {
+            expected_modality: "audio",
+            actual_mime_type: "image/png".to_string(),
+        }
+    );
 }
