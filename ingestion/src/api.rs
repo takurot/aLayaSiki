@@ -56,3 +56,82 @@ impl MultipartIngestionPayload {
         }
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct ImageIngestionPayload {
+    pub filename: String,
+    pub content: Vec<u8>,
+    pub mime_type: String,
+    pub metadata: HashMap<String, String>,
+    pub idempotency_key: Option<String>,
+    pub model_id: Option<String>,
+}
+
+impl ImageIngestionPayload {
+    pub fn into_request(self) -> IngestionRequest {
+        IngestionRequest::File {
+            filename: self.filename,
+            content: self.content,
+            mime_type: self.mime_type,
+            metadata: with_modality(self.metadata, "image"),
+            idempotency_key: self.idempotency_key,
+            model_id: self.model_id,
+        }
+    }
+}
+
+impl From<MultipartIngestionPayload> for ImageIngestionPayload {
+    fn from(payload: MultipartIngestionPayload) -> Self {
+        Self {
+            filename: payload.filename,
+            content: payload.content,
+            mime_type: payload.mime_type,
+            metadata: payload.metadata,
+            idempotency_key: payload.idempotency_key,
+            model_id: payload.model_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioIngestionPayload {
+    pub filename: String,
+    pub content: Vec<u8>,
+    pub mime_type: String,
+    pub metadata: HashMap<String, String>,
+    pub idempotency_key: Option<String>,
+    pub model_id: Option<String>,
+}
+
+impl AudioIngestionPayload {
+    pub fn into_request(self) -> IngestionRequest {
+        IngestionRequest::File {
+            filename: self.filename,
+            content: self.content,
+            mime_type: self.mime_type,
+            metadata: with_modality(self.metadata, "audio"),
+            idempotency_key: self.idempotency_key,
+            model_id: self.model_id,
+        }
+    }
+}
+
+impl From<MultipartIngestionPayload> for AudioIngestionPayload {
+    fn from(payload: MultipartIngestionPayload) -> Self {
+        Self {
+            filename: payload.filename,
+            content: payload.content,
+            mime_type: payload.mime_type,
+            metadata: payload.metadata,
+            idempotency_key: payload.idempotency_key,
+            model_id: payload.model_id,
+        }
+    }
+}
+
+fn with_modality(mut metadata: HashMap<String, String>, modality: &str) -> HashMap<String, String> {
+    metadata
+        .entry("modality".to_string())
+        .or_insert_with(|| modality.to_string());
+    metadata
+}
