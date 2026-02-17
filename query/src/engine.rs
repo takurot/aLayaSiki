@@ -4,6 +4,7 @@ use crate::graphrag::{
     DRIFT_EVIDENCE_THRESHOLD, DRIFT_MAX_ITERATIONS,
 };
 use crate::planner::{QueryPlan, QueryPlanner};
+use alayasiki_core::audit::{AuditEvent, AuditOperation, AuditOutcome, AuditSink};
 use alayasiki_core::auth::{Action, Authorizer, AuthzError, Principal, ResourceContext};
 use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::model::Node;
@@ -124,6 +125,7 @@ pub enum QueryError {
 pub struct QueryEngine {
     repo: Arc<Repository>,
     community_summaries: Vec<CommunitySummary>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 const DEFAULT_EMBEDDING_MODEL_ID: &str = "embedding-default-v1";
@@ -167,12 +169,18 @@ impl QueryEngine {
         Self {
             repo,
             community_summaries: Vec::new(),
+            audit_sink: None,
         }
     }
 
     /// Attach pre-computed community summaries for global search support.
     pub fn with_community_summaries(mut self, summaries: Vec<CommunitySummary>) -> Self {
         self.community_summaries = summaries;
+        self
+    }
+
+    pub fn with_audit_sink(mut self, sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = Some(sink);
         self
     }
 
@@ -202,11 +210,65 @@ impl QueryEngine {
         authorizer: &Authorizer,
         resource: &ResourceContext,
     ) -> Result<QueryResponse, QueryError> {
-        authorizer.authorize(principal, Action::Query, resource)?;
-        self.execute(request).await
+        let model_id = effective_query_model_id(&request);
+        if let Err(err) = authorizer.authorize(principal, Action::Query, resource) {
+            self.emit_audit_event(build_query_audit_event(
+                AuditOutcome::Denied,
+                &model_id,
+                Some(principal.subject.clone()),
+                Some(principal.tenant.clone()),
+                None,
+                Some(err.to_string()),
+            ));
+            return Err(err.into());
+        }
+
+        self.execute_with_audit(
+            request,
+            Some(principal.subject.clone()),
+            Some(principal.tenant.clone()),
+        )
+        .await
     }
 
     pub async fn execute(&self, request: QueryRequest) -> Result<QueryResponse, QueryError> {
+        self.execute_with_audit(request, None, None).await
+    }
+
+    async fn execute_with_audit(
+        &self,
+        request: QueryRequest,
+        actor: Option<String>,
+        tenant: Option<String>,
+    ) -> Result<QueryResponse, QueryError> {
+        let model_id = effective_query_model_id(&request);
+        let result = self.execute_internal(request).await;
+        match &result {
+            Ok(response) => {
+                self.emit_audit_event(build_query_audit_event(
+                    AuditOutcome::Succeeded,
+                    &model_id,
+                    actor,
+                    tenant,
+                    response.snapshot_id.clone(),
+                    None,
+                ));
+            }
+            Err(err) => {
+                self.emit_audit_event(build_query_audit_event(
+                    AuditOutcome::Failed,
+                    &model_id,
+                    actor,
+                    tenant,
+                    None,
+                    Some(err.to_string()),
+                ));
+            }
+        }
+        result
+    }
+
+    async fn execute_internal(&self, request: QueryRequest) -> Result<QueryResponse, QueryError> {
         let start = Instant::now();
 
         request
@@ -345,6 +407,12 @@ impl QueryEngine {
             time_travel,
             latency_ms,
         })
+    }
+
+    fn emit_audit_event(&self, event: AuditEvent) {
+        if let Some(sink) = &self.audit_sink {
+            let _ = sink.record(event);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -989,6 +1057,32 @@ fn node_passes_filters(
     time_range: Option<(NaiveDate, NaiveDate)>,
 ) -> bool {
     node_filter_exclusion_reason(node, entity_filter, time_range).is_none()
+}
+
+fn effective_query_model_id(request: &QueryRequest) -> String {
+    request
+        .model_id
+        .clone()
+        .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string())
+}
+
+fn build_query_audit_event(
+    outcome: AuditOutcome,
+    model_id: &str,
+    actor: Option<String>,
+    tenant: Option<String>,
+    snapshot_id: Option<String>,
+    error: Option<String>,
+) -> AuditEvent {
+    let mut event = AuditEvent::new(AuditOperation::Query, outcome);
+    event.model_id = Some(model_id.to_string());
+    event.actor = actor;
+    event.tenant = tenant;
+    event.snapshot_id = snapshot_id;
+    if let Some(error) = error {
+        event.metadata.insert("error".to_string(), error);
+    }
+    event
 }
 
 fn generate_answer(query: &str, nodes: &[EvidenceNode]) -> String {
