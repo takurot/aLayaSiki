@@ -2,6 +2,7 @@ use crate::chunker::{Chunker, ChunkingConfig, SemanticChunker};
 use crate::embedding::{DeterministicEmbedder, Embedder};
 use crate::extract::{detect_content_kind, extract_pdf_text, extract_utf8, ContentKind};
 use crate::policy::{ContentPolicy, NoOpPolicy, PolicyError};
+use alayasiki_core::auth::{Action, Authorizer, AuthzError, Principal, ResourceContext};
 use alayasiki_core::ingest::{ContentHash, IngestionRequest};
 use alayasiki_core::model::Node;
 use dashmap::DashMap;
@@ -28,6 +29,8 @@ pub enum IngestionError {
     JobQueue(#[from] anyhow::Error),
     #[error("Idempotency conflict: processing already in progress for key {0}")]
     IdempotencyConflict(String),
+    #[error("Authorization error: {0}")]
+    Unauthorized(#[from] AuthzError),
 }
 
 struct IdempotencyGuard {
@@ -105,6 +108,17 @@ impl IngestionPipeline {
 
     pub fn set_job_queue(&mut self, queue: Arc<dyn JobQueue>) {
         self.job_queue = Some(queue);
+    }
+
+    pub async fn ingest_authorized(
+        &self,
+        request: IngestionRequest,
+        principal: &Principal,
+        authorizer: &Authorizer,
+        resource: &ResourceContext,
+    ) -> Result<Vec<u64>, IngestionError> {
+        authorizer.authorize(principal, Action::Ingest, resource)?;
+        self.ingest(request).await
     }
 
     pub async fn ingest(&self, request: IngestionRequest) -> Result<Vec<u64>, IngestionError> {
