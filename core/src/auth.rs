@@ -204,6 +204,8 @@ impl ResourceContext {
 pub enum AuthzError {
     #[error("permission denied for action {action:?}")]
     PermissionDenied { action: Action },
+    #[error("resource tenant is required when tenant boundary is enabled")]
+    MissingResourceTenant,
     #[error("tenant boundary violation: principal tenant {principal_tenant} cannot access {resource_tenant}")]
     TenantMismatch {
         principal_tenant: String,
@@ -294,14 +296,17 @@ impl Authorizer {
         action: Action,
         resource: &ResourceContext,
     ) -> Result<(), AuthzError> {
-        if self.enforce_tenant_boundary
-            && !resource.tenant.is_empty()
-            && principal.tenant != resource.tenant
-        {
-            return Err(AuthzError::TenantMismatch {
-                principal_tenant: principal.tenant.clone(),
-                resource_tenant: resource.tenant.clone(),
-            });
+        if self.enforce_tenant_boundary {
+            let resource_tenant = resource.tenant.trim();
+            if resource_tenant.is_empty() {
+                return Err(AuthzError::MissingResourceTenant);
+            }
+            if principal.tenant != resource_tenant {
+                return Err(AuthzError::TenantMismatch {
+                    principal_tenant: principal.tenant.clone(),
+                    resource_tenant: resource_tenant.to_string(),
+                });
+            }
         }
 
         if !self.is_action_permitted(principal, action) {
@@ -504,6 +509,16 @@ mod tests {
 
         let result = authorizer.authorize(&principal, Action::Query, &resource);
         assert!(matches!(result, Err(AuthzError::TenantMismatch { .. })));
+    }
+
+    #[test]
+    fn denies_missing_resource_tenant_by_default() {
+        let principal = Principal::new("u1", "acme").with_roles(["reader"]);
+        let resource = ResourceContext::default();
+        let authorizer = Authorizer::default();
+
+        let result = authorizer.authorize(&principal, Action::Query, &resource);
+        assert!(matches!(result, Err(AuthzError::MissingResourceTenant)));
     }
 
     #[test]
