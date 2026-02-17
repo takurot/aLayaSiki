@@ -182,10 +182,16 @@
 
 * Depends on: PR-01
 
-- [ ] 認証/認可（OAuth/JWT + RBAC/ABAC）
+- [x] 認証/認可（OAuth/JWT + RBAC/ABAC）
 - [ ] 暗号化（TLS/保存時暗号化/KMS連携のフック）
 - [ ] 監査ログ（操作・クエリ・model_id 追跡）
 - [ ] データレジデンシ/保持期間ポリシーの設定機構
+
+**Notes:**
+- `core::auth` に JWT 認証 (`JwtAuthenticator`) と `Principal` を追加
+- `Authorizer` で RBAC (role-permission) と ABAC (tenant 境界 / 属性一致 / clearance_level) を評価
+- `IngestionPipeline::ingest_authorized` / `QueryEngine::execute_authorized` を追加し、実行前に認可を強制
+- `core`/`ingestion`/`query` に認可回帰テストを追加（許可/拒否ケース）
 
 ---
 

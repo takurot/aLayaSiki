@@ -4,6 +4,7 @@ use crate::graphrag::{
     DRIFT_EVIDENCE_THRESHOLD, DRIFT_MAX_ITERATIONS,
 };
 use crate::planner::{QueryPlan, QueryPlanner};
+use alayasiki_core::auth::{Action, Authorizer, AuthzError, Principal, ResourceContext};
 use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::model::Node;
 use chrono::NaiveDate;
@@ -116,6 +117,8 @@ pub enum QueryError {
     InvalidQuery(String),
     #[error("repository error: {0}")]
     Repository(#[from] RepoError),
+    #[error("authorization error: {0}")]
+    Unauthorized(#[from] AuthzError),
 }
 
 pub struct QueryEngine {
@@ -176,6 +179,30 @@ impl QueryEngine {
     pub async fn execute_json(&self, raw: &str) -> Result<QueryResponse, QueryError> {
         let request = QueryRequest::parse_json(raw)
             .map_err(|err| QueryError::InvalidQuery(err.to_string()))?;
+        self.execute(request).await
+    }
+
+    pub async fn execute_json_authorized(
+        &self,
+        raw: &str,
+        principal: &Principal,
+        authorizer: &Authorizer,
+        resource: &ResourceContext,
+    ) -> Result<QueryResponse, QueryError> {
+        let request = QueryRequest::parse_json(raw)
+            .map_err(|err| QueryError::InvalidQuery(err.to_string()))?;
+        self.execute_authorized(request, principal, authorizer, resource)
+            .await
+    }
+
+    pub async fn execute_authorized(
+        &self,
+        request: QueryRequest,
+        principal: &Principal,
+        authorizer: &Authorizer,
+        resource: &ResourceContext,
+    ) -> Result<QueryResponse, QueryError> {
+        authorizer.authorize(principal, Action::Query, resource)?;
         self.execute(request).await
     }
 
