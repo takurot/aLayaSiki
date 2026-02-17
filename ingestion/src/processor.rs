@@ -4,11 +4,14 @@ use crate::extract::{detect_content_kind, extract_pdf_text, extract_utf8, Conten
 use crate::policy::{ContentPolicy, NoOpPolicy, PolicyError};
 use alayasiki_core::audit::{AuditEvent, AuditOperation, AuditOutcome, AuditSink};
 use alayasiki_core::auth::{Action, Authorizer, AuthzError, Principal, ResourceContext};
+use alayasiki_core::governance::{GovernanceError, GovernancePolicyStore};
 use alayasiki_core::ingest::{ContentHash, IngestionRequest};
 use alayasiki_core::model::Node;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use storage::repo::Repository;
 use thiserror::Error;
 
@@ -32,6 +35,8 @@ pub enum IngestionError {
     IdempotencyConflict(String),
     #[error("Authorization error: {0}")]
     Unauthorized(#[from] AuthzError),
+    #[error("Governance error: {0}")]
+    Governance(#[from] GovernanceError),
 }
 
 struct IdempotencyGuard {
@@ -56,6 +61,7 @@ pub struct IngestionPipeline {
     locks: Arc<DashMap<String, ()>>,
     job_queue: Option<Arc<dyn JobQueue>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    governance_policy_store: Option<Arc<dyn GovernancePolicyStore>>,
 }
 
 impl IngestionPipeline {
@@ -70,6 +76,7 @@ impl IngestionPipeline {
             locks: Arc::new(DashMap::new()),
             job_queue: None,
             audit_sink: None,
+            governance_policy_store: None,
         }
     }
 
@@ -88,6 +95,7 @@ impl IngestionPipeline {
             locks: Arc::new(DashMap::new()),
             job_queue: None,
             audit_sink: None,
+            governance_policy_store: None,
         }
     }
 
@@ -108,6 +116,7 @@ impl IngestionPipeline {
             locks: Arc::new(DashMap::new()),
             job_queue: None,
             audit_sink: None,
+            governance_policy_store: None,
         }
     }
 
@@ -117,6 +126,10 @@ impl IngestionPipeline {
 
     pub fn set_audit_sink(&mut self, sink: Arc<dyn AuditSink>) {
         self.audit_sink = Some(sink);
+    }
+
+    pub fn set_governance_policy_store(&mut self, store: Arc<dyn GovernancePolicyStore>) {
+        self.governance_policy_store = Some(store);
     }
 
     pub async fn ingest_authorized(
@@ -156,7 +169,7 @@ impl IngestionPipeline {
         actor: Option<String>,
         tenant: Option<String>,
     ) -> Result<Vec<u64>, IngestionError> {
-        let result = self.ingest_internal(request).await;
+        let result = self.ingest_internal(request, tenant.as_deref()).await;
         let outcome = match &result {
             Ok(_) => AuditOutcome::Succeeded,
             Err(_) => AuditOutcome::Failed,
@@ -166,7 +179,11 @@ impl IngestionPipeline {
         result
     }
 
-    async fn ingest_internal(&self, request: IngestionRequest) -> Result<Vec<u64>, IngestionError> {
+    async fn ingest_internal(
+        &self,
+        request: IngestionRequest,
+        tenant: Option<&str>,
+    ) -> Result<Vec<u64>, IngestionError> {
         let content_hash = request.content_hash();
         let idempotency_key = request.idempotency_key().map(|key| key.to_string());
 
@@ -212,6 +229,7 @@ impl IngestionPipeline {
         if let Some(key) = &idempotency_key {
             metadata.insert("idempotency_key".to_string(), key.clone());
         }
+        self.apply_governance(tenant, &mut metadata)?;
 
         let text = self.policy.apply(&text)?;
 
@@ -269,6 +287,38 @@ impl IngestionPipeline {
         Ok(node_ids)
     }
 
+    fn apply_governance(
+        &self,
+        tenant: Option<&str>,
+        metadata: &mut HashMap<String, String>,
+    ) -> Result<(), IngestionError> {
+        let (Some(policy_store), Some(tenant)) = (&self.governance_policy_store, tenant) else {
+            return Ok(());
+        };
+
+        let Some(policy) = policy_store.get_policy(tenant)? else {
+            return Ok(());
+        };
+
+        policy.ensure_residency(metadata.get("region").map(String::as_str))?;
+        metadata.insert("tenant".to_string(), tenant.to_string());
+        metadata.insert(
+            "residency_region".to_string(),
+            policy.residency_region.clone(),
+        );
+        metadata.insert(
+            "retention_until_unix".to_string(),
+            policy
+                .retention_deadline_unix(current_unix_timestamp())
+                .to_string(),
+        );
+        if let Some(kms_key_id) = policy.kms_key_id() {
+            metadata.insert("kms_key_id".to_string(), kms_key_id.to_string());
+        }
+
+        Ok(())
+    }
+
     fn emit_audit_event(&self, event: AuditEvent) {
         if let Some(sink) = &self.audit_sink {
             let _ = sink.record(event);
@@ -307,9 +357,16 @@ fn derive_chunk_id(content_hash: &str, index: u64) -> u64 {
     ])
 }
 
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn extract_request_text(
     request: IngestionRequest,
-) -> Result<(String, std::collections::HashMap<String, String>), IngestionError> {
+) -> Result<(String, HashMap<String, String>), IngestionError> {
     match request {
         IngestionRequest::Text {
             content, metadata, ..

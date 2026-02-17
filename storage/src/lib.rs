@@ -1,4 +1,5 @@
 pub mod community;
+pub mod crypto;
 pub mod hyper_index;
 pub mod index;
 pub mod repo;

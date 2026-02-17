@@ -183,9 +183,9 @@
 * Depends on: PR-01
 
 - [x] 認証/認可（OAuth/JWT + RBAC/ABAC）
-- [ ] 暗号化（TLS/保存時暗号化/KMS連携のフック）
+- [x] 暗号化（TLS/保存時暗号化/KMS連携のフック）
 - [x] 監査ログ（操作・クエリ・model_id 追跡）
-- [ ] データレジデンシ/保持期間ポリシーの設定機構
+- [x] データレジデンシ/保持期間ポリシーの設定機構
 
 **Notes:**
 - `core::auth` に JWT 認証 (`JwtAuthenticator`) と `Principal` を追加
@@ -195,6 +195,11 @@
 - `core::audit` に監査イベント (`AuditEvent`) と `AuditSink` を追加
 - `InMemoryAuditSink` と JSONL 永続化の `JsonlAuditSink` を実装
 - `IngestionPipeline` / `QueryEngine` から操作成功・拒否・失敗を監査ログへ出力し、`model_id` を追跡
+- `storage::crypto` に保存時暗号化フック（`AtRestCipher`）と KMS 連携フック（`KmsHookCipher` / `KmsKeyProvider`）を追加
+- `Wal::open_with_cipher` と `Repository::open_with_cipher` を追加し、WAL 書き込み/リプレイで暗号化フックを適用
+- `core::governance` にテナント単位のデータレジデンシ/保持期間ポリシー（`TenantGovernancePolicy`）を追加
+- `IngestionPipeline` にガバナンスポリシーストア連携を追加し、取り込み時にリージョン検証・保持期限/KMS メタデータ付与を実装
+- `QueryEngine` で `retention_until_unix` を尊重し、期限切れデータを回答対象から除外
 
 ---
 
