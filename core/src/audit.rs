@@ -98,18 +98,26 @@ pub struct JsonlAuditSink {
 
 impl JsonlAuditSink {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuditError> {
-        if let Some(parent) = path.as_ref().parent() {
+        let path = path.as_ref();
+
+        if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let writer = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path.as_ref())?;
+        let starting_sequence = std::fs::read_to_string(path)
+            .map(|content| {
+                content
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .count() as u64
+            })
+            .unwrap_or(0);
+
+        let writer = OpenOptions::new().create(true).append(true).open(path)?;
 
         Ok(Self {
             writer: Mutex::new(writer),
-            sequence: AtomicU64::new(0),
+            sequence: AtomicU64::new(starting_sequence),
         })
     }
 }
@@ -167,5 +175,36 @@ mod tests {
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("\"operation\":\"query\""));
         assert!(content.contains("\"model_id\":\"embedding-default-v1\""));
+    }
+
+    #[test]
+    fn jsonl_sink_sequence_continues_after_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit-seq.log");
+
+        let sink = JsonlAuditSink::open(&path).unwrap();
+        sink.record(AuditEvent::new(
+            AuditOperation::Query,
+            AuditOutcome::Succeeded,
+        ))
+        .unwrap();
+        sink.record(AuditEvent::new(
+            AuditOperation::Query,
+            AuditOutcome::Succeeded,
+        ))
+        .unwrap();
+        drop(sink);
+
+        let sink = JsonlAuditSink::open(&path).unwrap();
+        sink.record(AuditEvent::new(
+            AuditOperation::Query,
+            AuditOutcome::Succeeded,
+        ))
+        .unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        let last_line = content.lines().last().unwrap();
+        let event: AuditEvent = serde_json::from_str(last_line).unwrap();
+        assert_eq!(event.sequence, 3);
     }
 }
