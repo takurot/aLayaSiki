@@ -21,6 +21,18 @@ fn make_request(region: &str) -> IngestionRequest {
     }
 }
 
+fn make_request_with_idempotency(region: &str, idempotency_key: &str) -> IngestionRequest {
+    let mut metadata = HashMap::new();
+    metadata.insert("region".to_string(), region.to_string());
+
+    IngestionRequest::Text {
+        content: "governed content".to_string(),
+        metadata,
+        idempotency_key: Some(idempotency_key.to_string()),
+        model_id: None,
+    }
+}
+
 #[tokio::test]
 async fn ingest_authorized_rejects_region_mismatch_policy() {
     let dir = tempdir().unwrap();
@@ -100,4 +112,47 @@ async fn ingest_authorized_stamps_retention_and_kms_metadata() {
         .parse::<u64>()
         .unwrap();
     assert!(retention > 0);
+}
+
+#[tokio::test]
+async fn ingest_authorized_validates_region_even_when_idempotent_key_exists() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("governance_idempotent_region.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let mut pipeline = IngestionPipeline::new(repo);
+    let store = Arc::new(InMemoryGovernancePolicyStore::default());
+    store
+        .upsert_policy(TenantGovernancePolicy::new("acme", "ap-northeast-1", 30))
+        .unwrap();
+    pipeline.set_governance_policy_store(store);
+
+    let principal = Principal::new("ingestor-1", "acme").with_roles(["ingestor"]);
+    let authorizer = Authorizer::default();
+    let resource = ResourceContext::new("acme");
+
+    pipeline
+        .ingest_authorized(
+            make_request_with_idempotency("ap-northeast-1", "dedup-key"),
+            &principal,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    let err = pipeline
+        .ingest_authorized(
+            make_request_with_idempotency("us-east-1", "dedup-key"),
+            &principal,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        IngestionError::Governance(GovernanceError::ResidencyViolation { .. })
+    ));
 }

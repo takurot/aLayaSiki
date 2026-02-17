@@ -42,3 +42,42 @@ async fn query_excludes_retention_expired_nodes() {
         .iter()
         .any(|reason| reason.reason == "retention_expired"));
 }
+
+#[tokio::test]
+async fn query_with_snapshot_id_keeps_expired_nodes_for_reproducibility() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("retention_snapshot.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let mut expired = Node::new(
+        1,
+        deterministic_embedding("EV strategy", "embedding-default-v1", 8),
+        "expired evidence".to_string(),
+    );
+    expired
+        .metadata
+        .insert("retention_until_unix".to_string(), "1".to_string());
+    repo.put_node(expired).await.unwrap();
+
+    let engine = QueryEngine::new(repo);
+    let request = QueryRequest::parse_json(
+        r#"{
+            "query":"EV strategy",
+            "mode":"evidence",
+            "search_mode":"local",
+            "top_k":5,
+            "snapshot_id":"wal-lsn-1"
+        }"#,
+    )
+    .unwrap();
+
+    let response = engine.execute(request).await.unwrap();
+
+    assert_eq!(response.evidence.nodes.len(), 1);
+    assert_eq!(response.evidence.nodes[0].id, 1);
+    assert!(!response
+        .explain
+        .exclusions
+        .iter()
+        .any(|reason| reason.reason == "retention_expired"));
+}

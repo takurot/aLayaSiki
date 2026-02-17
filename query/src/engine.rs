@@ -492,7 +492,7 @@ impl QueryEngine {
         let ranked = map_community_summaries(&request.query, &self.community_summaries);
         let relation_filter = collect_relation_filter(request);
         let time_range = parse_time_range(request)?;
-        let now_unix = current_unix_timestamp();
+        let retention_cutoff = retention_cutoff_unix(request);
         let entity_filter: HashSet<&str> = request
             .filters
             .entity_type
@@ -528,7 +528,12 @@ impl QueryEngine {
                     *score > 0.0
                         && summary.top_nodes.iter().any(|node_id| {
                             top_node_lookup.get(node_id).is_some_and(|node| {
-                                node_passes_filters(node, &entity_filter, time_range, now_unix)
+                                node_passes_filters(
+                                    node,
+                                    &entity_filter,
+                                    time_range,
+                                    retention_cutoff,
+                                )
                             })
                         })
                 })
@@ -760,7 +765,7 @@ impl QueryEngine {
             .collect();
         let query_tokens = tokenize(&request.query);
         let time_range = parse_time_range(request)?;
-        let now_unix = current_unix_timestamp();
+        let retention_cutoff = retention_cutoff_unix(request);
         let entity_filter: HashSet<&str> = request
             .filters
             .entity_type
@@ -779,7 +784,7 @@ impl QueryEngine {
             };
 
             if let Some(reason) =
-                node_filter_exclusion_reason(node, &entity_filter, time_range, now_unix)
+                node_filter_exclusion_reason(node, &entity_filter, time_range, retention_cutoff)
             {
                 exclusions.push(ExclusionReason {
                     node_id: Some(node_id),
@@ -1030,10 +1035,12 @@ fn node_filter_exclusion_reason(
     node: &Node,
     entity_filter: &HashSet<&str>,
     time_range: Option<(NaiveDate, NaiveDate)>,
-    now_unix: u64,
+    retention_cutoff_unix: Option<u64>,
 ) -> Option<String> {
-    if node_is_retention_expired(node, now_unix) {
-        return Some("retention_expired".to_string());
+    if let Some(now_unix) = retention_cutoff_unix {
+        if node_is_retention_expired(node, now_unix) {
+            return Some("retention_expired".to_string());
+        }
     }
 
     if !entity_filter.is_empty() {
@@ -1064,9 +1071,9 @@ fn node_passes_filters(
     node: &Node,
     entity_filter: &HashSet<&str>,
     time_range: Option<(NaiveDate, NaiveDate)>,
-    now_unix: u64,
+    retention_cutoff_unix: Option<u64>,
 ) -> bool {
-    node_filter_exclusion_reason(node, entity_filter, time_range, now_unix).is_none()
+    node_filter_exclusion_reason(node, entity_filter, time_range, retention_cutoff_unix).is_none()
 }
 
 fn node_is_retention_expired(node: &Node, now_unix: u64) -> bool {
@@ -1081,6 +1088,14 @@ fn current_unix_timestamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn retention_cutoff_unix(request: &QueryRequest) -> Option<u64> {
+    if request.snapshot_id.is_some() {
+        None
+    } else {
+        Some(current_unix_timestamp())
+    }
 }
 
 fn effective_query_model_id(request: &QueryRequest) -> String {

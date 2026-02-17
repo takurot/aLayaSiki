@@ -184,6 +184,8 @@ impl IngestionPipeline {
         request: IngestionRequest,
         tenant: Option<&str>,
     ) -> Result<Vec<u64>, IngestionError> {
+        self.validate_governance_preflight(tenant, request.metadata())?;
+
         let content_hash = request.content_hash();
         let idempotency_key = request.idempotency_key().map(|key| key.to_string());
 
@@ -285,6 +287,23 @@ impl IngestionPipeline {
         // self.locks.remove(&lock_key);
 
         Ok(node_ids)
+    }
+
+    fn validate_governance_preflight(
+        &self,
+        tenant: Option<&str>,
+        metadata: &HashMap<String, String>,
+    ) -> Result<(), IngestionError> {
+        let (Some(policy_store), Some(tenant)) = (&self.governance_policy_store, tenant) else {
+            return Ok(());
+        };
+
+        let Some(policy) = policy_store.get_policy(tenant)? else {
+            return Ok(());
+        };
+
+        policy.ensure_residency(metadata.get("region").map(String::as_str))?;
+        Ok(())
     }
 
     fn apply_governance(
