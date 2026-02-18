@@ -25,6 +25,7 @@ pub struct SemanticCacheKey {
     pub snapshot_id: String,
     pub mode: QueryMode,
     pub search_mode: SearchMode,
+    pub effective_search_mode: SearchMode,
     pub top_k: usize,
     pub traversal_depth: u8,
     pub entity_type: Vec<String>,
@@ -36,7 +37,12 @@ pub struct SemanticCacheKey {
 }
 
 impl SemanticCacheKey {
-    pub fn from_request(request: &QueryRequest, model_id: &str, snapshot_id: &str) -> Self {
+    pub fn from_request(
+        request: &QueryRequest,
+        model_id: &str,
+        snapshot_id: &str,
+        effective_search_mode: SearchMode,
+    ) -> Self {
         let mut entity_type = request.filters.entity_type.clone();
         entity_type.sort();
         entity_type.dedup();
@@ -54,6 +60,7 @@ impl SemanticCacheKey {
             snapshot_id: snapshot_id.to_string(),
             mode: request.mode,
             search_mode: request.search_mode,
+            effective_search_mode,
             top_k: request.top_k,
             traversal_depth: request.traversal.depth,
             entity_type,
@@ -252,6 +259,7 @@ mod tests {
             snapshot_id: snapshot_id.to_string(),
             mode: QueryMode::Evidence,
             search_mode: SearchMode::Local,
+            effective_search_mode: SearchMode::Local,
             top_k: 5,
             traversal_depth: 2,
             entity_type: Vec::new(),

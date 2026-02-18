@@ -290,12 +290,17 @@ impl QueryEngine {
             .model_id
             .clone()
             .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string());
+        let mut plan = QueryPlanner::plan(&request);
         let resolved_snapshot_id = match request.snapshot_id.clone() {
             Some(snapshot_id) => snapshot_id,
             None => self.repo.current_snapshot_id().await,
         };
-        let cache_key =
-            SemanticCacheKey::from_request(&request, &effective_model_id, &resolved_snapshot_id);
+        let cache_key = SemanticCacheKey::from_request(
+            &request,
+            &effective_model_id,
+            &resolved_snapshot_id,
+            plan.effective_search_mode,
+        );
 
         if let Some(mut cached_response) =
             self.lookup_semantic_cache(&cache_key, &request.query).await
@@ -314,8 +319,6 @@ impl QueryEngine {
             }
             return Ok(cached_response);
         }
-
-        let mut plan = QueryPlanner::plan(&request);
 
         // Dispatch to the appropriate search mode pipeline.
         let (state, plan, global_answer) = match plan.effective_search_mode {
