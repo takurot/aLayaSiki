@@ -209,7 +209,7 @@
 
 - [x] Semantic Cache（意味的同一クエリの再利用）
 - [x] Time-Travel のスナップショット参照
-- [ ] Backup/Restore の実装（PITR含む）
+- [x] Backup/Restore の実装（PITR含む）
 - [ ] 退避/キャッシュポリシーの設定値反映
 
 **Notes:**
@@ -220,7 +220,10 @@
 - 存在しない `snapshot_id` は `QueryError::NotFound`（NOT_FOUND 相当）で返却する
 - `time_travel` 単独指定時の「日時→スナップショット解決」は未実装で、現状は最新スナップショットにフォールバックする（PR-11 の Backup/Restore タスクで対応）
 - `search_mode=global` かつ `snapshot_id` 指定時は、非バージョン化のコミュニティ要約による時点混線を避けるため要約合成を無効化して evidence ベースにフォールバックする。スナップショット整合のある global map-reduce は将来タスク（PR-11 Backup/Restore 連携）で対応。
-- `storage::snapshot::SnapshotManager` は単体実装済みだが、Repository/Query 経路への統合と PITR は未実装（PR-11 の Backup/Restore タスクで対応）
+- `storage::snapshot::SnapshotManager` を Repository 復元経路へ統合し、WAL 差分再生と組み合わせた PITR を実装
+- `Repository::open_with_snapshots` を追加し、起動時に最新バックアップスナップショットを復元してから WAL 差分を再生する経路を実装
+- `Repository::create_backup_snapshot` / `restore_from_latest_backup` を追加し、運用時のバックアップ作成と復元をサポート
+- `Repository::load_snapshot_view` は snapshot ディレクトリが設定されている場合、`target_lsn` 以前の最新バックアップを起点に PITR を構築するよう拡張
 
 ---
 

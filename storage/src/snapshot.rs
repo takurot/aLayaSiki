@@ -37,33 +37,68 @@ impl SnapshotManager {
 
     /// Find the latest snapshot file (highest LSN).
     pub async fn latest_snapshot(&self) -> Result<Option<(u64, PathBuf)>, SnapshotError> {
+        self.latest_snapshot_at_or_before(u64::MAX).await
+    }
+
+    /// Find the latest snapshot file whose LSN is <= the requested LSN.
+    pub async fn latest_snapshot_at_or_before(
+        &self,
+        upper_lsn: u64,
+    ) -> Result<Option<(u64, PathBuf)>, SnapshotError> {
         if !self.dir.exists() {
             return Ok(None);
         }
 
         let mut entries = fs::read_dir(&self.dir).await?;
-        let mut max_lsn = None;
+        let mut max_seen_lsn = None;
         let mut max_path = None;
 
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                if file_name.starts_with("snapshot_") && file_name.ends_with(".rkyv") {
-                    let lsn_str = &file_name[9..29]; // "snapshot_" len is 9, 20 digits
-                    if let Ok(lsn) = lsn_str.parse::<u64>() {
-                        if max_lsn.is_none_or(|max| lsn > max) {
-                            max_lsn = Some(lsn);
-                            max_path = Some(path);
-                        }
+                if let Some(lsn) = parse_snapshot_lsn(file_name) {
+                    if lsn <= upper_lsn && max_seen_lsn.is_none_or(|max| lsn > max) {
+                        max_seen_lsn = Some(lsn);
+                        max_path = Some(path);
                     }
                 }
             }
         }
 
-        if let (Some(lsn), Some(path)) = (max_lsn, max_path) {
+        if let (Some(lsn), Some(path)) = (max_seen_lsn, max_path) {
             Ok(Some((lsn, path)))
         } else {
             Ok(None)
         }
+    }
+}
+
+fn parse_snapshot_lsn(file_name: &str) -> Option<u64> {
+    let lsn = file_name.strip_prefix("snapshot_")?.strip_suffix(".rkyv")?;
+    lsn.parse::<u64>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn latest_snapshot_at_or_before_filters_by_lsn() {
+        let dir = tempdir().unwrap();
+        let manager = SnapshotManager::new(dir.path());
+
+        manager.create_snapshot(1, b"s1").await.unwrap();
+        manager.create_snapshot(5, b"s5").await.unwrap();
+        manager.create_snapshot(9, b"s9").await.unwrap();
+
+        let at_or_before_five = manager.latest_snapshot_at_or_before(5).await.unwrap();
+        assert_eq!(at_or_before_five.unwrap().0, 5);
+
+        let at_or_before_seven = manager.latest_snapshot_at_or_before(7).await.unwrap();
+        assert_eq!(at_or_before_seven.unwrap().0, 5);
+
+        let no_match = manager.latest_snapshot_at_or_before(0).await.unwrap();
+        assert!(no_match.is_none());
     }
 }
