@@ -1,13 +1,15 @@
 use crate::crypto::{AtRestCipher, NoOpCipher};
 use crate::hyper_index::HyperIndex;
+use crate::snapshot::{SnapshotError, SnapshotManager};
 use crate::wal::{Wal, WalError};
 use alayasiki_core::model::{Edge, Node};
 use rkyv::ser::{serializers::AllocSerializer, Serializer};
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::fs;
 use tokio::sync::{Mutex, RwLock};
 
 #[derive(Error, Debug)]
@@ -26,6 +28,10 @@ pub enum RepoError {
     InvalidSnapshotId(String),
     #[error("Snapshot not found: {0}")]
     SnapshotNotFound(String),
+    #[error("Snapshot manager is not configured")]
+    SnapshotNotConfigured,
+    #[error("Snapshot error: {0}")]
+    Snapshot(#[from] SnapshotError),
 }
 
 /// WAL Entry types for durability
@@ -56,6 +62,59 @@ pub enum IndexMutation {
 
 /// Key for edge metadata lookup: (source, target, relation)
 pub type EdgeMetaKey = (u64, u64, String);
+
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[archive(check_bytes)]
+struct BackupEdgeRecord {
+    source: u64,
+    target: u64,
+    relation: String,
+    weight: f32,
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[archive(check_bytes)]
+struct BackupIdempotencyRecord {
+    key: String,
+    node_ids: Vec<u64>,
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[archive(check_bytes)]
+struct BackupEdgeMetadataRecord {
+    source: u64,
+    target: u64,
+    relation: String,
+    metadata: HashMap<String, String>,
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[archive(check_bytes)]
+struct RepositoryBackupSnapshot {
+    lsn: u64,
+    nodes: Vec<Node>,
+    edges: Vec<BackupEdgeRecord>,
+    idempotency: Vec<BackupIdempotencyRecord>,
+    edge_metadata: Vec<BackupEdgeMetadataRecord>,
+}
+
+struct MaterializedState {
+    nodes: HashMap<u64, Node>,
+    hyper_index: HyperIndex,
+    idempotency_index: HashMap<String, Vec<u64>>,
+    edge_metadata: HashMap<EdgeMetaKey, HashMap<String, String>>,
+}
+
+impl MaterializedState {
+    fn empty() -> Self {
+        Self {
+            nodes: HashMap::new(),
+            hyper_index: HyperIndex::new(),
+            idempotency_index: HashMap::new(),
+            edge_metadata: HashMap::new(),
+        }
+    }
+}
 
 pub struct SnapshotView {
     snapshot_id: String,
@@ -124,6 +183,7 @@ pub struct Repository {
     pub hyper_index: Arc<RwLock<HyperIndex>>,
     idempotency_index: Arc<RwLock<HashMap<String, Vec<u64>>>>,
     edge_metadata: Arc<RwLock<HashMap<EdgeMetaKey, HashMap<String, String>>>>,
+    snapshot_manager: Option<SnapshotManager>,
 }
 
 impl Repository {
@@ -136,6 +196,7 @@ impl Repository {
             hyper_index: Arc::new(RwLock::new(HyperIndex::new())),
             idempotency_index: Arc::new(RwLock::new(HashMap::new())),
             edge_metadata: Arc::new(RwLock::new(HashMap::new())),
+            snapshot_manager: None,
         }
     }
 
@@ -149,47 +210,79 @@ impl Repository {
         wal_path: impl AsRef<Path>,
         cipher: Arc<dyn AtRestCipher>,
     ) -> Result<Self, RepoError> {
+        Self::open_internal(wal_path.as_ref().to_path_buf(), cipher, None).await
+    }
+
+    /// Open a repository and restore state from backup snapshots first, then WAL deltas.
+    pub async fn open_with_snapshots(
+        wal_path: impl AsRef<Path>,
+        snapshot_dir: impl AsRef<Path>,
+    ) -> Result<Self, RepoError> {
+        Self::open_with_cipher_and_snapshots(wal_path, Arc::new(NoOpCipher), snapshot_dir).await
+    }
+
+    /// Open a repository with custom cipher and snapshot-backed recovery.
+    pub async fn open_with_cipher_and_snapshots(
+        wal_path: impl AsRef<Path>,
+        cipher: Arc<dyn AtRestCipher>,
+        snapshot_dir: impl AsRef<Path>,
+    ) -> Result<Self, RepoError> {
+        let snapshot_manager = SnapshotManager::new(snapshot_dir.as_ref());
+        Self::open_internal(
+            wal_path.as_ref().to_path_buf(),
+            cipher,
+            Some(snapshot_manager),
+        )
+        .await
+    }
+
+    async fn open_internal(
+        wal_path: PathBuf,
+        cipher: Arc<dyn AtRestCipher>,
+        snapshot_manager: Option<SnapshotManager>,
+    ) -> Result<Self, RepoError> {
         let wal_instance = Wal::open_with_cipher(&wal_path, cipher).await?;
         let wal = Arc::new(Mutex::new(wal_instance));
         let tx_lock = Arc::new(Mutex::new(()));
-        let nodes = Arc::new(RwLock::new(HashMap::new()));
-        let hyper_index = Arc::new(RwLock::new(HyperIndex::new()));
-        let idempotency_index = Arc::new(RwLock::new(HashMap::new()));
-        let edge_metadata = Arc::new(RwLock::new(HashMap::new()));
+        let (mut materialized, base_lsn) =
+            load_materialized_state_from_backup(snapshot_manager.as_ref(), None).await?;
 
-        // 1. Replay WAL
+        // Replay WAL entries newer than the snapshot baseline.
         {
             let mut wal_lock = wal.lock().await;
-            let mut node_map = nodes.write().await;
-            let mut h_index = hyper_index.write().await;
-            let mut idem_map = idempotency_index.write().await;
-            let mut edge_meta = edge_metadata.write().await;
-
-            wal_lock
-                .replay(|_lsn, data| {
+            let last_replayed_lsn = wal_lock
+                .replay(|lsn, data| {
+                    if lsn <= base_lsn {
+                        return Ok(());
+                    }
                     // Deserialize (zero-copy check)
                     let archived = rkyv::check_archived_root::<WalEntry>(&data[..])
                         .map_err(|_| WalError::CorruptEntry)?;
                     let entry: WalEntry = archived.deserialize(&mut rkyv::Infallible).unwrap();
                     apply_replayed_entry(
                         &entry,
-                        &mut node_map,
-                        &mut h_index,
-                        &mut idem_map,
-                        &mut edge_meta,
+                        &mut materialized.nodes,
+                        &mut materialized.hyper_index,
+                        &mut materialized.idempotency_index,
+                        &mut materialized.edge_metadata,
                     );
                     Ok(())
                 })
                 .await?;
+
+            if base_lsn > last_replayed_lsn {
+                return Err(RepoError::SnapshotNotFound(format!("wal-lsn-{base_lsn}")));
+            }
         }
 
         Ok(Self {
             wal,
             tx_lock,
-            nodes,
-            hyper_index,
-            idempotency_index,
-            edge_metadata,
+            nodes: Arc::new(RwLock::new(materialized.nodes)),
+            hyper_index: Arc::new(RwLock::new(materialized.hyper_index)),
+            idempotency_index: Arc::new(RwLock::new(materialized.idempotency_index)),
+            edge_metadata: Arc::new(RwLock::new(materialized.edge_metadata)),
+            snapshot_manager,
         })
     }
 
@@ -330,25 +423,146 @@ impl Repository {
         format!("wal-lsn-{}", wal.current_lsn())
     }
 
+    /// Create a durable backup snapshot file at the current WAL LSN.
+    pub async fn create_backup_snapshot(&self) -> Result<String, RepoError> {
+        let snapshot_manager = self
+            .snapshot_manager
+            .as_ref()
+            .ok_or(RepoError::SnapshotNotConfigured)?;
+
+        let snapshot = {
+            let _tx_guard = self.tx_lock.lock().await;
+
+            let lsn = {
+                let wal = self.wal.lock().await;
+                wal.current_lsn()
+            };
+
+            let mut nodes: Vec<Node> = self.nodes.read().await.values().cloned().collect();
+            nodes.sort_by_key(|node| node.id);
+
+            let edges = {
+                let index = self.hyper_index.read().await;
+                collect_backup_edges(&index)
+            };
+
+            let mut idempotency: Vec<BackupIdempotencyRecord> = self
+                .idempotency_index
+                .read()
+                .await
+                .iter()
+                .map(|(key, node_ids)| BackupIdempotencyRecord {
+                    key: key.clone(),
+                    node_ids: node_ids.clone(),
+                })
+                .collect();
+            idempotency.sort_by(|a, b| a.key.cmp(&b.key));
+
+            let mut edge_metadata: Vec<BackupEdgeMetadataRecord> = self
+                .edge_metadata
+                .read()
+                .await
+                .iter()
+                .map(
+                    |((source, target, relation), metadata)| BackupEdgeMetadataRecord {
+                        source: *source,
+                        target: *target,
+                        relation: relation.clone(),
+                        metadata: metadata.clone(),
+                    },
+                )
+                .collect();
+            edge_metadata.sort_by(|a, b| {
+                a.source
+                    .cmp(&b.source)
+                    .then(a.target.cmp(&b.target))
+                    .then(a.relation.cmp(&b.relation))
+            });
+
+            RepositoryBackupSnapshot {
+                lsn,
+                nodes,
+                edges,
+                idempotency,
+                edge_metadata,
+            }
+        };
+
+        let encoded = serialize_backup_snapshot(&snapshot)?;
+        snapshot_manager
+            .create_snapshot(snapshot.lsn, &encoded)
+            .await?;
+
+        Ok(format!("wal-lsn-{}", snapshot.lsn))
+    }
+
+    /// Rebuild in-memory state from the latest backup snapshot plus WAL delta replay.
+    pub async fn restore_from_latest_backup(&self) -> Result<String, RepoError> {
+        if self.snapshot_manager.is_none() {
+            return Err(RepoError::SnapshotNotConfigured);
+        }
+
+        let _tx_guard = self.tx_lock.lock().await;
+        let target_lsn = {
+            let wal = self.wal.lock().await;
+            wal.current_lsn()
+        };
+
+        let (mut materialized, base_lsn) =
+            load_materialized_state_from_backup(self.snapshot_manager.as_ref(), Some(target_lsn))
+                .await?;
+
+        {
+            let mut wal = self.wal.lock().await;
+            wal.replay(|lsn, data| {
+                if lsn <= base_lsn || lsn > target_lsn {
+                    return Ok(());
+                }
+
+                let archived = rkyv::check_archived_root::<WalEntry>(&data[..])
+                    .map_err(|_| WalError::CorruptEntry)?;
+                let entry: WalEntry = archived.deserialize(&mut rkyv::Infallible).unwrap();
+                apply_replayed_entry(
+                    &entry,
+                    &mut materialized.nodes,
+                    &mut materialized.hyper_index,
+                    &mut materialized.idempotency_index,
+                    &mut materialized.edge_metadata,
+                );
+                Ok(())
+            })
+            .await?;
+        }
+
+        *self.nodes.write().await = materialized.nodes;
+        *self.hyper_index.write().await = materialized.hyper_index;
+        *self.idempotency_index.write().await = materialized.idempotency_index;
+        *self.edge_metadata.write().await = materialized.edge_metadata;
+
+        Ok(format!("wal-lsn-{target_lsn}"))
+    }
+
     /// Materialize an immutable read view at the specified snapshot.
     /// Supported format: `wal-lsn-<number>`.
     pub async fn load_snapshot_view(&self, snapshot_id: &str) -> Result<SnapshotView, RepoError> {
         let target_lsn = parse_wal_snapshot_lsn(snapshot_id)
             .ok_or_else(|| RepoError::InvalidSnapshotId(snapshot_id.to_string()))?;
 
-        let mut wal = self.wal.lock().await;
-        let current_lsn = wal.current_lsn();
+        let current_lsn = {
+            let wal = self.wal.lock().await;
+            wal.current_lsn()
+        };
         if target_lsn > current_lsn {
             return Err(RepoError::SnapshotNotFound(snapshot_id.to_string()));
         }
 
-        let mut nodes = HashMap::new();
-        let mut hyper_index = HyperIndex::new();
-        let mut idempotency_index = HashMap::new();
-        let mut edge_metadata = HashMap::new();
+        let (mut materialized, base_lsn) =
+            load_materialized_state_from_backup(self.snapshot_manager.as_ref(), Some(target_lsn))
+                .await?;
 
+        let mut wal = self.wal.lock().await;
         wal.replay(|lsn, data| {
-            if lsn > target_lsn {
+            if lsn <= base_lsn || lsn > target_lsn {
                 return Ok(());
             }
 
@@ -357,10 +571,10 @@ impl Repository {
             let entry: WalEntry = archived.deserialize(&mut rkyv::Infallible).unwrap();
             apply_replayed_entry(
                 &entry,
-                &mut nodes,
-                &mut hyper_index,
-                &mut idempotency_index,
-                &mut edge_metadata,
+                &mut materialized.nodes,
+                &mut materialized.hyper_index,
+                &mut materialized.idempotency_index,
+                &mut materialized.edge_metadata,
             );
             Ok(())
         })
@@ -368,9 +582,9 @@ impl Repository {
 
         Ok(SnapshotView {
             snapshot_id: snapshot_id.to_string(),
-            nodes,
-            hyper_index,
-            edge_metadata,
+            nodes: materialized.nodes,
+            hyper_index: materialized.hyper_index,
+            edge_metadata: materialized.edge_metadata,
         })
     }
 
@@ -469,6 +683,105 @@ fn serialize_wal_entry(entry: &WalEntry) -> Result<Vec<u8>, RepoError> {
         .serialize_value(entry)
         .map_err(|_| RepoError::Serialization)?;
     Ok(serializer.into_serializer().into_inner().to_vec())
+}
+
+fn serialize_backup_snapshot(snapshot: &RepositoryBackupSnapshot) -> Result<Vec<u8>, RepoError> {
+    let mut serializer = AllocSerializer::<4096>::default();
+    serializer
+        .serialize_value(snapshot)
+        .map_err(|_| RepoError::Serialization)?;
+    Ok(serializer.into_serializer().into_inner().to_vec())
+}
+
+async fn deserialize_backup_snapshot(path: &Path) -> Result<RepositoryBackupSnapshot, RepoError> {
+    let bytes = fs::read(path)
+        .await
+        .map_err(|err| RepoError::Snapshot(SnapshotError::Io(err)))?;
+    let archived = rkyv::check_archived_root::<RepositoryBackupSnapshot>(&bytes[..])
+        .map_err(|_| RepoError::Deserialization)?;
+    archived
+        .deserialize(&mut rkyv::Infallible)
+        .map_err(|_| RepoError::Deserialization)
+}
+
+async fn load_materialized_state_from_backup(
+    snapshot_manager: Option<&SnapshotManager>,
+    target_lsn: Option<u64>,
+) -> Result<(MaterializedState, u64), RepoError> {
+    let Some(manager) = snapshot_manager else {
+        return Ok((MaterializedState::empty(), 0));
+    };
+
+    let selected = match target_lsn {
+        Some(lsn) => manager.latest_snapshot_at_or_before(lsn).await?,
+        None => manager.latest_snapshot().await?,
+    };
+
+    let Some((snapshot_lsn, path)) = selected else {
+        return Ok((MaterializedState::empty(), 0));
+    };
+
+    let snapshot = deserialize_backup_snapshot(&path).await?;
+    if snapshot.lsn != snapshot_lsn {
+        return Err(RepoError::Deserialization);
+    }
+
+    let mut nodes = HashMap::new();
+    let mut hyper_index = HyperIndex::new();
+    for node in snapshot.nodes {
+        let id = node.id;
+        hyper_index.insert_node(id, node.embedding.clone());
+        nodes.insert(id, node);
+    }
+
+    for edge in snapshot.edges {
+        hyper_index.upsert_edge(edge.source, edge.target, &edge.relation, edge.weight);
+    }
+
+    let mut idempotency_index = HashMap::new();
+    for record in snapshot.idempotency {
+        idempotency_index.insert(record.key, record.node_ids);
+    }
+
+    let mut edge_metadata = HashMap::new();
+    for record in snapshot.edge_metadata {
+        edge_metadata.insert(
+            (record.source, record.target, record.relation),
+            record.metadata,
+        );
+    }
+
+    Ok((
+        MaterializedState {
+            nodes,
+            hyper_index,
+            idempotency_index,
+            edge_metadata,
+        },
+        snapshot_lsn,
+    ))
+}
+
+fn collect_backup_edges(index: &HyperIndex) -> Vec<BackupEdgeRecord> {
+    let mut edges = Vec::new();
+    for source in index.graph_index.node_ids() {
+        for (target, relation, weight) in index.graph_index.neighbors(source) {
+            edges.push(BackupEdgeRecord {
+                source,
+                target: *target,
+                relation: relation.clone(),
+                weight: *weight,
+            });
+        }
+    }
+
+    edges.sort_by(|a, b| {
+        a.source
+            .cmp(&b.source)
+            .then(a.target.cmp(&b.target))
+            .then(a.relation.cmp(&b.relation))
+    });
+    edges
 }
 
 fn apply_replayed_entry(
@@ -844,5 +1157,112 @@ mod tests {
 
         let invalid = repo.load_snapshot_view("snap-custom").await;
         assert!(matches!(invalid, Err(RepoError::InvalidSnapshotId(_))));
+    }
+
+    #[tokio::test]
+    async fn test_open_with_snapshots_restores_snapshot_and_wal_delta() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("snapshot_restore.wal");
+        let snapshot_dir = dir.path().join("snapshots");
+
+        {
+            let repo = Repository::open_with_snapshots(&wal_path, &snapshot_dir)
+                .await
+                .unwrap();
+            repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+                .await
+                .unwrap();
+            repo.put_node(Node::new(2, vec![2.0], "N2".to_string()))
+                .await
+                .unwrap();
+
+            let backup_id = repo.create_backup_snapshot().await.unwrap();
+            assert_eq!(backup_id, "wal-lsn-2");
+
+            repo.put_node(Node::new(3, vec![3.0], "N3".to_string()))
+                .await
+                .unwrap();
+        }
+
+        let reopened = Repository::open_with_snapshots(&wal_path, &snapshot_dir)
+            .await
+            .unwrap();
+        assert_eq!(reopened.list_node_ids().await, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_restore_from_latest_backup_rebuilds_in_memory_state() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("restore_latest_from_backup.wal");
+        let snapshot_dir = dir.path().join("snapshots");
+
+        let repo = Repository::open_with_snapshots(&wal_path, &snapshot_dir)
+            .await
+            .unwrap();
+        repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+            .await
+            .unwrap();
+        repo.put_node(Node::new(2, vec![2.0], "N2".to_string()))
+            .await
+            .unwrap();
+        repo.create_backup_snapshot().await.unwrap();
+        repo.delete_node(2).await.unwrap();
+
+        // Simulate transient in-memory corruption and verify restore recovers from durable state.
+        repo.nodes.write().await.clear();
+        *repo.hyper_index.write().await = HyperIndex::new();
+        repo.idempotency_index.write().await.clear();
+        repo.edge_metadata.write().await.clear();
+
+        assert!(repo.list_node_ids().await.is_empty());
+
+        let restored_snapshot = repo.restore_from_latest_backup().await.unwrap();
+        assert_eq!(restored_snapshot, "wal-lsn-3");
+        assert_eq!(repo.list_node_ids().await, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_backup_requires_snapshot_manager_configuration() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("no_snapshot_manager.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        let create_backup = repo.create_backup_snapshot().await;
+        assert!(matches!(
+            create_backup,
+            Err(RepoError::SnapshotNotConfigured)
+        ));
+
+        let restore = repo.restore_from_latest_backup().await;
+        assert!(matches!(restore, Err(RepoError::SnapshotNotConfigured)));
+    }
+
+    #[tokio::test]
+    async fn test_open_with_snapshots_rejects_snapshot_newer_than_wal() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("snapshot_newer_than_wal.wal");
+        let snapshot_dir = dir.path().join("snapshots");
+
+        {
+            let repo = Repository::open_with_snapshots(&wal_path, &snapshot_dir)
+                .await
+                .unwrap();
+            repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+                .await
+                .unwrap();
+            repo.put_node(Node::new(2, vec![2.0], "N2".to_string()))
+                .await
+                .unwrap();
+            let snapshot_id = repo.create_backup_snapshot().await.unwrap();
+            assert_eq!(snapshot_id, "wal-lsn-2");
+        }
+
+        tokio::fs::write(&wal_path, &[]).await.unwrap();
+
+        let reopened = Repository::open_with_snapshots(&wal_path, &snapshot_dir).await;
+        assert!(matches!(
+            reopened,
+            Err(RepoError::SnapshotNotFound(ref snapshot_id)) if snapshot_id == "wal-lsn-2"
+        ));
     }
 }
