@@ -586,6 +586,25 @@ impl QueryEngine {
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
     ) -> Result<(ExecutionState, QueryPlan, Option<String>), QueryError> {
+        if snapshot_view.is_some() {
+            // Community summaries are not versioned by snapshot yet.
+            // To keep snapshot queries reproducible, skip global synthesis.
+            plan.steps = vec![
+                "vector_search",
+                "graph_expansion",
+                "context_pruning",
+                "global_fallback_snapshot_pinned",
+            ];
+            let mut state = self
+                .execute_with_plan(request, plan, embedding_model_id, snapshot_view)
+                .await?;
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "global_summary_disabled_by_snapshot_pin".to_string(),
+            });
+            return Ok((state, plan.clone(), None));
+        }
+
         if self.community_summaries.is_empty() {
             // Fallback: no community data available — run expanded vector search.
             plan.steps = vec![

@@ -490,6 +490,71 @@ async fn test_global_search_disables_summary_when_relation_filter_present() {
     }
 }
 
+#[tokio::test]
+async fn test_global_search_disables_summary_when_snapshot_is_pinned() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("global_snapshot_pin.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    repo.put_node(Node::new(
+        1,
+        deterministic_embedding("baseline trend", MODEL_ID, DIMS),
+        "baseline evidence".to_string(),
+    ))
+    .await
+    .unwrap();
+    let snapshot_id = repo.current_snapshot_id().await;
+
+    repo.put_node(Node::new(
+        2,
+        deterministic_embedding("future leaked trend", MODEL_ID, DIMS),
+        "future evidence".to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let summaries = vec![CommunitySummary {
+        level: 0,
+        community_id: 0,
+        top_nodes: vec![2],
+        summary: "Global synthesis: leaked future summary".to_string(),
+    }];
+    let engine = QueryEngine::new(repo).with_community_summaries(summaries);
+
+    let request = QueryRequest::parse_json(&format!(
+        r#"{{
+            "query": "future leaked trend",
+            "mode": "answer",
+            "search_mode": "global",
+            "top_k": 5,
+            "snapshot_id": "{}"
+        }}"#,
+        snapshot_id
+    ))
+    .unwrap();
+
+    let response = engine.execute(request).await.unwrap();
+
+    assert!(
+        response
+            .explain
+            .exclusions
+            .iter()
+            .any(|ex| ex.reason == "global_summary_disabled_by_snapshot_pin"),
+        "global summary must be disabled for pinned snapshots"
+    );
+    if let Some(answer) = &response.answer {
+        assert!(
+            !answer.contains("leaked future summary"),
+            "snapshot-pinned response must not include non-versioned summary text"
+        );
+    }
+    assert!(
+        response.evidence.nodes.iter().all(|node| node.id != 2),
+        "snapshot-pinned evidence must exclude post-snapshot nodes"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 6. DRIFT Search: Iterative Feedback Loop
 // ---------------------------------------------------------------------------
