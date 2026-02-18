@@ -6,7 +6,7 @@ const DEFAULT_TOP_K: usize = 20;
 const MAX_TOP_K: usize = 1_000;
 const MAX_DEPTH: u8 = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryMode {
     #[default]
@@ -14,7 +14,7 @@ pub enum QueryMode {
     Evidence,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchMode {
     Local,

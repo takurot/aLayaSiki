@@ -47,6 +47,7 @@ Use this file as the default execution rules for implementing tasks/PRs in this 
 - Check `docs/adr/` for relevant architectural decisions.
 - Clarify scope: what exactly is in/out for the requested PR/tasks.
 - Create a short checklist of tasks you will complete (map to `docs/PLAN.md`).
+- Define explicit acceptance points from `docs/SPEC.md` for the scoped task, and verify implementation/test coverage against them.
 
 ### 1) Branching
 - Branch name: `feature/<pr-id>-<short-description>`
@@ -114,6 +115,7 @@ ruff format benchmarks/
 
 ### 7) Update Documentation
 - Update `docs/PLAN.md` checkboxes and add notes for follow‑ups/risks.
+- If there is a gap between `docs/SPEC.md` and implementation: add a note under the relevant future task in `docs/PLAN.md`; if no such task exists, add a new task in `docs/PLAN.md`.
 - Create/update `docs/adr/` if making architectural decisions.
 - Only update `docs/SPEC.md` if changing the intended behavior/contract.
 
@@ -163,6 +165,7 @@ Use `rkyv` derives with `#[archive(check_bytes)]` for safe zero-copy access.
 - [ ] All tests pass (`cargo test`).
 - [ ] Benchmarks checked when performance-sensitive code changed.
 - [ ] `cargo fmt` / `cargo clippy` are clean.
+- [ ] Checked for gaps between `docs/SPEC.md` and the implementation in scope; if a future task exists, added a note in `docs/PLAN.md`; if not, added a new task in `docs/PLAN.md`.
 - [ ] `docs/PLAN.md` updated with progress and notes.
 - [ ] ADR created if architectural decision was made.
 
