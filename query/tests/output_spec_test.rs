@@ -461,26 +461,28 @@ async fn test_time_travel_validation_rejects_invalid_format() {
 #[tokio::test]
 async fn test_snapshot_id_takes_priority_over_time_travel() {
     let (_dir, repo, _summaries) = provenance_repo().await;
+    let snapshot_id = repo.current_snapshot_id().await;
     let engine = QueryEngine::new(repo);
 
     // Both snapshot_id and time_travel provided — snapshot_id wins
-    let request = QueryRequest::parse_json(
-        r#"{
+    let request = QueryRequest::parse_json(&format!(
+        r#"{{
             "query": "EV production",
             "mode": "evidence",
             "search_mode": "local",
             "top_k": 5,
-            "snapshot_id": "snap-explicit",
+            "snapshot_id": "{}",
             "time_travel": "2024-01-01"
-        }"#,
-    )
+        }}"#,
+        snapshot_id
+    ))
     .unwrap();
 
     let response = engine.execute(request).await.unwrap();
 
     assert_eq!(
         response.snapshot_id.as_deref(),
-        Some("snap-explicit"),
+        Some(snapshot_id.as_str()),
         "snapshot_id must take priority over time_travel"
     );
 }

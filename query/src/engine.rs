@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use storage::community::CommunitySummary;
-use storage::repo::{RepoError, Repository};
+use storage::repo::{RepoError, Repository, SnapshotView};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -118,6 +118,8 @@ pub struct QueryResponse {
 pub enum QueryError {
     #[error("invalid query: {0}")]
     InvalidQuery(String),
+    #[error("not found: {0}")]
+    NotFound(String),
     #[error("repository error: {0}")]
     Repository(#[from] RepoError),
     #[error("authorization error: {0}")]
@@ -291,10 +293,7 @@ impl QueryEngine {
             .clone()
             .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string());
         let mut plan = QueryPlanner::plan(&request);
-        let resolved_snapshot_id = match request.snapshot_id.clone() {
-            Some(snapshot_id) => snapshot_id,
-            None => self.repo.current_snapshot_id().await,
-        };
+        let (resolved_snapshot_id, snapshot_view) = self.resolve_snapshot_view(&request).await?;
         let cache_key = SemanticCacheKey::from_request(
             &request,
             &effective_model_id,
@@ -323,18 +322,33 @@ impl QueryEngine {
         // Dispatch to the appropriate search mode pipeline.
         let (state, plan, global_answer) = match plan.effective_search_mode {
             SearchMode::Global => {
-                self.execute_global(&request, &mut plan, &effective_model_id)
-                    .await?
+                self.execute_global(
+                    &request,
+                    &mut plan,
+                    &effective_model_id,
+                    snapshot_view.as_deref(),
+                )
+                .await?
             }
             SearchMode::Drift => {
                 let (state, plan) = self
-                    .execute_drift(&request, &mut plan, &effective_model_id)
+                    .execute_drift(
+                        &request,
+                        &mut plan,
+                        &effective_model_id,
+                        snapshot_view.as_deref(),
+                    )
                     .await?;
                 (state, plan, None)
             }
             SearchMode::Local | SearchMode::Auto => {
                 let (state, plan) = self
-                    .execute_local_with_auto_fallback(&request, plan, &effective_model_id)
+                    .execute_local_with_auto_fallback(
+                        &request,
+                        plan,
+                        &effective_model_id,
+                        snapshot_view.as_deref(),
+                    )
                     .await?;
                 (state, plan, None)
             }
@@ -471,6 +485,55 @@ impl QueryEngine {
         cache.insert(key, query, response);
     }
 
+    async fn resolve_snapshot_view(
+        &self,
+        request: &QueryRequest,
+    ) -> Result<(String, Option<Arc<SnapshotView>>), QueryError> {
+        let Some(snapshot_id) = request.snapshot_id.clone() else {
+            return Ok((self.repo.current_snapshot_id().await, None));
+        };
+
+        match self.repo.load_snapshot_view(&snapshot_id).await {
+            Ok(view) => Ok((snapshot_id, Some(Arc::new(view)))),
+            Err(RepoError::SnapshotNotFound(_)) => {
+                Err(QueryError::NotFound(format!("snapshot_id `{snapshot_id}`")))
+            }
+            Err(RepoError::InvalidSnapshotId(_)) => Err(QueryError::InvalidQuery(format!(
+                "snapshot_id must be wal-lsn-<lsn>: {snapshot_id}"
+            ))),
+            Err(err) => Err(QueryError::Repository(err)),
+        }
+    }
+
+    async fn list_node_ids_from_source(&self, snapshot_view: Option<&SnapshotView>) -> Vec<u64> {
+        match snapshot_view {
+            Some(view) => view.list_node_ids(),
+            None => self.repo.list_node_ids().await,
+        }
+    }
+
+    async fn get_nodes_by_ids_from_source(
+        &self,
+        ids: &[u64],
+        snapshot_view: Option<&SnapshotView>,
+    ) -> Vec<Node> {
+        match snapshot_view {
+            Some(view) => view.get_nodes_by_ids(ids),
+            None => self.repo.get_nodes_by_ids(ids).await,
+        }
+    }
+
+    async fn get_edge_metadata_bulk_from_source(
+        &self,
+        keys: &[(u64, u64, String)],
+        snapshot_view: Option<&SnapshotView>,
+    ) -> HashMap<(u64, u64, String), HashMap<String, String>> {
+        match snapshot_view {
+            Some(view) => view.get_edge_metadata_bulk(keys),
+            None => self.repo.get_edge_metadata_bulk(keys).await,
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Local Search with Auto-fallback to DRIFT
     // -----------------------------------------------------------------------
@@ -479,9 +542,10 @@ impl QueryEngine {
         request: &QueryRequest,
         mut plan: QueryPlan,
         embedding_model_id: &str,
+        snapshot_view: Option<&SnapshotView>,
     ) -> Result<(ExecutionState, QueryPlan), QueryError> {
         let mut state = self
-            .execute_with_plan(request, &plan, embedding_model_id)
+            .execute_with_plan(request, &plan, embedding_model_id, snapshot_view)
             .await?;
 
         // Record vector-only fallback when graph expansion added nothing.
@@ -498,7 +562,7 @@ impl QueryEngine {
             && state.nodes.len() < 2
         {
             let (drift_state, drift_plan) = self
-                .execute_drift(request, &mut plan, embedding_model_id)
+                .execute_drift(request, &mut plan, embedding_model_id, snapshot_view)
                 .await?;
             let mut drift_state = drift_state;
             drift_state.exclusions.push(ExclusionReason {
@@ -520,7 +584,27 @@ impl QueryEngine {
         request: &QueryRequest,
         plan: &mut QueryPlan,
         embedding_model_id: &str,
+        snapshot_view: Option<&SnapshotView>,
     ) -> Result<(ExecutionState, QueryPlan, Option<String>), QueryError> {
+        if snapshot_view.is_some() {
+            // Community summaries are not versioned by snapshot yet.
+            // To keep snapshot queries reproducible, skip global synthesis.
+            plan.steps = vec![
+                "vector_search",
+                "graph_expansion",
+                "context_pruning",
+                "global_fallback_snapshot_pinned",
+            ];
+            let mut state = self
+                .execute_with_plan(request, plan, embedding_model_id, snapshot_view)
+                .await?;
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "global_summary_disabled_by_snapshot_pin".to_string(),
+            });
+            return Ok((state, plan.clone(), None));
+        }
+
         if self.community_summaries.is_empty() {
             // Fallback: no community data available — run expanded vector search.
             plan.steps = vec![
@@ -530,7 +614,7 @@ impl QueryEngine {
                 "global_fallback_no_community_data",
             ];
             let mut state = self
-                .execute_with_plan(request, plan, embedding_model_id)
+                .execute_with_plan(request, plan, embedding_model_id, snapshot_view)
                 .await?;
             state.exclusions.push(ExclusionReason {
                 node_id: None,
@@ -541,7 +625,7 @@ impl QueryEngine {
 
         // Always build filtered evidence first so global synthesis can respect request filters.
         let mut state = self
-            .execute_with_plan(request, plan, embedding_model_id)
+            .execute_with_plan(request, plan, embedding_model_id, snapshot_view)
             .await?;
 
         // MAP: Score community summaries.
@@ -570,7 +654,9 @@ impl QueryEngine {
             }
             out
         };
-        let top_nodes = self.repo.get_nodes_by_ids(&all_top_node_ids).await;
+        let top_nodes = self
+            .get_nodes_by_ids_from_source(&all_top_node_ids, snapshot_view)
+            .await;
         let top_node_lookup: HashMap<u64, Node> =
             top_nodes.into_iter().map(|node| (node.id, node)).collect();
 
@@ -636,6 +722,7 @@ impl QueryEngine {
         request: &QueryRequest,
         plan: &mut QueryPlan,
         embedding_model_id: &str,
+        snapshot_view: Option<&SnapshotView>,
     ) -> Result<(ExecutionState, QueryPlan), QueryError> {
         plan.effective_search_mode = SearchMode::Drift;
 
@@ -650,7 +737,7 @@ impl QueryEngine {
             iter_plan.vector_top_k = plan.vector_top_k.saturating_add(iteration * 2).min(50);
 
             let state = self
-                .execute_with_plan(request, &iter_plan, embedding_model_id)
+                .execute_with_plan(request, &iter_plan, embedding_model_id, snapshot_view)
                 .await?;
 
             let is_sufficient = state.nodes.len() >= DRIFT_EVIDENCE_THRESHOLD
@@ -703,12 +790,18 @@ impl QueryEngine {
         request: &QueryRequest,
         plan: &QueryPlan,
         embedding_model_id: &str,
+        snapshot_view: Option<&SnapshotView>,
     ) -> Result<ExecutionState, QueryError> {
         let mut vector_hits = self
-            .collect_vector_scores(request, plan, embedding_model_id)
+            .collect_vector_scores(request, plan, embedding_model_id, snapshot_view)
             .await;
         if vector_hits.is_empty() {
-            if let Some(node_id) = self.repo.list_node_ids().await.into_iter().next() {
+            if let Some(node_id) = self
+                .list_node_ids_from_source(snapshot_view)
+                .await
+                .into_iter()
+                .next()
+            {
                 vector_hits.push((node_id, 0.0));
             }
         }
@@ -742,7 +835,68 @@ impl QueryEngine {
         let mut exclusions = Vec::new();
         let mut traversed_edges = Vec::new();
 
-        {
+        if let Some(view) = snapshot_view {
+            for anchor in &anchors {
+                candidate_hops.entry(anchor.node_id).or_insert(0);
+
+                let mut queue = VecDeque::new();
+                let mut visited: HashMap<u64, u8> = HashMap::new();
+                let mut parents: HashMap<u64, u64> = HashMap::new();
+
+                queue.push_back(anchor.node_id);
+                visited.insert(anchor.node_id, 0);
+
+                while let Some(current_id) = queue.pop_front() {
+                    let current_hop = *visited.get(&current_id).unwrap_or(&0);
+                    if current_hop >= plan.expansion_depth {
+                        continue;
+                    }
+
+                    for (target, relation, weight) in view.neighbors(current_id) {
+                        if !relation_is_allowed(relation.as_str(), &relation_filter) {
+                            exclusions.push(ExclusionReason {
+                                node_id: Some(target),
+                                reason: format!("relation_filtered:{}", relation),
+                            });
+                            continue;
+                        }
+
+                        traversed_edges.push(InternalEdge {
+                            source: current_id,
+                            target,
+                            relation: relation.clone(),
+                            weight,
+                            provenance: Provenance::default(),
+                            confidence: weight,
+                        });
+
+                        let next_hop = current_hop + 1;
+                        let should_visit = visited
+                            .get(&target)
+                            .map(|prev_hop| next_hop < *prev_hop)
+                            .unwrap_or(true);
+
+                        if should_visit {
+                            visited.insert(target, next_hop);
+                            parents.insert(target, current_id);
+                            queue.push_back(target);
+                            candidate_hops
+                                .entry(target)
+                                .and_modify(|hop| *hop = (*hop).min(next_hop))
+                                .or_insert(next_hop);
+
+                            if let Some(path) = reconstruct_path(anchor.node_id, target, &parents) {
+                                expansion_paths.push(ExpansionPath {
+                                    anchor_id: anchor.node_id,
+                                    target_id: target,
+                                    path,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
             let index = self.repo.hyper_index.read().await;
 
             for anchor in &anchors {
@@ -809,7 +963,9 @@ impl QueryEngine {
         }
 
         let candidate_ids: Vec<u64> = candidate_hops.keys().copied().collect();
-        let fetched_nodes = self.repo.get_nodes_by_ids(&candidate_ids).await;
+        let fetched_nodes = self
+            .get_nodes_by_ids_from_source(&candidate_ids, snapshot_view)
+            .await;
         let node_lookup: HashMap<u64, Node> = fetched_nodes
             .into_iter()
             .map(|node| (node.id, node))
@@ -910,7 +1066,9 @@ impl QueryEngine {
                 .iter()
                 .map(|e| (e.source, e.target, e.relation.clone()))
                 .collect();
-            let all_meta = self.repo.get_edge_metadata_bulk(&edge_keys).await;
+            let all_meta = self
+                .get_edge_metadata_bulk_from_source(&edge_keys, snapshot_view)
+                .await;
             for edge in &mut edges {
                 let key = (edge.source, edge.target, edge.relation.clone());
                 if let Some(meta) = all_meta.get(&key) {
@@ -948,8 +1106,13 @@ impl QueryEngine {
         request: &QueryRequest,
         plan: &QueryPlan,
         embedding_model_id: &str,
+        snapshot_view: Option<&SnapshotView>,
     ) -> Vec<(u64, f32)> {
-        let Some(embedding_dim) = self.repo.embedding_dimension().await else {
+        let embedding_dim = match snapshot_view {
+            Some(view) => view.embedding_dimension(),
+            None => self.repo.embedding_dimension().await,
+        };
+        let Some(embedding_dim) = embedding_dim else {
             return Vec::new();
         };
 
@@ -961,8 +1124,13 @@ impl QueryEngine {
         }
         .max(1);
 
-        let index = self.repo.hyper_index.read().await;
-        index.search_vector(&query_embedding, vector_limit)
+        match snapshot_view {
+            Some(view) => view.search_vector(&query_embedding, vector_limit),
+            None => {
+                let index = self.repo.hyper_index.read().await;
+                index.search_vector(&query_embedding, vector_limit)
+            }
+        }
     }
 }
 
