@@ -207,10 +207,15 @@
 
 * Depends on: PR-02, PR-07
 
-- [ ] Semantic Cache（意味的同一クエリの再利用）
+- [x] Semantic Cache（意味的同一クエリの再利用）
 - [ ] Time-Travel のスナップショット参照
 - [ ] Backup/Restore の実装（PITR含む）
 - [ ] 退避/キャッシュポリシーの設定値反映
+
+**Notes:**
+- `query::semantic_cache` を追加し、`QueryEngine` 実行前に `QueryRequest` + `model_id` + `snapshot_id` をキーとして意味類似照合するキャッシュを実装
+- 類似度は正規化クエリのトークンJaccardで判定し、閾値以上の場合は `semantic_cache_hit` を `explain.steps` に付与して即時返却
+- スナップショット境界（`snapshot_id`）をキーに含め、異なる時点のデータ間でキャッシュが混線しないことを `query/tests/semantic_cache_test.rs` で検証
 
 ---
 

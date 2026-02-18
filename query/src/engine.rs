@@ -4,6 +4,7 @@ use crate::graphrag::{
     DRIFT_EVIDENCE_THRESHOLD, DRIFT_MAX_ITERATIONS,
 };
 use crate::planner::{QueryPlan, QueryPlanner};
+use crate::semantic_cache::{SemanticCache, SemanticCacheConfig, SemanticCacheKey};
 use alayasiki_core::audit::{AuditEvent, AuditOperation, AuditOutcome, AuditSink};
 use alayasiki_core::auth::{Action, Authorizer, AuthzError, Principal, ResourceContext};
 use alayasiki_core::embedding::deterministic_embedding;
@@ -17,6 +18,7 @@ use std::time::Instant;
 use storage::community::CommunitySummary;
 use storage::repo::{RepoError, Repository};
 use thiserror::Error;
+use tokio::sync::Mutex;
 
 /// Provenance metadata attached to evidence items.
 /// Captures the data lineage: where it came from and how it was extracted.
@@ -126,6 +128,7 @@ pub struct QueryEngine {
     repo: Arc<Repository>,
     community_summaries: Vec<CommunitySummary>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    semantic_cache: Arc<Mutex<SemanticCache<QueryResponse>>>,
 }
 
 const DEFAULT_EMBEDDING_MODEL_ID: &str = "embedding-default-v1";
@@ -170,6 +173,9 @@ impl QueryEngine {
             repo,
             community_summaries: Vec::new(),
             audit_sink: None,
+            semantic_cache: Arc::new(Mutex::new(SemanticCache::with_config(
+                SemanticCacheConfig::default(),
+            ))),
         }
     }
 
@@ -181,6 +187,11 @@ impl QueryEngine {
 
     pub fn with_audit_sink(mut self, sink: Arc<dyn AuditSink>) -> Self {
         self.audit_sink = Some(sink);
+        self
+    }
+
+    pub fn with_semantic_cache_config(mut self, config: SemanticCacheConfig) -> Self {
+        self.semantic_cache = Arc::new(Mutex::new(SemanticCache::with_config(config)));
         self
     }
 
@@ -279,6 +290,30 @@ impl QueryEngine {
             .model_id
             .clone()
             .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string());
+        let resolved_snapshot_id = match request.snapshot_id.clone() {
+            Some(snapshot_id) => snapshot_id,
+            None => self.repo.current_snapshot_id().await,
+        };
+        let cache_key =
+            SemanticCacheKey::from_request(&request, &effective_model_id, &resolved_snapshot_id);
+
+        if let Some(mut cached_response) =
+            self.lookup_semantic_cache(&cache_key, &request.query).await
+        {
+            cached_response.latency_ms = start.elapsed().as_millis() as u64;
+            if !cached_response
+                .explain
+                .steps
+                .iter()
+                .any(|step| step == "semantic_cache_hit")
+            {
+                cached_response
+                    .explain
+                    .steps
+                    .insert(0, "semantic_cache_hit".to_string());
+            }
+            return Ok(cached_response);
+        }
 
         let mut plan = QueryPlanner::plan(&request);
 
@@ -372,12 +407,6 @@ impl QueryEngine {
             }
         };
 
-        // snapshot_id takes priority over time_travel (SPEC 4.1)
-        let snapshot_id = match request.snapshot_id.clone() {
-            Some(snapshot_id) => Some(snapshot_id),
-            None => Some(self.repo.current_snapshot_id().await),
-        };
-
         // Reflect time_travel in response when provided (without snapshot_id override)
         let time_travel = if request.snapshot_id.is_none() {
             request.time_travel.clone()
@@ -387,7 +416,7 @@ impl QueryEngine {
 
         let latency_ms = start.elapsed().as_millis() as u64;
 
-        Ok(QueryResponse {
+        let response = QueryResponse {
             answer,
             evidence: EvidenceSubgraph {
                 nodes: evidence_nodes,
@@ -403,16 +432,40 @@ impl QueryEngine {
                 exclusions: state.exclusions,
             },
             model_id: Some(effective_model_id),
-            snapshot_id,
+            snapshot_id: Some(resolved_snapshot_id),
             time_travel,
             latency_ms,
-        })
+        };
+
+        self.insert_semantic_cache(cache_key, &request.query, response.clone())
+            .await;
+
+        Ok(response)
     }
 
     fn emit_audit_event(&self, event: AuditEvent) {
         if let Some(sink) = &self.audit_sink {
             let _ = sink.record(event);
         }
+    }
+
+    async fn lookup_semantic_cache(
+        &self,
+        key: &SemanticCacheKey,
+        query: &str,
+    ) -> Option<QueryResponse> {
+        let mut cache = self.semantic_cache.lock().await;
+        cache.lookup(key, query)
+    }
+
+    async fn insert_semantic_cache(
+        &self,
+        key: SemanticCacheKey,
+        query: &str,
+        response: QueryResponse,
+    ) {
+        let mut cache = self.semantic_cache.lock().await;
+        cache.insert(key, query, response);
     }
 
     // -----------------------------------------------------------------------
