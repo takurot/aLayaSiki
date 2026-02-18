@@ -317,6 +317,7 @@
 - [ ] **並列度検証**: worker 数（8/32/128）別に read:write=9:1 の劣化カーブを取得
 - [ ] **結果保存の標準化**: ベンチ結果を `benchmarks/results/*.json` に出力し、比較可能な履歴を残す
 - [ ] **回帰ガード**: CI に p95 閾値チェック（read/write）を導入し、悪化時に失敗させる
+- [ ] **CIベンチ基準の実運用化**: Operational/ANN ベンチの入力条件を baseline と一致させ、閾値（read/write p95・throughput・ANN回帰率）を現実的な SLO ベースに再定義し、過剰に緩い基準を解消する
 
 ---
 
