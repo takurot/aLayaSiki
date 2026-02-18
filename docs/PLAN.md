@@ -208,7 +208,7 @@
 * Depends on: PR-02, PR-07
 
 - [x] Semantic Cache（意味的同一クエリの再利用）
-- [ ] Time-Travel のスナップショット参照
+- [x] Time-Travel のスナップショット参照
 - [ ] Backup/Restore の実装（PITR含む）
 - [ ] 退避/キャッシュポリシーの設定値反映
 
@@ -216,8 +216,9 @@
 - `query::semantic_cache` を追加し、`QueryEngine` 実行前に `QueryRequest` + `model_id` + `snapshot_id` をキーとして意味類似照合するキャッシュを実装
 - 類似度は正規化クエリのトークンJaccardで判定し、閾値以上の場合は `semantic_cache_hit` を `explain.steps` に付与して即時返却
 - スナップショット境界（`snapshot_id`）をキーに含め、異なる時点のデータ間でキャッシュが混線しないことを `query/tests/semantic_cache_test.rs` で検証
-- `time_travel` は現状「入力バリデーション + レスポンス反映」までで、指定時点の実データ参照は未実装（PR-11 の Time-Travel タスクで対応）
-- `snapshot_id` の存在検証と `NOT_FOUND` 返却は未実装（PR-11 の Time-Travel/Backup タスクで対応）
+- `snapshot_id=wal-lsn-<N>` を指定したクエリは、WAL を `N` まで再生した読み取りビューを使って実行される（`storage::repo::Repository::load_snapshot_view`）
+- 存在しない `snapshot_id` は `QueryError::NotFound`（NOT_FOUND 相当）で返却する
+- `time_travel` 単独指定時の「日時→スナップショット解決」は未実装で、現状は最新スナップショットにフォールバックする（PR-11 の Backup/Restore タスクで対応）
 - `storage::snapshot::SnapshotManager` は単体実装済みだが、Repository/Query 経路への統合と PITR は未実装（PR-11 の Backup/Restore タスクで対応）
 
 ---

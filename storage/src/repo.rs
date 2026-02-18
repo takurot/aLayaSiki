@@ -22,6 +22,10 @@ pub enum RepoError {
     NotFound,
     #[error("Invalid transaction: {0}")]
     InvalidTransaction(String),
+    #[error("Invalid snapshot id: {0}")]
+    InvalidSnapshotId(String),
+    #[error("Snapshot not found: {0}")]
+    SnapshotNotFound(String),
 }
 
 /// WAL Entry types for durability
@@ -52,6 +56,66 @@ pub enum IndexMutation {
 
 /// Key for edge metadata lookup: (source, target, relation)
 pub type EdgeMetaKey = (u64, u64, String);
+
+pub struct SnapshotView {
+    snapshot_id: String,
+    nodes: HashMap<u64, Node>,
+    hyper_index: HyperIndex,
+    edge_metadata: HashMap<EdgeMetaKey, HashMap<String, String>>,
+}
+
+impl SnapshotView {
+    pub fn snapshot_id(&self) -> &str {
+        &self.snapshot_id
+    }
+
+    pub fn list_node_ids(&self) -> Vec<u64> {
+        let mut out: Vec<u64> = self.nodes.keys().copied().collect();
+        out.sort_unstable();
+        out
+    }
+
+    pub fn get_nodes_by_ids(&self, ids: &[u64]) -> Vec<Node> {
+        let mut out: Vec<Node> = ids
+            .iter()
+            .filter_map(|id| self.nodes.get(id).cloned())
+            .collect();
+        out.sort_by_key(|node| node.id);
+        out
+    }
+
+    pub fn embedding_dimension(&self) -> Option<usize> {
+        self.nodes
+            .values()
+            .find_map(|node| (!node.embedding.is_empty()).then_some(node.embedding.len()))
+    }
+
+    pub fn search_vector(&self, query: &[f32], k: usize) -> Vec<(u64, f32)> {
+        self.hyper_index.search_vector(query, k)
+    }
+
+    pub fn neighbors(&self, node_id: u64) -> Vec<(u64, String, f32)> {
+        self.hyper_index
+            .graph_index
+            .neighbors(node_id)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    pub fn get_edge_metadata_bulk(
+        &self,
+        keys: &[(u64, u64, String)],
+    ) -> HashMap<EdgeMetaKey, HashMap<String, String>> {
+        keys.iter()
+            .filter_map(|key| {
+                self.edge_metadata
+                    .get(key)
+                    .map(|meta| (key.clone(), meta.clone()))
+            })
+            .collect()
+    }
+}
 
 pub struct Repository {
     wal: Arc<Mutex<Wal>>,
@@ -266,6 +330,50 @@ impl Repository {
         format!("wal-lsn-{}", wal.current_lsn())
     }
 
+    /// Materialize an immutable read view at the specified snapshot.
+    /// Supported format: `wal-lsn-<number>`.
+    pub async fn load_snapshot_view(&self, snapshot_id: &str) -> Result<SnapshotView, RepoError> {
+        let target_lsn = parse_wal_snapshot_lsn(snapshot_id)
+            .ok_or_else(|| RepoError::InvalidSnapshotId(snapshot_id.to_string()))?;
+
+        let mut wal = self.wal.lock().await;
+        let current_lsn = wal.current_lsn();
+        if target_lsn > current_lsn {
+            return Err(RepoError::SnapshotNotFound(snapshot_id.to_string()));
+        }
+
+        let mut nodes = HashMap::new();
+        let mut hyper_index = HyperIndex::new();
+        let mut idempotency_index = HashMap::new();
+        let mut edge_metadata = HashMap::new();
+
+        wal.replay(|lsn, data| {
+            if lsn > target_lsn {
+                return Ok(());
+            }
+
+            let archived = rkyv::check_archived_root::<WalEntry>(&data[..])
+                .map_err(|_| WalError::CorruptEntry)?;
+            let entry: WalEntry = archived.deserialize(&mut rkyv::Infallible).unwrap();
+            apply_replayed_entry(
+                &entry,
+                &mut nodes,
+                &mut hyper_index,
+                &mut idempotency_index,
+                &mut edge_metadata,
+            );
+            Ok(())
+        })
+        .await?;
+
+        Ok(SnapshotView {
+            snapshot_id: snapshot_id.to_string(),
+            nodes,
+            hyper_index,
+            edge_metadata,
+        })
+    }
+
     pub async fn record_idempotency(&self, key: &str, node_ids: Vec<u64>) -> Result<(), RepoError> {
         // Optimization: Lock once and check.
         // Review feedback suggests removing double-check pattern if racy or checking under write lock.
@@ -430,6 +538,10 @@ fn apply_replayed_tx_operation(
             edge_meta.retain(|(src, tgt, _), _| *src != *id && *tgt != *id);
         }
     }
+}
+
+fn parse_wal_snapshot_lsn(snapshot_id: &str) -> Option<u64> {
+    snapshot_id.strip_prefix("wal-lsn-")?.parse::<u64>().ok()
 }
 
 #[cfg(test)]
@@ -690,5 +802,47 @@ mod tests {
                 "dangling edge to deleted node must not remain"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_load_snapshot_view_reconstructs_historical_state() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("snapshot_view.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+            .await
+            .unwrap();
+        let snapshot_lsn_1 = repo.current_snapshot_id().await;
+
+        repo.put_node(Node::new(2, vec![2.0], "N2".to_string()))
+            .await
+            .unwrap();
+        repo.delete_node(1).await.unwrap();
+
+        let view_at_lsn_1 = repo.load_snapshot_view(&snapshot_lsn_1).await.unwrap();
+        assert_eq!(view_at_lsn_1.snapshot_id(), snapshot_lsn_1);
+        assert_eq!(view_at_lsn_1.list_node_ids(), vec![1]);
+        assert_eq!(view_at_lsn_1.get_nodes_by_ids(&[1])[0].data, "N1");
+
+        let view_at_lsn_3 = repo.load_snapshot_view("wal-lsn-3").await.unwrap();
+        assert_eq!(view_at_lsn_3.list_node_ids(), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn test_load_snapshot_view_rejects_missing_or_invalid_snapshot_id() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("snapshot_view_errors.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+            .await
+            .unwrap();
+
+        let missing = repo.load_snapshot_view("wal-lsn-99").await;
+        assert!(matches!(missing, Err(RepoError::SnapshotNotFound(_))));
+
+        let invalid = repo.load_snapshot_view("snap-custom").await;
+        assert!(matches!(invalid, Err(RepoError::InvalidSnapshotId(_))));
     }
 }
