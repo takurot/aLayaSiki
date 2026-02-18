@@ -1,3 +1,4 @@
+use crate::crypto::{AtRestCipher, NoOpCipher};
 use crate::hyper_index::HyperIndex;
 use crate::wal::{Wal, WalError};
 use alayasiki_core::model::{Edge, Node};
@@ -76,7 +77,15 @@ impl Repository {
 
     /// Open a Repository with WAL replay to restore previous state
     pub async fn open(wal_path: impl AsRef<Path>) -> Result<Self, RepoError> {
-        let wal_instance = Wal::open(&wal_path).await?;
+        Self::open_with_cipher(wal_path, Arc::new(NoOpCipher)).await
+    }
+
+    /// Open a repository with a custom at-rest cipher for WAL replay and writes.
+    pub async fn open_with_cipher(
+        wal_path: impl AsRef<Path>,
+        cipher: Arc<dyn AtRestCipher>,
+    ) -> Result<Self, RepoError> {
+        let wal_instance = Wal::open_with_cipher(&wal_path, cipher).await?;
         let wal = Arc::new(Mutex::new(wal_instance));
         let tx_lock = Arc::new(Mutex::new(()));
         let nodes = Arc::new(RwLock::new(HashMap::new()));

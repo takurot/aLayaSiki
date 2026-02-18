@@ -1,6 +1,8 @@
+use crate::crypto::{AtRestCipher, CryptoError, NoOpCipher};
 use crc32fast::Hasher;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
@@ -13,17 +15,34 @@ pub enum WalError {
     CrcMismatch,
     #[error("Corrupt entry")]
     CorruptEntry,
+    #[error("At-rest encryption error: {0}")]
+    Encryption(String),
+}
+
+impl From<CryptoError> for WalError {
+    fn from(value: CryptoError) -> Self {
+        Self::Encryption(value.to_string())
+    }
 }
 
 pub struct Wal {
     file: BufWriter<File>,
     current_lsn: AtomicU64,
+    cipher: Arc<dyn AtRestCipher>,
 }
 
 impl Wal {
     /// Open a WAL file. If it doesn't exist, it will be created.
     /// If it exists, it will be read to determine the next LSN.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, WalError> {
+        Self::open_with_cipher(path, Arc::new(NoOpCipher)).await
+    }
+
+    /// Open a WAL file with a custom at-rest cipher (KMS hook point).
+    pub async fn open_with_cipher(
+        path: impl AsRef<Path>,
+        cipher: Arc<dyn AtRestCipher>,
+    ) -> Result<Self, WalError> {
         let path = path.as_ref().to_path_buf();
 
         // Ensure directory exists
@@ -44,17 +63,19 @@ impl Wal {
         Ok(Self {
             file: BufWriter::new(file),
             current_lsn,
+            cipher,
         })
     }
 
     /// Append an entry to the WAL. Returns the assigned LSN.
     /// Format: [LSN: 8 bytes][CRC: 4 bytes][Len: 4 bytes][Payload: Len bytes]
     pub async fn append(&mut self, payload: &[u8]) -> Result<u64, WalError> {
+        let encrypted_payload = self.cipher.encrypt(payload)?;
         let lsn = self.current_lsn.fetch_add(1, Ordering::SeqCst) + 1;
-        let len = payload.len() as u32;
+        let len = encrypted_payload.len() as u32;
 
         let mut hasher = Hasher::new();
-        hasher.update(payload);
+        hasher.update(&encrypted_payload);
         let crc = hasher.finalize();
 
         // Write Header
@@ -63,7 +84,7 @@ impl Wal {
         self.file.write_u32(len).await?;
 
         // Write Payload
-        self.file.write_all(payload).await?;
+        self.file.write_all(&encrypted_payload).await?;
 
         // Note: We don't flush here by default for batch performance,
         // explicit flush() or periodic flush is expected.
@@ -123,7 +144,8 @@ impl Wal {
                 return Err(WalError::CrcMismatch);
             }
 
-            callback(lsn, payload)?;
+            let decrypted_payload = self.cipher.decrypt(&payload)?;
+            callback(lsn, decrypted_payload)?;
             last_lsn = lsn;
             valid_end_pos = file.stream_position().await?;
         }

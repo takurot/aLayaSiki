@@ -2,6 +2,7 @@ pub mod audit;
 pub mod auth;
 pub mod config;
 pub mod embedding;
+pub mod governance;
 pub mod ingest;
 pub mod model;
 
