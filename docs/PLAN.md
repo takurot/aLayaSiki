@@ -219,6 +219,7 @@
 - `snapshot_id=wal-lsn-<N>` を指定したクエリは、WAL を `N` まで再生した読み取りビューを使って実行される（`storage::repo::Repository::load_snapshot_view`）
 - 存在しない `snapshot_id` は `QueryError::NotFound`（NOT_FOUND 相当）で返却する
 - `time_travel` 単独指定時の「日時→スナップショット解決」は未実装で、現状は最新スナップショットにフォールバックする（PR-11 の Backup/Restore タスクで対応）
+- `search_mode=global` かつ `snapshot_id` 指定時は、非バージョン化のコミュニティ要約による時点混線を避けるため要約合成を無効化して evidence ベースにフォールバックする。スナップショット整合のある global map-reduce は将来タスク（PR-11 Backup/Restore 連携）で対応。
 - `storage::snapshot::SnapshotManager` は単体実装済みだが、Repository/Query 経路への統合と PITR は未実装（PR-11 の Backup/Restore タスクで対応）
 
 ---
