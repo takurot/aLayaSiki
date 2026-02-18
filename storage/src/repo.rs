@@ -250,7 +250,7 @@ impl Repository {
         // Replay WAL entries newer than the snapshot baseline.
         {
             let mut wal_lock = wal.lock().await;
-            wal_lock
+            let last_replayed_lsn = wal_lock
                 .replay(|lsn, data| {
                     if lsn <= base_lsn {
                         return Ok(());
@@ -269,6 +269,10 @@ impl Repository {
                     Ok(())
                 })
                 .await?;
+
+            if base_lsn > last_replayed_lsn {
+                return Err(RepoError::SnapshotNotFound(format!("wal-lsn-{base_lsn}")));
+            }
         }
 
         Ok(Self {
@@ -1231,5 +1235,34 @@ mod tests {
 
         let restore = repo.restore_from_latest_backup().await;
         assert!(matches!(restore, Err(RepoError::SnapshotNotConfigured)));
+    }
+
+    #[tokio::test]
+    async fn test_open_with_snapshots_rejects_snapshot_newer_than_wal() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("snapshot_newer_than_wal.wal");
+        let snapshot_dir = dir.path().join("snapshots");
+
+        {
+            let repo = Repository::open_with_snapshots(&wal_path, &snapshot_dir)
+                .await
+                .unwrap();
+            repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+                .await
+                .unwrap();
+            repo.put_node(Node::new(2, vec![2.0], "N2".to_string()))
+                .await
+                .unwrap();
+            let snapshot_id = repo.create_backup_snapshot().await.unwrap();
+            assert_eq!(snapshot_id, "wal-lsn-2");
+        }
+
+        tokio::fs::write(&wal_path, &[]).await.unwrap();
+
+        let reopened = Repository::open_with_snapshots(&wal_path, &snapshot_dir).await;
+        assert!(matches!(
+            reopened,
+            Err(RepoError::SnapshotNotFound(ref snapshot_id)) if snapshot_id == "wal-lsn-2"
+        ));
     }
 }
