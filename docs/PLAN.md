@@ -242,13 +242,17 @@
 
 * Depends on: PR-01, PR-07
 
-- [ ] レイテンシ/ヒット率/GPU使用率/抽出精度のメトリクス
-- [ ] SLO計測（P95/P99）とダッシュボード出力
-- [ ] エラーカテゴリ（INVALID_ARGUMENT など）を統一
+- [x] レイテンシ/ヒット率/GPU使用率/抽出精度のメトリクス
+- [x] SLO計測（P95/P99）とダッシュボード出力
+- [x] エラーカテゴリ（INVALID_ARGUMENT など）を統一
 
 **Notes:**
-- `QueryResponse.latency_ms` は実装済みだが、外部公開メトリクス（ヒット率/GPU使用率/抽出精度）と SLO ダッシュボードは未実装
-- 現在の `thiserror` ベースの内部エラーを、SPEC 記載のエラーカテゴリ（INVALID_ARGUMENT / NOT_FOUND / PERMISSION_DENIED など）へ統一マッピングする実装が必要
+- `core::error::ErrorCode` and `AlayasikiError` trait added for unified error mapping.
+- `QueryError`, `RepoError`, `WalError`, `SnapshotError`, and `AuthzError` now implement `AlayasikiError`.
+- `QueryResponse` includes `error_code` field.
+- `core::metrics::MetricsCollector` implemented for high-precision (microsecond) latency tracking and SLM/GPU metrics.
+- P50, P95, P99 percentiles calculated in `MetricsSnapshot`.
+- `QueryEngine` integrated with `MetricsCollector`.
 
 ---
 
@@ -324,6 +328,24 @@
 
 ---
 
+## PR-14.7: E2Eテスト網羅性の向上 (NEW)
+
+* Depends on: PR-10, PR-14.5
+
+- [ ] **マルチモーダルE2Eの完結**:
+    - [ ] テスト用バイナリPDFアセットの導入と `pdf-extract` 正常系テストの有効化
+    - [ ] 画像/音声データのメタデータ抽出・インデックス・検索の一気通貫テスト
+- [ ] **セキュリティ・マルチテナンシーE2E**:
+    - [ ] 認証・認可の統合テスト: JWT発行 -> 認可済みIngest -> 認可済みQuery のフロー検証
+    - [ ] テナント分離の厳格な検証: 他テナントのデータが検索結果に混入しないことの確認
+    - [ ] RBAC/ABAC 動的権限変更時の挙動検証
+- [ ] **ガバナンス・ポリシーE2E**:
+    - [ ] PIIマスキングの実効性検証: 個人情報を含むデータの投入 -> 検索結果でのマスキング確認
+    - [ ] データレジデンシの強制検証: 指定リージョン外からの要求拒否フロー
+    - [ ] 保持期限（Retention）の動的検証: 期限切れデータが検索対象から自動除外されることの確認
+
+---
+
 ## PR-16: レプリケーション / HA（商用化向け）
 
 * Depends on: PR-02, PR-03, PR-07
@@ -355,6 +377,7 @@
 - PR-14 → PR-15
 - PR-14.5 → PR-15 (NEW: 品質ゲートと性能計測の継続運用)
 - PR-14.6 → PR-15 (NEW: 実運用レイテンシ改善と回帰防止)
+- PR-14.7 → PR-15 (NEW: E2Eテスト網羅性の向上)
 - PR-16 → 商用化フェーズのHA/冗長性
 
 ---

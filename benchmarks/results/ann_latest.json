@@ -1,0 +1,19 @@
+{
+  "config": {
+    "n_samples": 6000,
+    "n_dims": 128,
+    "n_queries": 100,
+    "top_k": 10,
+    "seed": 42
+  },
+  "metrics": {
+    "usearch": {
+      "build_sec": 0.6851058006286621,
+      "search_sec": 0.003348112106323242
+    },
+    "faiss_flat": {
+      "build_sec": 0.0008580684661865234,
+      "search_sec": 0.011422157287597656
+    }
+  }
+}

@@ -3,9 +3,14 @@ use std::sync::Arc;
 
 use alayasiki_core::ingest::IngestionRequest;
 use ingestion::processor::IngestionPipeline;
+use jobs::queue::ChannelJobQueue;
+use jobs::worker::Worker;
 use query::{QueryEngine, QueryRequest};
+use slm::ner::MockEntityExtractor;
+use storage::community::{CommunityEngine, DeterministicSummarizer};
 use storage::repo::Repository;
 use tempfile::tempdir;
+use tokio::sync::mpsc;
 
 #[tokio::test]
 async fn test_e2e_ingest_to_query_with_filters_and_citations() {
@@ -164,4 +169,111 @@ async fn test_e2e_query_is_reproducible_with_fixed_model_and_snapshot() {
     assert_eq!(first.snapshot_id, second.snapshot_id);
     assert_eq!(first.snapshot_id.as_deref(), Some(snapshot_id.as_str()));
     assert_ne!(latest_unpinned.snapshot_id, first.snapshot_id);
+}
+
+#[tokio::test]
+async fn test_e2e_full_graphrag_flow_with_global_and_drift() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("e2e_graphrag.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    // 1. Setup Job Queue and Worker for asynchronous extraction
+    let (tx, rx) = mpsc::channel(100);
+    let job_queue = Arc::new(ChannelJobQueue::new(tx));
+    let extractor = Arc::new(MockEntityExtractor::new().with_keywords(vec![
+        ("Tesla".to_string(), "Company".to_string()),
+        ("BYD".to_string(), "Company".to_string()),
+    ]));
+    let worker = Worker::new(rx, repo.clone(), extractor);
+    let _worker_handle = tokio::spawn(async move {
+        worker.run().await;
+    });
+
+    let mut pipeline = IngestionPipeline::new(repo.clone());
+    pipeline.set_job_queue(job_queue);
+
+    // 2. Ingest some documents that will trigger entity extraction
+    pipeline
+        .ingest(IngestionRequest::Text {
+            content: "Tesla and BYD are major players in the global EV market.".to_string(),
+            metadata: HashMap::from([("source".to_string(), "market_report.txt".to_string())]),
+            idempotency_key: Some("doc-1".to_string()),
+            model_id: Some("embedding-default-v1".to_string()),
+        })
+        .await
+        .unwrap();
+
+    pipeline
+        .ingest(IngestionRequest::Text {
+            content: "China's BYD has overtaken Tesla in volume for battery production."
+                .to_string(),
+            metadata: HashMap::from([("source".to_string(), "byd_news.txt".to_string())]),
+            idempotency_key: Some("doc-2".to_string()),
+            model_id: Some("embedding-default-v1".to_string()),
+        })
+        .await
+        .unwrap();
+
+    // 3. Wait for job worker to finish processing (Extraction & Edge Creation)
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // 4. Manually trigger community summary generation (simulating periodic background task)
+    let summarizer = DeterministicSummarizer;
+    let graph = repo.graph_index().await;
+    let summaries = {
+        let mut community_engine = CommunityEngine::new(graph);
+        community_engine.rebuild_hierarchy(2, &summarizer);
+        community_engine.summaries().to_vec()
+    };
+
+    let engine = QueryEngine::new(repo).with_community_summaries(summaries);
+
+    // 5. Test Global Search (Map-Reduce over community summaries)
+    let global_request = QueryRequest::parse_json(
+        r#"{
+            "query": "L0-C0",
+            "search_mode": "global",
+            "mode": "answer"
+        }"#,
+    )
+    .unwrap();
+    let global_response = engine.execute(global_request).await.unwrap();
+    assert!(global_response.answer.is_some());
+    assert!(global_response
+        .answer
+        .as_ref()
+        .unwrap()
+        .contains("Global synthesis"));
+    assert!(global_response
+        .explain
+        .steps
+        .contains(&"community_map_reduce".to_string()));
+
+    // 6. Test DRIFT Search (Dynamic iterative expansion)
+    let drift_request = QueryRequest::parse_json(
+        r#"{
+            "query": "Who is overtaking Tesla?",
+            "search_mode": "drift",
+            "mode": "answer",
+            "top_k": 5
+        }"#,
+    )
+    .unwrap();
+    let drift_response = engine.execute(drift_request).await.unwrap();
+    assert!(drift_response.answer.is_some());
+    assert!(drift_response
+        .answer
+        .unwrap()
+        .contains("Answer synthesized"));
+    assert!(!drift_response.evidence.nodes.is_empty());
+    assert!(drift_response
+        .explain
+        .steps
+        .contains(&"drift_iterative_expansion".to_string()));
+
+    // 7. Verify graph support in groundedness
+    assert!(global_response.groundedness > 0.0);
+    assert!(drift_response.groundedness > 0.0);
+    // Drift should find BYD via "mentions" edge from Tesla anchor
+    assert!(!drift_response.evidence.edges.is_empty());
 }

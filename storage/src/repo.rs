@@ -1,7 +1,9 @@
 use crate::crypto::{AtRestCipher, NoOpCipher};
 use crate::hyper_index::HyperIndex;
+use crate::index::AdjacencyGraph;
 use crate::snapshot::{SnapshotError, SnapshotManager};
 use crate::wal::{Wal, WalError};
+use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use alayasiki_core::model::{Edge, Node};
 use rkyv::ser::{serializers::AllocSerializer, Serializer};
 use rkyv::{Archive, Deserialize, Serialize};
@@ -32,6 +34,22 @@ pub enum RepoError {
     SnapshotNotConfigured,
     #[error("Snapshot error: {0}")]
     Snapshot(#[from] SnapshotError),
+}
+
+impl AlayasikiError for RepoError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            RepoError::Wal(err) => err.error_code(),
+            RepoError::Serialization => ErrorCode::Internal,
+            RepoError::Deserialization => ErrorCode::Internal,
+            RepoError::NotFound => ErrorCode::NotFound,
+            RepoError::InvalidTransaction(_) => ErrorCode::InvalidArgument,
+            RepoError::InvalidSnapshotId(_) => ErrorCode::InvalidArgument,
+            RepoError::SnapshotNotFound(_) => ErrorCode::NotFound,
+            RepoError::SnapshotNotConfigured => ErrorCode::Internal,
+            RepoError::Snapshot(err) => err.error_code(),
+        }
+    }
 }
 
 /// WAL Entry types for durability
@@ -320,6 +338,11 @@ impl Repository {
         nodes
             .values()
             .find_map(|node| (!node.embedding.is_empty()).then_some(node.embedding.len()))
+    }
+
+    pub async fn graph_index(&self) -> AdjacencyGraph {
+        let index = self.hyper_index.read().await;
+        index.graph_index.clone()
     }
 
     pub async fn delete_node(&self, id: u64) -> Result<(), RepoError> {
