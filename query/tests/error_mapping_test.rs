@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use query::QueryEngine;
-use alayasiki_core::error::{ErrorCode, AlayasikiError};
+use std::sync::Arc;
 use storage::repo::Repository;
 use tempfile::tempdir;
 
@@ -20,7 +20,7 @@ async fn test_error_mapping_standard_categories() {
             let response = err.to_response();
             assert_eq!(response.error_code, Some(ErrorCode::InvalidArgument));
             assert!(response.answer.unwrap().contains("invalid query"));
-        },
+        }
         Ok(_) => panic!("Expected error for top_k=0"),
     }
 
@@ -33,7 +33,7 @@ async fn test_error_mapping_standard_categories() {
             let response = err.to_response();
             assert_eq!(response.error_code, Some(ErrorCode::NotFound));
             assert!(response.answer.unwrap().contains("snapshot_id"));
-        },
+        }
         Ok(_) => panic!("Expected error for missing snapshot"),
     }
 

@@ -63,7 +63,7 @@ impl MetricsCollector {
         let state = self.state.lock().unwrap();
         let q = &state.query_metrics;
         let s = &state.slm_metrics;
-        
+
         let mut sorted_latencies: Vec<u64> = q.latencies.iter().copied().collect();
         sorted_latencies.sort_unstable();
 

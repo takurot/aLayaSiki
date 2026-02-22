@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use alayasiki_core::ingest::IngestionRequest;
 use ingestion::processor::IngestionPipeline;
-use jobs::queue::{ChannelJobQueue, JobQueue};
+use jobs::queue::ChannelJobQueue;
 use jobs::worker::Worker;
 use query::{QueryEngine, QueryRequest};
 use slm::ner::MockEntityExtractor;
@@ -205,7 +205,8 @@ async fn test_e2e_full_graphrag_flow_with_global_and_drift() {
 
     pipeline
         .ingest(IngestionRequest::Text {
-            content: "China's BYD has overtaken Tesla in volume for battery production.".to_string(),
+            content: "China's BYD has overtaken Tesla in volume for battery production."
+                .to_string(),
             metadata: HashMap::from([("source".to_string(), "byd_news.txt".to_string())]),
             idempotency_key: Some("doc-2".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
@@ -238,7 +239,11 @@ async fn test_e2e_full_graphrag_flow_with_global_and_drift() {
     .unwrap();
     let global_response = engine.execute(global_request).await.unwrap();
     assert!(global_response.answer.is_some());
-    assert!(global_response.answer.as_ref().unwrap().contains("Global synthesis"));
+    assert!(global_response
+        .answer
+        .as_ref()
+        .unwrap()
+        .contains("Global synthesis"));
     assert!(global_response
         .explain
         .steps
@@ -256,8 +261,11 @@ async fn test_e2e_full_graphrag_flow_with_global_and_drift() {
     .unwrap();
     let drift_response = engine.execute(drift_request).await.unwrap();
     assert!(drift_response.answer.is_some());
-    assert!(drift_response.answer.unwrap().contains("Answer synthesized"));
-    assert!(drift_response.evidence.nodes.len() >= 1);
+    assert!(drift_response
+        .answer
+        .unwrap()
+        .contains("Answer synthesized"));
+    assert!(!drift_response.evidence.nodes.is_empty());
     assert!(drift_response
         .explain
         .steps
@@ -267,5 +275,5 @@ async fn test_e2e_full_graphrag_flow_with_global_and_drift() {
     assert!(global_response.groundedness > 0.0);
     assert!(drift_response.groundedness > 0.0);
     // Drift should find BYD via "mentions" edge from Tesla anchor
-    assert!(drift_response.evidence.edges.len() >= 1);
+    assert!(!drift_response.evidence.edges.is_empty());
 }
