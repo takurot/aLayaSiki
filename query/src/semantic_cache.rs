@@ -1,13 +1,35 @@
 use crate::dsl::{QueryMode, QueryRequest, SearchMode};
 use std::cmp::Ordering;
 use std::collections::{HashSet, VecDeque};
+use std::time::{Duration, Instant};
 
 const UNICODE_NGRAM_SIZE: usize = 2;
 
+/// Eviction policy for cache entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EvictionPolicy {
+    /// Least Recently Used - evict the oldest accessed entry.
+    #[default]
+    Lru,
+    /// Least Frequently Used - evict the least accessed entry.
+    Lfu,
+}
+
+/// Configuration for semantic cache behavior.
 #[derive(Debug, Clone)]
 pub struct SemanticCacheConfig {
+    /// Maximum number of entries to keep in cache.
     pub max_entries: usize,
+    /// Minimum similarity score to consider a cache hit (0.0 - 1.0).
     pub similarity_threshold: f32,
+    /// Time-to-live for cache entries. None means no expiration.
+    pub ttl_seconds: Option<u64>,
+    /// Minimum query length to be eligible for caching.
+    pub min_query_length: usize,
+    /// Whether the cache is enabled. If false, insert/lookup are no-ops.
+    pub enabled: bool,
+    /// Eviction policy when max_entries is reached.
+    pub eviction_policy: EvictionPolicy,
 }
 
 impl Default for SemanticCacheConfig {
@@ -15,6 +37,10 @@ impl Default for SemanticCacheConfig {
         Self {
             max_entries: 256,
             similarity_threshold: 0.6,
+            ttl_seconds: None,
+            min_query_length: 3,
+            enabled: true,
+            eviction_policy: EvictionPolicy::Lru,
         }
     }
 }
@@ -87,6 +113,9 @@ struct SemanticCacheEntry<T> {
     normalized_query: String,
     query_tokens: HashSet<String>,
     value: T,
+    created_at: Instant,
+    access_count: usize,
+    last_accessed: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -104,17 +133,30 @@ impl<T: Clone> SemanticCache<T> {
     }
 
     pub fn lookup(&mut self, key: &SemanticCacheKey, query: &str) -> Option<T> {
-        if self.entries.is_empty() {
+        if !self.config.enabled || self.entries.is_empty() {
             return None;
         }
 
         let normalized_query = normalize_query(query);
         let query_tokens = tokenize(&normalized_query);
+
+        // Check min_query_length
+        if query.len() < self.config.min_query_length {
+            return None;
+        }
+
         let mut best_match: Option<(usize, f32)> = None;
 
         for (idx, entry) in self.entries.iter().enumerate() {
             if &entry.key != key {
                 continue;
+            }
+
+            // Check TTL expiration
+            if let Some(ttl) = self.config.ttl_seconds {
+                if entry.created_at.elapsed() > Duration::from_secs(ttl) {
+                    continue;
+                }
             }
 
             let score = query_similarity(
@@ -139,13 +181,27 @@ impl<T: Clone> SemanticCache<T> {
         }
 
         let (idx, _) = best_match?;
-        let matched = self.entries.remove(idx)?;
+        let mut matched = self.entries.remove(idx)?;
+
+        // Update access metadata
+        matched.access_count = matched.access_count.saturating_add(1);
+        matched.last_accessed = Instant::now();
+
         let value = matched.value.clone();
         self.entries.push_back(matched);
         Some(value)
     }
 
     pub fn insert(&mut self, key: SemanticCacheKey, query: &str, value: T) {
+        if !self.config.enabled {
+            return;
+        }
+
+        // Check min_query_length
+        if query.len() < self.config.min_query_length {
+            return;
+        }
+
         if self.config.max_entries == 0 {
             return;
         }
@@ -161,16 +217,50 @@ impl<T: Clone> SemanticCache<T> {
             self.entries.remove(existing_idx);
         }
 
+        // Evict if necessary based on eviction policy
+        while self.entries.len() >= self.config.max_entries {
+            self.evict_one();
+        }
+
+        let now = Instant::now();
         self.entries.push_back(SemanticCacheEntry {
             key,
             normalized_query,
             query_tokens,
             value,
+            created_at: now,
+            access_count: 0,
+            last_accessed: now,
         });
+    }
 
-        while self.entries.len() > self.config.max_entries {
-            self.entries.pop_front();
+    fn evict_one(&mut self) {
+        if self.entries.is_empty() {
+            return;
         }
+
+        let idx = match self.config.eviction_policy {
+            EvictionPolicy::Lru => {
+                // Find the entry with the oldest last_accessed time
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| a.last_accessed.cmp(&b.last_accessed))
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0)
+            }
+            EvictionPolicy::Lfu => {
+                // Find the entry with the lowest access_count
+                self.entries
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| a.access_count.cmp(&b.access_count))
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0)
+            }
+        };
+
+        self.entries.remove(idx);
     }
 }
 
@@ -276,6 +366,7 @@ mod tests {
         let mut cache = SemanticCache::with_config(SemanticCacheConfig {
             max_entries: 16,
             similarity_threshold: 0.6,
+            ..SemanticCacheConfig::default()
         });
         let key = cache_key("wal-lsn-10");
         cache.insert(key.clone(), "Toyota EV strategy in 2024", 42u64);
@@ -298,6 +389,7 @@ mod tests {
         let mut cache = SemanticCache::with_config(SemanticCacheConfig {
             max_entries: 2,
             similarity_threshold: 0.6,
+            ..SemanticCacheConfig::default()
         });
         let key = cache_key("wal-lsn-10");
 
@@ -308,5 +400,92 @@ mod tests {
         assert_eq!(cache.lookup(&key, "query one"), None);
         assert_eq!(cache.lookup(&key, "query two"), Some(2));
         assert_eq!(cache.lookup(&key, "query three"), Some(3));
+    }
+
+    #[test]
+    fn cache_respects_ttl_expiration() {
+        let mut cache = SemanticCache::with_config(SemanticCacheConfig {
+            max_entries: 16,
+            similarity_threshold: 0.6,
+            ttl_seconds: Some(1),
+            ..SemanticCacheConfig::default()
+        });
+        let key = cache_key("wal-lsn-10");
+        cache.insert(key.clone(), "test query", 42u64);
+
+        // Should hit immediately
+        let hit = cache.lookup(&key, "test query");
+        assert_eq!(hit, Some(42));
+
+        // Wait for TTL to expire
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Should miss after TTL expiration
+        let miss = cache.lookup(&key, "test query");
+        assert_eq!(miss, None);
+    }
+
+    #[test]
+    fn cache_respects_min_query_length() {
+        let mut cache = SemanticCache::with_config(SemanticCacheConfig {
+            max_entries: 16,
+            similarity_threshold: 0.6,
+            min_query_length: 10,
+            ..SemanticCacheConfig::default()
+        });
+        let key = cache_key("wal-lsn-10");
+
+        // Short query should not be cached
+        cache.insert(key.clone(), "hi", 42u64);
+        let miss = cache.lookup(&key, "hi");
+        assert_eq!(miss, None);
+
+        // Long query should be cached
+        cache.insert(key.clone(), "hello world query", 43u64);
+        let hit = cache.lookup(&key, "hello world query");
+        assert_eq!(hit, Some(43));
+    }
+
+    #[test]
+    fn cache_can_be_disabled() {
+        let mut cache = SemanticCache::with_config(SemanticCacheConfig {
+            max_entries: 16,
+            similarity_threshold: 0.6,
+            enabled: false,
+            ..SemanticCacheConfig::default()
+        });
+        let key = cache_key("wal-lsn-10");
+
+        // Insert should not store when disabled
+        cache.insert(key.clone(), "test query", 42u64);
+        let miss = cache.lookup(&key, "test query");
+        assert_eq!(miss, None);
+    }
+
+    #[test]
+    fn cache_eviction_policy_lfu() {
+        let mut cache = SemanticCache::with_config(SemanticCacheConfig {
+            max_entries: 3,
+            similarity_threshold: 0.6,
+            eviction_policy: EvictionPolicy::Lfu,
+            ..SemanticCacheConfig::default()
+        });
+        let key = cache_key("wal-lsn-10");
+
+        // Insert three entries
+        cache.insert(key.clone(), "query one", 1u64);
+        cache.insert(key.clone(), "query two", 2u64);
+        cache.insert(key.clone(), "query three", 3u64);
+
+        // Access "query one" multiple times to increase frequency
+        cache.lookup(&key, "query one");
+        cache.lookup(&key, "query one");
+
+        // Insert fourth entry - should evict least frequently used ("query two" or "query three")
+        cache.insert(key.clone(), "query four", 4u64);
+
+        // "query one" should still be present (high frequency)
+        let hit = cache.lookup(&key, "query one");
+        assert_eq!(hit, Some(1));
     }
 }

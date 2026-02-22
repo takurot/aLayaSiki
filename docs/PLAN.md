@@ -210,7 +210,7 @@
 - [x] Semantic Cache（意味的同一クエリの再利用）
 - [x] Time-Travel のスナップショット参照
 - [x] Backup/Restore の実装（PITR含む）
-- [ ] 退避/キャッシュポリシーの設定値反映
+- [x] 退避/キャッシュポリシーの設定値反映
 
 **Notes:**
 - `query::semantic_cache` を追加し、`QueryEngine` 実行前に `QueryRequest` + `model_id` + `snapshot_id` をキーとして意味類似照合するキャッシュを実装
