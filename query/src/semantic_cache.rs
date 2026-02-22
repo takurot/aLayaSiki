@@ -143,12 +143,12 @@ impl<T: Clone> SemanticCache<T> {
         }
 
         let normalized_query = normalize_query(query);
-        let query_tokens = tokenize(&normalized_query);
 
-        // Check min_query_length
-        if query.chars().count() < self.config.min_query_length {
+        // Check min_query_length against normalized, non-whitespace characters.
+        if effective_query_length(&normalized_query) < self.config.min_query_length {
             return None;
         }
+        let query_tokens = tokenize(&normalized_query);
 
         let mut best_match: Option<(usize, f32)> = None;
 
@@ -195,8 +195,10 @@ impl<T: Clone> SemanticCache<T> {
             return;
         }
 
+        let normalized_query = normalize_query(query);
+
         // Check min_query_length
-        if query.chars().count() < self.config.min_query_length {
+        if effective_query_length(&normalized_query) < self.config.min_query_length {
             return;
         }
 
@@ -206,7 +208,6 @@ impl<T: Clone> SemanticCache<T> {
 
         self.purge_expired_entries();
 
-        let normalized_query = normalize_query(query);
         let query_tokens = tokenize(&normalized_query);
 
         if let Some(existing_idx) = self
@@ -289,6 +290,13 @@ fn normalize_query(query: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+fn effective_query_length(normalized_query: &str) -> usize {
+    normalized_query
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .count()
 }
 
 fn query_similarity(
@@ -478,6 +486,22 @@ mod tests {
         // "東京" is 2 chars but 6 bytes in UTF-8.
         cache.insert(key.clone(), "東京", 42u64);
         let miss = cache.lookup(&key, "東京");
+        assert_eq!(miss, None);
+    }
+
+    #[test]
+    fn cache_min_query_length_ignores_whitespace_padding() {
+        let mut cache = SemanticCache::with_config(SemanticCacheConfig {
+            max_entries: 16,
+            similarity_threshold: 0.6,
+            min_query_length: 3,
+            ..SemanticCacheConfig::default()
+        });
+        let key = cache_key("wal-lsn-10");
+
+        // Padding with spaces should not make a short query cache-eligible.
+        cache.insert(key.clone(), "  hi   ", 42u64);
+        let miss = cache.lookup(&key, "hi");
         assert_eq!(miss, None);
     }
 
