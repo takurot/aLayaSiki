@@ -242,13 +242,17 @@
 
 * Depends on: PR-01, PR-07
 
-- [ ] レイテンシ/ヒット率/GPU使用率/抽出精度のメトリクス
-- [ ] SLO計測（P95/P99）とダッシュボード出力
-- [ ] エラーカテゴリ（INVALID_ARGUMENT など）を統一
+- [x] レイテンシ/ヒット率/GPU使用率/抽出精度のメトリクス
+- [x] SLO計測（P95/P99）とダッシュボード出力
+- [x] エラーカテゴリ（INVALID_ARGUMENT など）を統一
 
 **Notes:**
-- `QueryResponse.latency_ms` は実装済みだが、外部公開メトリクス（ヒット率/GPU使用率/抽出精度）と SLO ダッシュボードは未実装
-- 現在の `thiserror` ベースの内部エラーを、SPEC 記載のエラーカテゴリ（INVALID_ARGUMENT / NOT_FOUND / PERMISSION_DENIED など）へ統一マッピングする実装が必要
+- `core::error::ErrorCode` and `AlayasikiError` trait added for unified error mapping.
+- `QueryError`, `RepoError`, `WalError`, `SnapshotError`, and `AuthzError` now implement `AlayasikiError`.
+- `QueryResponse` includes `error_code` field.
+- `core::metrics::MetricsCollector` implemented for high-precision (microsecond) latency tracking and SLM/GPU metrics.
+- P50, P95, P99 percentiles calculated in `MetricsSnapshot`.
+- `QueryEngine` integrated with `MetricsCollector`.
 
 ---
 

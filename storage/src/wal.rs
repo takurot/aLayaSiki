@@ -1,3 +1,4 @@
+use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use crate::crypto::{AtRestCipher, CryptoError, NoOpCipher};
 use crc32fast::Hasher;
 use std::path::Path;
@@ -17,6 +18,17 @@ pub enum WalError {
     CorruptEntry,
     #[error("At-rest encryption error: {0}")]
     Encryption(String),
+}
+
+impl AlayasikiError for WalError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            WalError::Io(_) => ErrorCode::Internal,
+            WalError::CrcMismatch => ErrorCode::Internal,
+            WalError::CorruptEntry => ErrorCode::Internal,
+            WalError::Encryption(_) => ErrorCode::Internal,
+        }
+    }
 }
 
 impl From<CryptoError> for WalError {
