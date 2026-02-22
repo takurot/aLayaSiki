@@ -133,7 +133,12 @@ impl<T: Clone> SemanticCache<T> {
     }
 
     pub fn lookup(&mut self, key: &SemanticCacheKey, query: &str) -> Option<T> {
-        if !self.config.enabled || self.entries.is_empty() {
+        if !self.config.enabled {
+            return None;
+        }
+
+        self.purge_expired_entries();
+        if self.entries.is_empty() {
             return None;
         }
 
@@ -141,7 +146,7 @@ impl<T: Clone> SemanticCache<T> {
         let query_tokens = tokenize(&normalized_query);
 
         // Check min_query_length
-        if query.len() < self.config.min_query_length {
+        if query.chars().count() < self.config.min_query_length {
             return None;
         }
 
@@ -150,13 +155,6 @@ impl<T: Clone> SemanticCache<T> {
         for (idx, entry) in self.entries.iter().enumerate() {
             if &entry.key != key {
                 continue;
-            }
-
-            // Check TTL expiration
-            if let Some(ttl) = self.config.ttl_seconds {
-                if entry.created_at.elapsed() > Duration::from_secs(ttl) {
-                    continue;
-                }
             }
 
             let score = query_similarity(
@@ -198,13 +196,15 @@ impl<T: Clone> SemanticCache<T> {
         }
 
         // Check min_query_length
-        if query.len() < self.config.min_query_length {
+        if query.chars().count() < self.config.min_query_length {
             return;
         }
 
         if self.config.max_entries == 0 {
             return;
         }
+
+        self.purge_expired_entries();
 
         let normalized_query = normalize_query(query);
         let query_tokens = tokenize(&normalized_query);
@@ -262,6 +262,25 @@ impl<T: Clone> SemanticCache<T> {
 
         self.entries.remove(idx);
     }
+
+    fn purge_expired_entries(&mut self) {
+        let ttl_seconds = self.config.ttl_seconds;
+        if ttl_seconds.is_none() {
+            return;
+        }
+
+        let now = Instant::now();
+        self.entries
+            .retain(|entry| !is_expired(entry.created_at, ttl_seconds, now));
+    }
+}
+
+fn is_expired(created_at: Instant, ttl_seconds: Option<u64>, now: Instant) -> bool {
+    let Some(ttl_seconds) = ttl_seconds else {
+        return false;
+    };
+    now.checked_duration_since(created_at)
+        .is_some_and(|elapsed| elapsed >= Duration::from_secs(ttl_seconds))
 }
 
 fn normalize_query(query: &str) -> String {
@@ -447,6 +466,22 @@ mod tests {
     }
 
     #[test]
+    fn cache_min_query_length_uses_character_count() {
+        let mut cache = SemanticCache::with_config(SemanticCacheConfig {
+            max_entries: 16,
+            similarity_threshold: 0.6,
+            min_query_length: 3,
+            ..SemanticCacheConfig::default()
+        });
+        let key = cache_key("wal-lsn-10");
+
+        // "東京" is 2 chars but 6 bytes in UTF-8.
+        cache.insert(key.clone(), "東京", 42u64);
+        let miss = cache.lookup(&key, "東京");
+        assert_eq!(miss, None);
+    }
+
+    #[test]
     fn cache_can_be_disabled() {
         let mut cache = SemanticCache::with_config(SemanticCacheConfig {
             max_entries: 16,
@@ -487,5 +522,44 @@ mod tests {
         // "query one" should still be present (high frequency)
         let hit = cache.lookup(&key, "query one");
         assert_eq!(hit, Some(1));
+    }
+
+    #[test]
+    fn cache_purges_expired_entries_before_lfu_eviction() {
+        let mut cache = SemanticCache::with_config(SemanticCacheConfig {
+            max_entries: 2,
+            similarity_threshold: 0.6,
+            ttl_seconds: Some(1),
+            eviction_policy: EvictionPolicy::Lfu,
+            ..SemanticCacheConfig::default()
+        });
+        let key = cache_key("wal-lsn-10");
+
+        cache.insert(key.clone(), "hot query", 1u64);
+        assert_eq!(cache.lookup(&key, "hot query"), Some(1));
+        assert_eq!(cache.lookup(&key, "hot query"), Some(1));
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        cache.insert(key.clone(), "fresh query", 2u64);
+        cache.insert(key.clone(), "new query", 3u64);
+
+        // Expired entries should be purged before LFU decides what to evict.
+        assert_eq!(cache.lookup(&key, "fresh query"), Some(2));
+    }
+
+    #[test]
+    fn cache_ttl_zero_expires_immediately() {
+        let mut cache = SemanticCache::with_config(SemanticCacheConfig {
+            max_entries: 16,
+            similarity_threshold: 0.6,
+            ttl_seconds: Some(0),
+            ..SemanticCacheConfig::default()
+        });
+        let key = cache_key("wal-lsn-10");
+
+        cache.insert(key.clone(), "test query", 42u64);
+        let miss = cache.lookup(&key, "test query");
+        assert_eq!(miss, None);
     }
 }
