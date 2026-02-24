@@ -1,3 +1,4 @@
+use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tokio::fs;
@@ -6,6 +7,14 @@ use tokio::fs;
 pub enum SnapshotError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl AlayasikiError for SnapshotError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            SnapshotError::Io(_) => ErrorCode::Internal,
+        }
+    }
 }
 
 pub struct SnapshotManager {

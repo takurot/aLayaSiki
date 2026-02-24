@@ -30,6 +30,11 @@ impl MockEntityExtractor {
             ],
         }
     }
+
+    pub fn with_keywords(mut self, keywords: Vec<(String, String)>) -> Self {
+        self.keywords = keywords;
+        self
+    }
 }
 
 impl Default for MockEntityExtractor {

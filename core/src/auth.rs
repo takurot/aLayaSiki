@@ -1,3 +1,4 @@
+use crate::error::{AlayasikiError, ErrorCode};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -223,6 +224,20 @@ pub enum AuthzError {
     InvalidAttributeValue { key: String, value: String },
     #[error("insufficient clearance level: required {required}, got {actual}")]
     InsufficientClearance { required: u8, actual: u8 },
+}
+
+impl AlayasikiError for AuthzError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            AuthzError::PermissionDenied { .. } => ErrorCode::PermissionDenied,
+            AuthzError::MissingResourceTenant => ErrorCode::PermissionDenied,
+            AuthzError::TenantMismatch { .. } => ErrorCode::PermissionDenied,
+            AuthzError::MissingAttribute { .. } => ErrorCode::PermissionDenied,
+            AuthzError::AttributeMismatch { .. } => ErrorCode::PermissionDenied,
+            AuthzError::InvalidAttributeValue { .. } => ErrorCode::InvalidArgument,
+            AuthzError::InsufficientClearance { .. } => ErrorCode::PermissionDenied,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

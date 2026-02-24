@@ -8,6 +8,8 @@ use crate::semantic_cache::{SemanticCache, SemanticCacheConfig, SemanticCacheKey
 use alayasiki_core::audit::{AuditEvent, AuditOperation, AuditOutcome, AuditSink};
 use alayasiki_core::auth::{Action, Authorizer, AuthzError, Principal, ResourceContext};
 use alayasiki_core::embedding::deterministic_embedding;
+use alayasiki_core::error::{AlayasikiError, ErrorCode};
+use alayasiki_core::metrics::{MetricsCollector, MetricsSnapshot};
 use alayasiki_core::model::Node;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -112,6 +114,8 @@ pub struct QueryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_travel: Option<String>,
     pub latency_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<ErrorCode>,
 }
 
 #[derive(Debug, Error)]
@@ -126,11 +130,49 @@ pub enum QueryError {
     Unauthorized(#[from] AuthzError),
 }
 
+impl AlayasikiError for QueryError {
+    fn error_code(&self) -> ErrorCode {
+        match self {
+            QueryError::InvalidQuery(_) => ErrorCode::InvalidArgument,
+            QueryError::NotFound(_) => ErrorCode::NotFound,
+            QueryError::Repository(err) => err.error_code(),
+            QueryError::Unauthorized(err) => err.error_code(),
+        }
+    }
+}
+
+impl QueryError {
+    pub fn to_response(&self) -> QueryResponse {
+        QueryResponse {
+            answer: Some(self.to_string()),
+            evidence: EvidenceSubgraph {
+                nodes: vec![],
+                edges: vec![],
+            },
+            citations: vec![],
+            groundedness: 0.0,
+            explain: ExplainPlan {
+                steps: vec!["error".to_string()],
+                effective_search_mode: SearchMode::Auto,
+                anchors: vec![],
+                expansion_paths: vec![],
+                exclusions: vec![],
+            },
+            model_id: None,
+            snapshot_id: None,
+            time_travel: None,
+            latency_ms: 0,
+            error_code: Some(self.error_code()),
+        }
+    }
+}
+
 pub struct QueryEngine {
     repo: Arc<Repository>,
     community_summaries: Vec<CommunitySummary>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     semantic_cache: Arc<Mutex<SemanticCache<QueryResponse>>>,
+    metrics: Arc<MetricsCollector>,
 }
 
 const DEFAULT_EMBEDDING_MODEL_ID: &str = "embedding-default-v1";
@@ -178,6 +220,7 @@ impl QueryEngine {
             semantic_cache: Arc::new(Mutex::new(SemanticCache::with_config(
                 SemanticCacheConfig::default(),
             ))),
+            metrics: Arc::new(MetricsCollector::new(1000)),
         }
     }
 
@@ -195,6 +238,14 @@ impl QueryEngine {
     pub fn with_semantic_cache_config(mut self, config: SemanticCacheConfig) -> Self {
         self.semantic_cache = Arc::new(Mutex::new(SemanticCache::with_config(config)));
         self
+    }
+
+    pub fn metrics(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    pub fn metrics_collector(&self) -> Arc<MetricsCollector> {
+        self.metrics.clone()
     }
 
     pub async fn execute_json(&self, raw: &str) -> Result<QueryResponse, QueryError> {
@@ -254,8 +305,9 @@ impl QueryEngine {
         actor: Option<String>,
         tenant: Option<String>,
     ) -> Result<QueryResponse, QueryError> {
+        let start = Instant::now();
         let model_id = effective_query_model_id(&request);
-        let result = self.execute_internal(request).await;
+        let result = self.execute_internal(request, start).await;
         match &result {
             Ok(response) => {
                 self.emit_audit_event(build_query_audit_event(
@@ -276,14 +328,18 @@ impl QueryEngine {
                     None,
                     Some(err.to_string()),
                 ));
+                self.metrics
+                    .record_query(start.elapsed().as_micros() as u64, false);
             }
         }
         result
     }
 
-    async fn execute_internal(&self, request: QueryRequest) -> Result<QueryResponse, QueryError> {
-        let start = Instant::now();
-
+    async fn execute_internal(
+        &self,
+        request: QueryRequest,
+        start: Instant,
+    ) -> Result<QueryResponse, QueryError> {
         request
             .validate()
             .map_err(|err| QueryError::InvalidQuery(err.to_string()))?;
@@ -316,6 +372,9 @@ impl QueryEngine {
                     .steps
                     .insert(0, "semantic_cache_hit".to_string());
             }
+
+            self.metrics
+                .record_query(start.elapsed().as_micros() as u64, true);
             return Ok(cached_response);
         }
 
@@ -452,7 +511,16 @@ impl QueryEngine {
             snapshot_id: Some(resolved_snapshot_id),
             time_travel,
             latency_ms,
+            error_code: None,
         };
+
+        self.metrics.record_query(
+            start.elapsed().as_micros() as u64,
+            response
+                .explain
+                .steps
+                .contains(&"semantic_cache_hit".to_string()),
+        );
 
         self.insert_semantic_cache(cache_key, &request.query, response.clone())
             .await;
