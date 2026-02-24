@@ -315,6 +315,7 @@ impl QueryEngine {
             request,
             Some(principal.subject.clone()),
             Some(principal.tenant.clone()),
+            Some(principal.tenant.clone()),
         )
         .await
     }
@@ -355,7 +356,7 @@ impl QueryEngine {
     }
 
     pub async fn execute(&self, request: QueryRequest) -> Result<QueryResponse, QueryError> {
-        self.execute_with_audit(request, None, None).await
+        self.execute_with_audit(request, None, None, None).await
     }
 
     async fn execute_with_audit(
@@ -363,10 +364,11 @@ impl QueryEngine {
         request: QueryRequest,
         actor: Option<String>,
         tenant: Option<String>,
+        tenant_scope: Option<String>,
     ) -> Result<QueryResponse, QueryError> {
         let start = Instant::now();
         let model_id = effective_query_model_id(&request);
-        let result = self.execute_internal(request, start).await;
+        let result = self.execute_internal(request, start, tenant_scope).await;
         match &result {
             Ok(response) => {
                 self.emit_audit_event(build_query_audit_event(
@@ -398,6 +400,7 @@ impl QueryEngine {
         &self,
         request: QueryRequest,
         start: Instant,
+        tenant_scope: Option<String>,
     ) -> Result<QueryResponse, QueryError> {
         request
             .validate()
@@ -415,26 +418,29 @@ impl QueryEngine {
             &resolved_snapshot_id,
             plan.effective_search_mode,
         );
+        let tenant_scoped = tenant_scope.is_some();
 
-        if let Some(mut cached_response) =
-            self.lookup_semantic_cache(&cache_key, &request.query).await
-        {
-            cached_response.latency_ms = start.elapsed().as_millis() as u64;
-            if !cached_response
-                .explain
-                .steps
-                .iter()
-                .any(|step| step == "semantic_cache_hit")
+        if !tenant_scoped {
+            if let Some(mut cached_response) =
+                self.lookup_semantic_cache(&cache_key, &request.query).await
             {
-                cached_response
+                cached_response.latency_ms = start.elapsed().as_millis() as u64;
+                if !cached_response
                     .explain
                     .steps
-                    .insert(0, "semantic_cache_hit".to_string());
-            }
+                    .iter()
+                    .any(|step| step == "semantic_cache_hit")
+                {
+                    cached_response
+                        .explain
+                        .steps
+                        .insert(0, "semantic_cache_hit".to_string());
+                }
 
-            self.metrics
-                .record_query(start.elapsed().as_micros() as u64, true);
-            return Ok(cached_response);
+                self.metrics
+                    .record_query(start.elapsed().as_micros() as u64, true);
+                return Ok(cached_response);
+            }
         }
 
         // Dispatch to the appropriate search mode pipeline.
@@ -445,6 +451,7 @@ impl QueryEngine {
                     &mut plan,
                     &effective_model_id,
                     snapshot_view.as_deref(),
+                    tenant_scope.as_deref(),
                 )
                 .await?
             }
@@ -455,6 +462,7 @@ impl QueryEngine {
                         &mut plan,
                         &effective_model_id,
                         snapshot_view.as_deref(),
+                        tenant_scope.as_deref(),
                     )
                     .await?;
                 (state, plan, None)
@@ -466,6 +474,7 @@ impl QueryEngine {
                         plan,
                         &effective_model_id,
                         snapshot_view.as_deref(),
+                        tenant_scope.as_deref(),
                     )
                     .await?;
                 (state, plan, None)
@@ -581,8 +590,10 @@ impl QueryEngine {
                 .contains(&"semantic_cache_hit".to_string()),
         );
 
-        self.insert_semantic_cache(cache_key, &request.query, response.clone())
-            .await;
+        if !tenant_scoped {
+            self.insert_semantic_cache(cache_key, &request.query, response.clone())
+                .await;
+        }
 
         Ok(response)
     }
@@ -670,9 +681,16 @@ impl QueryEngine {
         mut plan: QueryPlan,
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
+        tenant_scope: Option<&str>,
     ) -> Result<(ExecutionState, QueryPlan), QueryError> {
         let mut state = self
-            .execute_with_plan(request, &plan, embedding_model_id, snapshot_view)
+            .execute_with_plan(
+                request,
+                &plan,
+                embedding_model_id,
+                snapshot_view,
+                tenant_scope,
+            )
             .await?;
 
         // Record vector-only fallback when graph expansion added nothing.
@@ -689,7 +707,13 @@ impl QueryEngine {
             && state.nodes.len() < 2
         {
             let (drift_state, drift_plan) = self
-                .execute_drift(request, &mut plan, embedding_model_id, snapshot_view)
+                .execute_drift(
+                    request,
+                    &mut plan,
+                    embedding_model_id,
+                    snapshot_view,
+                    tenant_scope,
+                )
                 .await?;
             let mut drift_state = drift_state;
             drift_state.exclusions.push(ExclusionReason {
@@ -712,7 +736,33 @@ impl QueryEngine {
         plan: &mut QueryPlan,
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
+        tenant_scope: Option<&str>,
     ) -> Result<(ExecutionState, QueryPlan, Option<String>), QueryError> {
+        if tenant_scope.is_some() {
+            // Community summaries are currently shared across tenants.
+            // Disable summary synthesis under tenant-scoped authorization to avoid leakage.
+            plan.steps = vec![
+                "vector_search",
+                "graph_expansion",
+                "context_pruning",
+                "global_fallback_tenant_scoped",
+            ];
+            let mut state = self
+                .execute_with_plan(
+                    request,
+                    plan,
+                    embedding_model_id,
+                    snapshot_view,
+                    tenant_scope,
+                )
+                .await?;
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "global_summary_disabled_by_tenant_scope".to_string(),
+            });
+            return Ok((state, plan.clone(), None));
+        }
+
         if snapshot_view.is_some() {
             // Community summaries are not versioned by snapshot yet.
             // To keep snapshot queries reproducible, skip global synthesis.
@@ -723,7 +773,13 @@ impl QueryEngine {
                 "global_fallback_snapshot_pinned",
             ];
             let mut state = self
-                .execute_with_plan(request, plan, embedding_model_id, snapshot_view)
+                .execute_with_plan(
+                    request,
+                    plan,
+                    embedding_model_id,
+                    snapshot_view,
+                    tenant_scope,
+                )
                 .await?;
             state.exclusions.push(ExclusionReason {
                 node_id: None,
@@ -741,7 +797,13 @@ impl QueryEngine {
                 "global_fallback_no_community_data",
             ];
             let mut state = self
-                .execute_with_plan(request, plan, embedding_model_id, snapshot_view)
+                .execute_with_plan(
+                    request,
+                    plan,
+                    embedding_model_id,
+                    snapshot_view,
+                    tenant_scope,
+                )
                 .await?;
             state.exclusions.push(ExclusionReason {
                 node_id: None,
@@ -752,7 +814,13 @@ impl QueryEngine {
 
         // Always build filtered evidence first so global synthesis can respect request filters.
         let mut state = self
-            .execute_with_plan(request, plan, embedding_model_id, snapshot_view)
+            .execute_with_plan(
+                request,
+                plan,
+                embedding_model_id,
+                snapshot_view,
+                tenant_scope,
+            )
             .await?;
 
         // MAP: Score community summaries.
@@ -802,6 +870,7 @@ impl QueryEngine {
                                     &entity_filter,
                                     time_range,
                                     retention_cutoff,
+                                    tenant_scope,
                                 )
                             })
                         })
@@ -850,6 +919,7 @@ impl QueryEngine {
         plan: &mut QueryPlan,
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
+        tenant_scope: Option<&str>,
     ) -> Result<(ExecutionState, QueryPlan), QueryError> {
         plan.effective_search_mode = SearchMode::Drift;
 
@@ -864,7 +934,13 @@ impl QueryEngine {
             iter_plan.vector_top_k = plan.vector_top_k.saturating_add(iteration * 2).min(50);
 
             let state = self
-                .execute_with_plan(request, &iter_plan, embedding_model_id, snapshot_view)
+                .execute_with_plan(
+                    request,
+                    &iter_plan,
+                    embedding_model_id,
+                    snapshot_view,
+                    tenant_scope,
+                )
                 .await?;
 
             let is_sufficient = state.nodes.len() >= DRIFT_EVIDENCE_THRESHOLD
@@ -918,9 +994,16 @@ impl QueryEngine {
         plan: &QueryPlan,
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
+        tenant_scope: Option<&str>,
     ) -> Result<ExecutionState, QueryError> {
         let mut vector_hits = self
-            .collect_vector_scores(request, plan, embedding_model_id, snapshot_view)
+            .collect_vector_scores(
+                request,
+                plan,
+                embedding_model_id,
+                snapshot_view,
+                tenant_scope,
+            )
             .await;
         if vector_hits.is_empty() {
             if let Some(node_id) = self
@@ -1122,9 +1205,13 @@ impl QueryEngine {
                 continue;
             };
 
-            if let Some(reason) =
-                node_filter_exclusion_reason(node, &entity_filter, time_range, retention_cutoff)
-            {
+            if let Some(reason) = node_filter_exclusion_reason(
+                node,
+                &entity_filter,
+                time_range,
+                retention_cutoff,
+                tenant_scope,
+            ) {
                 exclusions.push(ExclusionReason {
                     node_id: Some(node_id),
                     reason,
@@ -1234,6 +1321,7 @@ impl QueryEngine {
         plan: &QueryPlan,
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
+        tenant_scope: Option<&str>,
     ) -> Vec<(u64, f32)> {
         let embedding_dim = match snapshot_view {
             Some(view) => view.embedding_dimension(),
@@ -1251,14 +1339,39 @@ impl QueryEngine {
         }
         .max(1);
 
-        match snapshot_view {
+        let raw_hits = match snapshot_view {
             Some(view) => view.search_vector(&query_embedding, vector_limit),
             None => {
                 let index = self.repo.hyper_index.read().await;
                 index.search_vector(&query_embedding, vector_limit)
             }
-        }
+        };
+
+        let Some(tenant) = tenant_scope else {
+            return raw_hits;
+        };
+
+        let candidate_ids: Vec<u64> = raw_hits.iter().map(|(node_id, _)| *node_id).collect();
+        let allowed_ids: HashSet<u64> = self
+            .get_nodes_by_ids_from_source(&candidate_ids, snapshot_view)
+            .await
+            .into_iter()
+            .filter(|node| node_belongs_to_tenant(node, tenant))
+            .map(|node| node.id)
+            .collect();
+
+        raw_hits
+            .into_iter()
+            .filter(|(node_id, _)| allowed_ids.contains(node_id))
+            .collect()
     }
+}
+
+fn node_belongs_to_tenant(node: &Node, tenant_scope: &str) -> bool {
+    node.metadata
+        .get("tenant")
+        .map(|tenant| tenant == tenant_scope)
+        .unwrap_or(false)
 }
 
 fn node_lexical_text(node: &Node) -> String {
@@ -1387,7 +1500,14 @@ fn node_filter_exclusion_reason(
     entity_filter: &HashSet<&str>,
     time_range: Option<(NaiveDate, NaiveDate)>,
     retention_cutoff_unix: Option<u64>,
+    tenant_scope: Option<&str>,
 ) -> Option<String> {
+    if let Some(tenant_scope) = tenant_scope {
+        if !node_belongs_to_tenant(node, tenant_scope) {
+            return Some("tenant_filtered".to_string());
+        }
+    }
+
     if let Some(now_unix) = retention_cutoff_unix {
         if node_is_retention_expired(node, now_unix) {
             return Some("retention_expired".to_string());
@@ -1423,8 +1543,16 @@ fn node_passes_filters(
     entity_filter: &HashSet<&str>,
     time_range: Option<(NaiveDate, NaiveDate)>,
     retention_cutoff_unix: Option<u64>,
+    tenant_scope: Option<&str>,
 ) -> bool {
-    node_filter_exclusion_reason(node, entity_filter, time_range, retention_cutoff_unix).is_none()
+    node_filter_exclusion_reason(
+        node,
+        entity_filter,
+        time_range,
+        retention_cutoff_unix,
+        tenant_scope,
+    )
+    .is_none()
 }
 
 fn node_is_retention_expired(node: &Node, now_unix: u64) -> bool {
