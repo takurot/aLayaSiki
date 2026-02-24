@@ -280,9 +280,14 @@ impl QueryEngine {
         authorizer: &Authorizer,
         resource: &ResourceContext,
     ) -> Result<QueryResponse, QueryError> {
+        let principal = self.authenticate_query_principal(
+            bearer_token,
+            authenticator,
+            DEFAULT_EMBEDDING_MODEL_ID,
+        )?;
         let request = QueryRequest::parse_json(raw)
             .map_err(|err| QueryError::InvalidQuery(err.to_string()))?;
-        self.execute_jwt_authorized(request, bearer_token, authenticator, authorizer, resource)
+        self.execute_authorized(request, &principal, authorizer, resource)
             .await
     }
 
@@ -323,23 +328,30 @@ impl QueryEngine {
         resource: &ResourceContext,
     ) -> Result<QueryResponse, QueryError> {
         let model_id = effective_query_model_id(&request);
-        let principal = match authenticator.authenticate(bearer_token) {
-            Ok(principal) => principal,
-            Err(err) => {
-                self.emit_audit_event(build_query_audit_event(
-                    AuditOutcome::Denied,
-                    &model_id,
-                    None,
-                    None,
-                    None,
-                    Some(err.to_string()),
-                ));
-                return Err(err.into());
-            }
-        };
+        let principal =
+            self.authenticate_query_principal(bearer_token, authenticator, &model_id)?;
 
         self.execute_authorized(request, &principal, authorizer, resource)
             .await
+    }
+
+    fn authenticate_query_principal(
+        &self,
+        bearer_token: &str,
+        authenticator: &JwtAuthenticator,
+        model_id: &str,
+    ) -> Result<Principal, QueryError> {
+        authenticator.authenticate(bearer_token).map_err(|err| {
+            self.emit_audit_event(build_query_audit_event(
+                AuditOutcome::Denied,
+                model_id,
+                None,
+                None,
+                None,
+                Some(err.to_string()),
+            ));
+            err.into()
+        })
     }
 
     pub async fn execute(&self, request: QueryRequest) -> Result<QueryResponse, QueryError> {
