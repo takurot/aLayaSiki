@@ -11,6 +11,7 @@ use storage::community::{CommunityEngine, DeterministicSummarizer};
 use storage::repo::Repository;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant};
 
 #[tokio::test]
 async fn test_e2e_ingest_to_query_with_filters_and_citations() {
@@ -214,8 +215,8 @@ async fn test_e2e_full_graphrag_flow_with_global_and_drift() {
         .await
         .unwrap();
 
-    // 3. Wait for job worker to finish processing (Extraction & Edge Creation)
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // 3. Wait for asynchronous extraction to materialize mention edges.
+    wait_for_min_graph_edges(&repo, 2, Duration::from_secs(2)).await;
 
     // 4. Manually trigger community summary generation (simulating periodic background task)
     let summarizer = DeterministicSummarizer;
@@ -276,4 +277,20 @@ async fn test_e2e_full_graphrag_flow_with_global_and_drift() {
     assert!(drift_response.groundedness > 0.0);
     // Drift should find BYD via "mentions" edge from Tesla anchor
     assert!(!drift_response.evidence.edges.is_empty());
+}
+
+async fn wait_for_min_graph_edges(repo: &Arc<Repository>, min_edges: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let edge_count = repo.graph_index().await.edge_count();
+        if edge_count >= min_edges {
+            return;
+        }
+
+        if Instant::now() >= deadline {
+            panic!("timed out waiting for at least {min_edges} graph edges; observed {edge_count}");
+        }
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
