@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use alayasiki_core::auth::{Authorizer, AuthzError, Principal, ResourceContext};
+use alayasiki_core::auth::{Authorizer, AuthzError, JwtAuthenticator, Principal, ResourceContext};
 use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::model::Node;
 use query::{QueryEngine, QueryError, QueryRequest};
@@ -103,4 +103,26 @@ async fn execute_authorized_enforces_tenant_boundary() {
         err,
         QueryError::Unauthorized(AuthzError::TenantMismatch { .. })
     ));
+}
+
+#[tokio::test]
+async fn execute_json_jwt_authorized_authenticates_before_parsing_query() {
+    let (_repo, engine) = build_engine().await;
+    let authenticator =
+        JwtAuthenticator::new_hs256("jwt-secret", Some("alayasiki-auth"), Some("alayasiki-api"));
+    let authorizer = Authorizer::default();
+    let resource = ResourceContext::new("acme");
+
+    let err = engine
+        .execute_json_jwt_authorized(
+            r#"{"query":"EV strategy","mode":"evidence","search_mode":"local","top_k":"broken"}"#,
+            "not-a-jwt",
+            &authenticator,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, QueryError::Unauthenticated(_)));
 }
