@@ -337,7 +337,7 @@
     - [ ] 画像/音声データのメタデータ抽出・インデックス・検索の一気通貫テスト
 - [ ] **セキュリティ・マルチテナンシーE2E**:
     - [x] 認証・認可の統合テスト: JWT発行 -> 認可済みIngest -> 認可済みQuery のフロー検証
-    - [ ] テナント分離の厳格な検証: 他テナントのデータが検索結果に混入しないことの確認
+    - [x] テナント分離の厳格な検証: 他テナントのデータが検索結果に混入しないことの確認
     - [ ] RBAC/ABAC 動的権限変更時の挙動検証
 - [ ] **ガバナンス・ポリシーE2E**:
     - [ ] PIIマスキングの実効性検証: 個人情報を含むデータの投入 -> 検索結果でのマスキング確認
@@ -347,6 +347,8 @@
 **Notes:**
 - JWTトークンを直接受け取り認証・認可を一体で実行するAPIを追加 (`IngestionPipeline::ingest_jwt_authorized`, `QueryEngine::execute_json_jwt_authorized`)
 - `ingestion/tests/e2e_pipeline_test.rs` に JWT発行 -> 認可済みIngest -> 認可済みQuery のE2Eテストを追加し、実行経路を固定化
+- 認可済み ingest でノードメタデータに `tenant` を強制付与し、認可済み query では同一 `tenant` のノードのみ探索・返却するよう制限
+- テナント分離E2E (`test_e2e_tenant_isolation_prevents_cross_tenant_leakage`) を追加し、クロステナント混入が発生しないことを検証
 
 ---
 

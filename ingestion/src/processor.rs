@@ -259,6 +259,10 @@ impl IngestionPipeline {
         let (text, mut metadata) = extract_request_text(request)?;
         metadata.insert("content_hash".to_string(), content_hash.clone());
         metadata.insert("model_id".to_string(), embedding_model_id.clone());
+        if let Some(tenant) = tenant {
+            // Enforce tenant ownership metadata for authorized ingest.
+            metadata.insert("tenant".to_string(), tenant.to_string());
+        }
         if let Some(key) = &idempotency_key {
             metadata.insert("idempotency_key".to_string(), key.clone());
         }

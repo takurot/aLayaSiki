@@ -342,6 +342,109 @@ async fn test_e2e_jwt_authorized_ingest_and_query_flow() {
         .any(|node| node.data.contains("Tesla battery program")));
 }
 
+#[tokio::test]
+async fn test_e2e_tenant_isolation_prevents_cross_tenant_leakage() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("e2e_tenant_isolation.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+    let pipeline = IngestionPipeline::new(repo.clone());
+    let engine = QueryEngine::new(repo);
+
+    let secret = "jwt-e2e-tenant-secret";
+    let acme_token = issue_test_token(secret, "acme", &["admin"], "ingest:write query:execute");
+    let beta_token = issue_test_token(secret, "beta", &["admin"], "ingest:write query:execute");
+    let authenticator =
+        JwtAuthenticator::new_hs256(secret, Some("alayasiki-auth"), Some("alayasiki-api"));
+    let authorizer = Authorizer::default();
+    let acme_resource = ResourceContext::new("acme");
+    let beta_resource = ResourceContext::new("beta");
+
+    let acme_ids = pipeline
+        .ingest_jwt_authorized(
+            IngestionRequest::Text {
+                content: "Shared market signal from acme EV initiative.".to_string(),
+                metadata: HashMap::from([("source".to_string(), "tenant/acme-doc.md".to_string())]),
+                idempotency_key: Some("tenant-acme-doc".to_string()),
+                model_id: Some("embedding-default-v1".to_string()),
+            },
+            &acme_token,
+            &authenticator,
+            &authorizer,
+            &acme_resource,
+        )
+        .await
+        .unwrap();
+    let beta_ids = pipeline
+        .ingest_jwt_authorized(
+            IngestionRequest::Text {
+                content: "Shared market signal from beta EV initiative.".to_string(),
+                metadata: HashMap::from([("source".to_string(), "tenant/beta-doc.md".to_string())]),
+                idempotency_key: Some("tenant-beta-doc".to_string()),
+                model_id: Some("embedding-default-v1".to_string()),
+            },
+            &beta_token,
+            &authenticator,
+            &authorizer,
+            &beta_resource,
+        )
+        .await
+        .unwrap();
+
+    let acme_response = engine
+        .execute_json_jwt_authorized(
+            r#"{
+                "query":"shared market signal",
+                "mode":"evidence",
+                "search_mode":"local",
+                "top_k":10
+            }"#,
+            &acme_token,
+            &authenticator,
+            &authorizer,
+            &acme_resource,
+        )
+        .await
+        .unwrap();
+    assert!(!acme_response.evidence.nodes.is_empty());
+    assert!(acme_response
+        .evidence
+        .nodes
+        .iter()
+        .all(|node| acme_ids.contains(&node.id)));
+    assert!(acme_response
+        .evidence
+        .nodes
+        .iter()
+        .all(|node| !beta_ids.contains(&node.id)));
+
+    let beta_response = engine
+        .execute_json_jwt_authorized(
+            r#"{
+                "query":"shared market signal",
+                "mode":"evidence",
+                "search_mode":"local",
+                "top_k":10
+            }"#,
+            &beta_token,
+            &authenticator,
+            &authorizer,
+            &beta_resource,
+        )
+        .await
+        .unwrap();
+    assert!(!beta_response.evidence.nodes.is_empty());
+    assert!(beta_response
+        .evidence
+        .nodes
+        .iter()
+        .all(|node| beta_ids.contains(&node.id)));
+    assert!(beta_response
+        .evidence
+        .nodes
+        .iter()
+        .all(|node| !acme_ids.contains(&node.id)));
+}
+
 async fn wait_for_min_graph_edges(repo: &Arc<Repository>, min_edges: usize, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {

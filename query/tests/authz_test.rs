@@ -12,13 +12,15 @@ async fn build_engine() -> (Arc<Repository>, QueryEngine) {
     let wal_path = dir.path().join("query_authz.wal");
     let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
 
-    repo.put_node(Node::new(
+    let mut node = Node::new(
         1,
         deterministic_embedding("EV strategy", "embedding-default-v1", 8),
         "Toyota expands EV strategy".to_string(),
-    ))
-    .await
-    .unwrap();
+    );
+    node.metadata
+        .insert("tenant".to_string(), "acme".to_string());
+
+    repo.put_node(node).await.unwrap();
 
     let engine = QueryEngine::new(repo.clone());
     (repo, engine)
