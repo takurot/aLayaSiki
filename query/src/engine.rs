@@ -738,6 +738,31 @@ impl QueryEngine {
         snapshot_view: Option<&SnapshotView>,
         tenant_scope: Option<&str>,
     ) -> Result<(ExecutionState, QueryPlan, Option<String>), QueryError> {
+        if tenant_scope.is_some() {
+            // Community summaries are currently shared across tenants.
+            // Disable summary synthesis under tenant-scoped authorization to avoid leakage.
+            plan.steps = vec![
+                "vector_search",
+                "graph_expansion",
+                "context_pruning",
+                "global_fallback_tenant_scoped",
+            ];
+            let mut state = self
+                .execute_with_plan(
+                    request,
+                    plan,
+                    embedding_model_id,
+                    snapshot_view,
+                    tenant_scope,
+                )
+                .await?;
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "global_summary_disabled_by_tenant_scope".to_string(),
+            });
+            return Ok((state, plan.clone(), None));
+        }
+
         if snapshot_view.is_some() {
             // Community summaries are not versioned by snapshot yet.
             // To keep snapshot queries reproducible, skip global synthesis.
