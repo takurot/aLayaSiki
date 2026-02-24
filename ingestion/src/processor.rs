@@ -3,7 +3,9 @@ use crate::embedding::{DeterministicEmbedder, Embedder};
 use crate::extract::{detect_content_kind, extract_pdf_text, extract_utf8, ContentKind};
 use crate::policy::{ContentPolicy, NoOpPolicy, PolicyError};
 use alayasiki_core::audit::{AuditEvent, AuditOperation, AuditOutcome, AuditSink};
-use alayasiki_core::auth::{Action, Authorizer, AuthzError, Principal, ResourceContext};
+use alayasiki_core::auth::{
+    Action, AuthError, Authorizer, AuthzError, JwtAuthenticator, Principal, ResourceContext,
+};
 use alayasiki_core::governance::{GovernanceError, GovernancePolicyStore};
 use alayasiki_core::ingest::{ContentHash, IngestionRequest};
 use alayasiki_core::model::Node;
@@ -35,6 +37,8 @@ pub enum IngestionError {
     IdempotencyConflict(String),
     #[error("Authorization error: {0}")]
     Unauthorized(#[from] AuthzError),
+    #[error("Authentication error: {0}")]
+    Unauthenticated(#[from] AuthError),
     #[error("Governance error: {0}")]
     Governance(#[from] GovernanceError),
 }
@@ -154,6 +158,33 @@ impl IngestionPipeline {
         let actor = Some(principal.subject.clone());
         let tenant = Some(principal.tenant.clone());
         self.ingest_with_audit(request, model_id, actor, tenant)
+            .await
+    }
+
+    pub async fn ingest_jwt_authorized(
+        &self,
+        request: IngestionRequest,
+        bearer_token: &str,
+        authenticator: &JwtAuthenticator,
+        authorizer: &Authorizer,
+        resource: &ResourceContext,
+    ) -> Result<Vec<u64>, IngestionError> {
+        let model_id = effective_ingest_model_id(&request, &self.default_model_id);
+        let principal = match authenticator.authenticate(bearer_token) {
+            Ok(principal) => principal,
+            Err(err) => {
+                self.emit_audit_event(build_audit_event(
+                    AuditOutcome::Denied,
+                    &model_id,
+                    None,
+                    None,
+                    Some(err.to_string()),
+                ));
+                return Err(err.into());
+            }
+        };
+
+        self.ingest_authorized(request, &principal, authorizer, resource)
             .await
     }
 

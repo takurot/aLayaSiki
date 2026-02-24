@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use alayasiki_core::auth::{Authorizer, JwtAuthenticator, JwtClaims, ResourceContext};
 use alayasiki_core::ingest::IngestionRequest;
 use ingestion::processor::IngestionPipeline;
 use jobs::queue::ChannelJobQueue;
 use jobs::worker::Worker;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use query::{QueryEngine, QueryRequest};
 use slm::ner::MockEntityExtractor;
 use storage::community::{CommunityEngine, DeterministicSummarizer};
@@ -279,6 +282,66 @@ async fn test_e2e_full_graphrag_flow_with_global_and_drift() {
     assert!(!drift_response.evidence.edges.is_empty());
 }
 
+#[tokio::test]
+async fn test_e2e_jwt_authorized_ingest_and_query_flow() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("e2e_jwt_auth.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+    let pipeline = IngestionPipeline::new(repo.clone());
+    let engine = QueryEngine::new(repo);
+
+    let secret = "jwt-e2e-secret";
+    let token = issue_test_token(secret, "acme", &["admin"], "ingest:write query:execute");
+    let authenticator =
+        JwtAuthenticator::new_hs256(secret, Some("alayasiki-auth"), Some("alayasiki-api"));
+    let authorizer = Authorizer::default();
+    let resource = ResourceContext::new("acme");
+
+    let mut metadata = HashMap::new();
+    metadata.insert("source".to_string(), "report/jwt-flow.md".to_string());
+    metadata.insert("entity_type".to_string(), "Company".to_string());
+    metadata.insert("timestamp".to_string(), "2025-01-01".to_string());
+
+    pipeline
+        .ingest_jwt_authorized(
+            IngestionRequest::Text {
+                content: "Authorized ingest for Tesla battery program.".to_string(),
+                metadata,
+                idempotency_key: Some("e2e-jwt-doc".to_string()),
+                model_id: Some("embedding-default-v1".to_string()),
+            },
+            &token,
+            &authenticator,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    let response = engine
+        .execute_json_jwt_authorized(
+            r#"{
+                "query":"Tesla battery program",
+                "mode":"evidence",
+                "search_mode":"local",
+                "top_k":5
+            }"#,
+            &token,
+            &authenticator,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    assert!(!response.evidence.nodes.is_empty());
+    assert!(response
+        .evidence
+        .nodes
+        .iter()
+        .any(|node| node.data.contains("Tesla battery program")));
+}
+
 async fn wait_for_min_graph_edges(repo: &Arc<Repository>, min_edges: usize, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
@@ -293,4 +356,30 @@ async fn wait_for_min_graph_edges(repo: &Arc<Repository>, min_edges: usize, time
 
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+fn issue_test_token(secret: &str, tenant: &str, roles: &[&str], scope: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as usize;
+    let claims = JwtClaims {
+        sub: "jwt-e2e-user".to_string(),
+        tenant: tenant.to_string(),
+        roles: roles.iter().map(|role| role.to_string()).collect(),
+        scope: Some(scope.to_string()),
+        attributes: HashMap::new(),
+        iss: Some("alayasiki-auth".to_string()),
+        aud: Some("alayasiki-api".to_string()),
+        exp: now + 300,
+        nbf: Some(now.saturating_sub(1)),
+        iat: Some(now),
+    };
+
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .unwrap()
 }

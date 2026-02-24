@@ -174,6 +174,12 @@ pub enum AuthError {
     MissingTenant,
 }
 
+impl AlayasikiError for AuthError {
+    fn error_code(&self) -> ErrorCode {
+        ErrorCode::Unauthenticated
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResourceContext {
     pub tenant: String,

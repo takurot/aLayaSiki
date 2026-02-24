@@ -6,7 +6,9 @@ use crate::graphrag::{
 use crate::planner::{QueryPlan, QueryPlanner};
 use crate::semantic_cache::{SemanticCache, SemanticCacheConfig, SemanticCacheKey};
 use alayasiki_core::audit::{AuditEvent, AuditOperation, AuditOutcome, AuditSink};
-use alayasiki_core::auth::{Action, Authorizer, AuthzError, Principal, ResourceContext};
+use alayasiki_core::auth::{
+    Action, AuthError, Authorizer, AuthzError, JwtAuthenticator, Principal, ResourceContext,
+};
 use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use alayasiki_core::metrics::{MetricsCollector, MetricsSnapshot};
@@ -128,6 +130,8 @@ pub enum QueryError {
     Repository(#[from] RepoError),
     #[error("authorization error: {0}")]
     Unauthorized(#[from] AuthzError),
+    #[error("authentication error: {0}")]
+    Unauthenticated(#[from] AuthError),
 }
 
 impl AlayasikiError for QueryError {
@@ -137,6 +141,7 @@ impl AlayasikiError for QueryError {
             QueryError::NotFound(_) => ErrorCode::NotFound,
             QueryError::Repository(err) => err.error_code(),
             QueryError::Unauthorized(err) => err.error_code(),
+            QueryError::Unauthenticated(err) => err.error_code(),
         }
     }
 }
@@ -267,6 +272,20 @@ impl QueryEngine {
             .await
     }
 
+    pub async fn execute_json_jwt_authorized(
+        &self,
+        raw: &str,
+        bearer_token: &str,
+        authenticator: &JwtAuthenticator,
+        authorizer: &Authorizer,
+        resource: &ResourceContext,
+    ) -> Result<QueryResponse, QueryError> {
+        let request = QueryRequest::parse_json(raw)
+            .map_err(|err| QueryError::InvalidQuery(err.to_string()))?;
+        self.execute_jwt_authorized(request, bearer_token, authenticator, authorizer, resource)
+            .await
+    }
+
     pub async fn execute_authorized(
         &self,
         request: QueryRequest,
@@ -293,6 +312,34 @@ impl QueryEngine {
             Some(principal.tenant.clone()),
         )
         .await
+    }
+
+    pub async fn execute_jwt_authorized(
+        &self,
+        request: QueryRequest,
+        bearer_token: &str,
+        authenticator: &JwtAuthenticator,
+        authorizer: &Authorizer,
+        resource: &ResourceContext,
+    ) -> Result<QueryResponse, QueryError> {
+        let model_id = effective_query_model_id(&request);
+        let principal = match authenticator.authenticate(bearer_token) {
+            Ok(principal) => principal,
+            Err(err) => {
+                self.emit_audit_event(build_query_audit_event(
+                    AuditOutcome::Denied,
+                    &model_id,
+                    None,
+                    None,
+                    None,
+                    Some(err.to_string()),
+                ));
+                return Err(err.into());
+            }
+        };
+
+        self.execute_authorized(request, &principal, authorizer, resource)
+            .await
     }
 
     pub async fn execute(&self, request: QueryRequest) -> Result<QueryResponse, QueryError> {
