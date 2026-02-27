@@ -347,7 +347,7 @@
 - [ ] **セキュリティ・マルチテナンシーE2E**:
     - [x] 認証・認可の統合テスト: JWT発行 -> 認可済みIngest -> 認可済みQuery のフロー検証
     - [x] テナント分離の厳格な検証: 他テナントのデータが検索結果に混入しないことの確認
-    - [ ] RBAC/ABAC 動的権限変更時の挙動検証
+    - [x] RBAC/ABAC 動的権限変更時の挙動検証
 - [ ] **ガバナンス・ポリシーE2E**:
     - [ ] PIIマスキングの実効性検証: 個人情報を含むデータの投入 -> 検索結果でのマスキング確認
     - [ ] データレジデンシの強制検証: 指定リージョン外からの要求拒否フロー
@@ -358,6 +358,7 @@
 - `ingestion/tests/e2e_pipeline_test.rs` に JWT発行 -> 認可済みIngest -> 認可済みQuery のE2Eテストを追加し、実行経路を固定化
 - 認可済み ingest でノードメタデータに `tenant` を強制付与し、認可済み query では同一 `tenant` のノードのみ探索・返却するよう制限
 - テナント分離E2E (`test_e2e_tenant_isolation_prevents_cross_tenant_leakage`) を追加し、クロステナント混入が発生しないことを検証
+- 動的権限変更E2E (`test_e2e_dynamic_rbac_abac_permission_transition`) を追加し、RBAC更新前後の拒否理由遷移（`PermissionDenied` -> `InsufficientClearance`）とABAC更新後の許可を検証
 
 ---
 
