@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 .env
 test_failure.log
+.agent/
