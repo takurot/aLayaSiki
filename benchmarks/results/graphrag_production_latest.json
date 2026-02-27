@@ -1,0 +1,58 @@
+{
+  "benchmark": "graphrag_production_bench",
+  "generated_at_unix": 1772180838,
+  "config": {
+    "seed_nodes": 4000,
+    "workers": 6,
+    "warmup_ops_per_worker": 20,
+    "measured_ops_per_worker": 100,
+    "write_every": 10,
+    "read_to_write_ratio": "9:1",
+    "top_k": 24,
+    "traversal_depth": 2
+  },
+  "totals": {
+    "elapsed_sec": 2.540897417,
+    "total_ops": 600,
+    "read_ops": 540,
+    "write_ops": 60,
+    "throughput_ops_per_sec": 236.13704197015994
+  },
+  "read_latency_ns": {
+    "p50_ns": 10137208,
+    "p95_ns": 26820500,
+    "p99_ns": 31767625,
+    "p50_ms": 10.137208,
+    "p95_ms": 26.8205,
+    "p99_ms": 31.767625
+  },
+  "write_latency_ns": {
+    "p50_ns": 69337917,
+    "p95_ns": 137277875,
+    "p99_ns": 147155333,
+    "p50_ms": 69.337917,
+    "p95_ms": 137.277875,
+    "p99_ms": 147.155333
+  },
+  "read_quality": {
+    "avg_groundedness": 0.593277515857308,
+    "avg_evidence_nodes": 24.0,
+    "semantic_cache_hit_rate": 0.37592592592592594
+  },
+  "mode_mix": {
+    "local": 270,
+    "global": 75,
+    "drift": 50,
+    "auto": 145
+  },
+  "query_engine_metrics": {
+    "total_queries": 648,
+    "hit_rate": 0.36574075,
+    "p50": 10915,
+    "p95": 26798,
+    "p99": 31705,
+    "history_count": 648,
+    "avg_extraction_confidence": 0.0,
+    "gpu_vram_usage_mb": 0
+  }
+}

@@ -12,6 +12,8 @@ criterion = "0.5"
 alayasiki-core = { path = "../core" }
 ingestion = { path = "../ingestion" }
 query = { path = "../query" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 storage = { path = "../storage" }
 tempfile = "3.3"
 tokio = { version = "1.0", features = ["rt-multi-thread"] }
@@ -22,4 +24,8 @@ harness = false
 
 [[bench]]
 name = "operational_latency_bench"
+harness = false
+
+[[bench]]
+name = "graphrag_production_bench"
 harness = false

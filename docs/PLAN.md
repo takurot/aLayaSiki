@@ -322,9 +322,15 @@
 - [ ] **Writeレイテンシ改善**: ingest の WAL flush 周りを計測し、group commit / バッチ書き込みの改善案を検証
 - [ ] **スケール検証拡張**: `10^5 -> 10^6` ノードで read/write p50/p95/p99 と throughput を比較
 - [ ] **並列度検証**: worker 数（8/32/128）別に read:write=9:1 の劣化カーブを取得
-- [ ] **結果保存の標準化**: ベンチ結果を `benchmarks/results/*.json` に出力し、比較可能な履歴を残す
+- [x] **結果保存の標準化**: ベンチ結果を `benchmarks/results/*.json` に出力し、比較可能な履歴を残す
 - [ ] **回帰ガード**: CI に p95 閾値チェック（read/write）を導入し、悪化時に失敗させる
 - [ ] **CIベンチ基準の実運用化**: Operational/ANN ベンチの入力条件を baseline と一致させ、閾値（read/write p95・throughput・ANN回帰率）を現実的な SLO ベースに再定義し、過剰に緩い基準を解消する
+
+**Notes:**
+- `prototypes/benches/graphrag_production_bench.rs` を追加し、実運用近似の GraphRAG 負荷（read:write=9:1、並列ワーカー、`local/global/drift/auto` 混在）を計測可能にした
+- ベンチ結果は JSON で `benchmarks/results/graphrag_production_latest.json` に保存（`ALAYASIKI_GRAPHRAG_RESULTS_PATH` で履歴ファイル名を切替可能）
+- レポート作成用の主要指標（read/write p50/p95/p99、throughput、groundedness、evidence件数、semantic cache hit率、mode mix）を出力対象に追加
+- ベースライン実行（`seed_nodes=4000, workers=6, warmup=20, measured=100`）の結果を `benchmarks/results/graphrag_production_report.md` に記録
 
 ---
 
