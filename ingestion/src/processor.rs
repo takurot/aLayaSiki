@@ -132,6 +132,11 @@ impl IngestionPipeline {
         self.audit_sink = Some(sink);
     }
 
+    pub fn with_governance_policy_store(mut self, store: Arc<dyn GovernancePolicyStore>) -> Self {
+        self.governance_policy_store = Some(store);
+        self
+    }
+
     pub fn set_governance_policy_store(&mut self, store: Arc<dyn GovernancePolicyStore>) {
         self.governance_policy_store = Some(store);
     }

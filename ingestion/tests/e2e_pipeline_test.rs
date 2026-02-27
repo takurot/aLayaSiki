@@ -581,7 +581,14 @@ async fn test_e2e_retention_dynamic_excludes_expired_nodes() {
     let dir = tempdir().unwrap();
     let wal_path = dir.path().join("e2e_retention_dynamic.wal");
     let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
-    let mut pipeline = IngestionPipeline::new(repo.clone());
+
+    let policy_store = Arc::new(InMemoryGovernancePolicyStore::default());
+    policy_store
+        .upsert_policy(TenantGovernancePolicy::new("acme", "ap-northeast-1", 0))
+        .unwrap();
+
+    let pipeline = IngestionPipeline::new(repo.clone())
+        .with_governance_policy_store(policy_store.clone());
     let engine = QueryEngine::new(repo);
 
     let secret = "jwt-e2e-retention-secret";
@@ -590,12 +597,6 @@ async fn test_e2e_retention_dynamic_excludes_expired_nodes() {
         JwtAuthenticator::new_hs256(secret, Some("alayasiki-auth"), Some("alayasiki-api"));
     let authorizer = Authorizer::default();
     let resource = ResourceContext::new("acme");
-
-    let policy_store = Arc::new(InMemoryGovernancePolicyStore::default());
-    policy_store
-        .upsert_policy(TenantGovernancePolicy::new("acme", "ap-northeast-1", 0))
-        .unwrap();
-    pipeline.set_governance_policy_store(policy_store.clone());
 
     pipeline
         .ingest_jwt_authorized(
