@@ -531,9 +531,9 @@ async fn test_e2e_dynamic_rbac_abac_permission_transition() {
         .await;
     assert!(matches!(
         denied_by_rbac,
-        Err(QueryError::Unauthorized(
-            AuthzError::PermissionDenied { .. }
-        ))
+        Err(QueryError::Unauthorized(AuthzError::PermissionDenied {
+            action: Action::Query
+        }))
     ));
 
     let authorizer_after_rbac_change =
@@ -550,7 +550,10 @@ async fn test_e2e_dynamic_rbac_abac_permission_transition() {
     assert!(matches!(
         denied_by_abac,
         Err(QueryError::Unauthorized(
-            AuthzError::InsufficientClearance { .. }
+            AuthzError::InsufficientClearance {
+                required: 3,
+                actual: 2
+            }
         ))
     ));
 
