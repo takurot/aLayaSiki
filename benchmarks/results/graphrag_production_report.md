@@ -2,7 +2,7 @@
 
 ## Overview
 - Benchmark: `prototypes/benches/graphrag_production_bench.rs`
-- Generated at (unix): `1772180838`
+- Generated at (unix): `1772181015`
 - Result JSON: `benchmarks/results/graphrag_production_latest.json`
 
 ## Execution Command
@@ -26,29 +26,29 @@ cargo bench -p prototypes --bench graphrag_production_bench
 
 ## Results
 - Total ops: `600` (read `540`, write `60`)
-- Elapsed: `2.5409 s`
-- Throughput: `236.14 ops/s`
+- Elapsed: `2.4351 s`
+- Throughput: `246.40 ops/s`
 
 ### Read latency
-- p50: `10.137 ms`
-- p95: `26.820 ms`
-- p99: `31.768 ms`
+- p50: `9.968 ms`
+- p95: `25.483 ms`
+- p99: `28.641 ms`
 
 ### Write latency
-- p50: `69.338 ms`
-- p95: `137.278 ms`
-- p99: `147.155 ms`
+- p50: `82.024 ms`
+- p95: `116.574 ms`
+- p99: `120.925 ms`
 
 ### Read quality / behavior
-- Average groundedness: `0.5933`
+- Average groundedness: `0.5982`
 - Average evidence nodes: `24.00`
-- Semantic cache hit rate: `0.3759`
+- Semantic cache hit rate: `0.4315`
 - Mode mix (actual): local `270`, global `75`, drift `50`, auto `145`
 
 ### Engine metrics snapshot
 - total_queries: `648`
-- hit_rate: `0.3657`
-- p50/p95/p99 (engine internal, microseconds): `10915 / 26798 / 31705`
+- hit_rate: `0.4167`
+- p50/p95/p99 (engine internal, microseconds): `9912 / 25473 / 30399`
 
 ## Notes
 - This run uses a medium-scale profile intended to be closer to practical operation while remaining executable in local CI-like environments.
