@@ -1083,6 +1083,8 @@ dependencies = [
  "ingestion",
  "query",
  "rkyv",
+ "serde",
+ "serde_json",
  "storage",
  "tempfile",
  "tokio",
