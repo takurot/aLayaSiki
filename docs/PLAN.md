@@ -351,7 +351,7 @@
 - [ ] **ガバナンス・ポリシーE2E**:
     - [ ] PIIマスキングの実効性検証: 個人情報を含むデータの投入 -> 検索結果でのマスキング確認
     - [ ] データレジデンシの強制検証: 指定リージョン外からの要求拒否フロー
-    - [ ] 保持期限（Retention）の動的検証: 期限切れデータが検索対象から自動除外されることの確認
+    - [x] 保持期限（Retention）の動的検証: 期限切れデータが検索対象から自動除外されることの確認
 
 **Notes:**
 - JWTトークンを直接受け取り認証・認可を一体で実行するAPIを追加 (`IngestionPipeline::ingest_jwt_authorized`, `QueryEngine::execute_json_jwt_authorized`)
@@ -359,6 +359,7 @@
 - 認可済み ingest でノードメタデータに `tenant` を強制付与し、認可済み query では同一 `tenant` のノードのみ探索・返却するよう制限
 - テナント分離E2E (`test_e2e_tenant_isolation_prevents_cross_tenant_leakage`) を追加し、クロステナント混入が発生しないことを検証
 - 動的権限変更E2E (`test_e2e_dynamic_rbac_abac_permission_transition`) を追加し、RBAC更新前後の拒否理由遷移（`PermissionDenied` -> `InsufficientClearance`）とABAC更新後の許可を検証
+- 保持期限E2E (`test_e2e_retention_dynamic_excludes_expired_nodes`) を追加し、ガバナンスポリシー更新後に期限切れデータが `retention_expired` として検索結果から除外されることを検証
 
 ---
 
