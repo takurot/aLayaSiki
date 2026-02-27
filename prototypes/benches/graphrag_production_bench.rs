@@ -8,6 +8,9 @@ use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::ingest::IngestionRequest;
 use alayasiki_core::metrics::MetricsSnapshot;
 use alayasiki_core::model::{Edge, Node};
+use ingestion::chunker::SemanticChunker;
+use ingestion::embedding::DeterministicEmbedder;
+use ingestion::policy::NoOpPolicy;
 use ingestion::processor::IngestionPipeline;
 use query::{QueryEngine, QueryRequest};
 use serde::Serialize;
@@ -436,7 +439,13 @@ async fn main() {
     };
 
     let engine = Arc::new(QueryEngine::new(repo.clone()).with_community_summaries(summaries));
-    let pipeline = Arc::new(IngestionPipeline::new(repo));
+    let pipeline = Arc::new(IngestionPipeline::with_components(
+        repo,
+        Box::new(SemanticChunker::default()),
+        Box::new(DeterministicEmbedder::new(DIMS)),
+        Box::new(NoOpPolicy),
+        MODEL_ID,
+    ));
 
     let benchmark_start = Instant::now();
     let mut handles = Vec::with_capacity(config.workers);
