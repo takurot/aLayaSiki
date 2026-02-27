@@ -2,13 +2,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alayasiki_core::auth::{Authorizer, JwtAuthenticator, JwtClaims, ResourceContext};
+use alayasiki_core::auth::{
+    Action, Authorizer, AuthzError, JwtAuthenticator, JwtClaims, ResourceContext,
+};
 use alayasiki_core::ingest::IngestionRequest;
 use ingestion::processor::IngestionPipeline;
 use jobs::queue::ChannelJobQueue;
 use jobs::worker::Worker;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use query::{QueryEngine, QueryRequest};
+use query::{QueryEngine, QueryError, QueryRequest};
 use slm::ner::MockEntityExtractor;
 use storage::community::{CommunityEngine, DeterministicSummarizer};
 use storage::repo::Repository;
@@ -445,6 +447,131 @@ async fn test_e2e_tenant_isolation_prevents_cross_tenant_leakage() {
         .all(|node| !acme_ids.contains(&node.id)));
 }
 
+#[tokio::test]
+async fn test_e2e_dynamic_rbac_abac_permission_transition() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("e2e_dynamic_rbac_abac.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+    let pipeline = IngestionPipeline::new(repo.clone());
+    let engine = QueryEngine::new(repo);
+
+    let secret = "jwt-e2e-dynamic-permissions";
+    let admin_token = issue_test_token_with_attributes(
+        secret,
+        "acme",
+        &["admin"],
+        "ingest:write query:execute",
+        HashMap::from([
+            ("department".to_string(), "research".to_string()),
+            ("clearance_level".to_string(), "5".to_string()),
+        ]),
+    );
+    let analyst_low_clearance_token = issue_test_token_with_attributes(
+        secret,
+        "acme",
+        &["analyst"],
+        "",
+        HashMap::from([
+            ("department".to_string(), "research".to_string()),
+            ("clearance_level".to_string(), "2".to_string()),
+        ]),
+    );
+    let analyst_high_clearance_token = issue_test_token_with_attributes(
+        secret,
+        "acme",
+        &["analyst"],
+        "",
+        HashMap::from([
+            ("department".to_string(), "research".to_string()),
+            ("clearance_level".to_string(), "3".to_string()),
+        ]),
+    );
+    let authenticator =
+        JwtAuthenticator::new_hs256(secret, Some("alayasiki-auth"), Some("alayasiki-api"));
+    let resource = ResourceContext::new("acme")
+        .require_attribute("department", "research")
+        .require_min_clearance(3);
+
+    pipeline
+        .ingest_jwt_authorized(
+            IngestionRequest::Text {
+                content: "Acme research tenant knowledge for dynamic authz test.".to_string(),
+                metadata: HashMap::from([(
+                    "source".to_string(),
+                    "tenant/acme-dynamic.md".to_string(),
+                )]),
+                idempotency_key: Some("tenant-acme-dynamic-doc".to_string()),
+                model_id: Some("embedding-default-v1".to_string()),
+            },
+            &admin_token,
+            &authenticator,
+            &Authorizer::default(),
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    let authorizer_before_rbac_change =
+        Authorizer::default().with_role_permissions("analyst", [Action::Ingest]);
+    let query_json = r#"{
+        "query":"dynamic authz test",
+        "mode":"evidence",
+        "search_mode":"local",
+        "top_k":10
+    }"#;
+
+    let denied_by_rbac = engine
+        .execute_json_jwt_authorized(
+            query_json,
+            &analyst_low_clearance_token,
+            &authenticator,
+            &authorizer_before_rbac_change,
+            &resource,
+        )
+        .await;
+    assert!(matches!(
+        denied_by_rbac,
+        Err(QueryError::Unauthorized(
+            AuthzError::PermissionDenied { .. }
+        ))
+    ));
+
+    let authorizer_after_rbac_change =
+        Authorizer::default().with_role_permissions("analyst", [Action::Query]);
+    let denied_by_abac = engine
+        .execute_json_jwt_authorized(
+            query_json,
+            &analyst_low_clearance_token,
+            &authenticator,
+            &authorizer_after_rbac_change,
+            &resource,
+        )
+        .await;
+    assert!(matches!(
+        denied_by_abac,
+        Err(QueryError::Unauthorized(
+            AuthzError::InsufficientClearance { .. }
+        ))
+    ));
+
+    let allowed = engine
+        .execute_json_jwt_authorized(
+            query_json,
+            &analyst_high_clearance_token,
+            &authenticator,
+            &authorizer_after_rbac_change,
+            &resource,
+        )
+        .await
+        .unwrap();
+    assert!(!allowed.evidence.nodes.is_empty());
+    assert!(allowed
+        .evidence
+        .nodes
+        .iter()
+        .all(|node| node.data.contains("dynamic authz test")));
+}
+
 async fn wait_for_min_graph_edges(repo: &Arc<Repository>, min_edges: usize, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
@@ -462,6 +589,16 @@ async fn wait_for_min_graph_edges(repo: &Arc<Repository>, min_edges: usize, time
 }
 
 fn issue_test_token(secret: &str, tenant: &str, roles: &[&str], scope: &str) -> String {
+    issue_test_token_with_attributes(secret, tenant, roles, scope, HashMap::new())
+}
+
+fn issue_test_token_with_attributes(
+    secret: &str,
+    tenant: &str,
+    roles: &[&str],
+    scope: &str,
+    attributes: HashMap<String, String>,
+) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -471,7 +608,7 @@ fn issue_test_token(secret: &str, tenant: &str, roles: &[&str], scope: &str) -> 
         tenant: tenant.to_string(),
         roles: roles.iter().map(|role| role.to_string()).collect(),
         scope: Some(scope.to_string()),
-        attributes: HashMap::new(),
+        attributes,
         iss: Some("alayasiki-auth".to_string()),
         aud: Some("alayasiki-api".to_string()),
         exp: now + 300,
