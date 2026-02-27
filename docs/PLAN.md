@@ -324,7 +324,7 @@
 - [ ] **並列度検証**: worker 数（8/32/128）別に read:write=9:1 の劣化カーブを取得
 - [x] **結果保存の標準化**: ベンチ結果を `benchmarks/results/*.json` に出力し、比較可能な履歴を残す
 - [x] **回帰ガード**: CI に p95 閾値チェック（read/write）を導入し、悪化時に失敗させる
-- [ ] **CIベンチ基準の実運用化**: Operational/ANN ベンチの入力条件を baseline と一致させ、閾値（read/write p95・throughput・ANN回帰率）を現実的な SLO ベースに再定義し、過剰に緩い基準を解消する
+- [x] **CIベンチ基準の実運用化**: Operational/ANN ベンチの入力条件を baseline と一致させ、閾値（read/write p95・throughput・ANN回帰率）を現実的な SLO ベースに再定義し、過剰に緩い基準を解消する
 
 **Notes:**
 - `prototypes/benches/graphrag_production_bench.rs` を追加し、実運用近似の GraphRAG 負荷（read:write=9:1、並列ワーカー、`local/global/drift/auto` 混在）を計測可能にした
@@ -332,6 +332,8 @@
 - レポート作成用の主要指標（read/write p50/p95/p99、throughput、groundedness、evidence件数、semantic cache hit率、mode mix）を出力対象に追加
 - ベースライン実行（`seed_nodes=4000, workers=6, warmup=20, measured=100`）の結果を `benchmarks/results/graphrag_production_report.md` に記録
 - CI に `Benchmark Gate (graphrag p95 thresholds)` ジョブを追加し、`ALAYASIKI_GRAPHRAG_MAX_READ_P95_MS` / `ALAYASIKI_GRAPHRAG_MAX_WRITE_P95_MS` / `ALAYASIKI_GRAPHRAG_MIN_THROUGHPUT` による回帰判定を常時実行
+- Operational ベンチ条件を baseline プロファイル（`nodes=4000, workers=6, ops_per_worker=100, read:write=9:1`）へ統一し、閾値を `read_p95<=30ms`, `write_p95<=200ms`, `throughput>=250ops/s` に更新
+- ANN ベンチ入力を baseline（`n_samples=10000, n_dims=128, n_queries=100, top_k=10, seed=42`）に合わせ、回帰率閾値を `10.0` から `2.0` に引き締め
 
 ---
 
