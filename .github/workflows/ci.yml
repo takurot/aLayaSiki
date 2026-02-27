@@ -58,6 +58,29 @@ jobs:
           ALAYASIKI_BENCH_MIN_THROUGHPUT: "80"
         run: cargo bench -p prototypes --bench operational_latency_bench
 
+  graphrag-bench-gate:
+    name: Benchmark Gate (graphrag p95 thresholds)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run graphrag production benchmark with regression thresholds
+        env:
+          ALAYASIKI_GRAPHRAG_SEED_NODES: "4000"
+          ALAYASIKI_GRAPHRAG_WORKERS: "6"
+          ALAYASIKI_GRAPHRAG_WARMUP_OPS: "20"
+          ALAYASIKI_GRAPHRAG_MEASURED_OPS: "100"
+          ALAYASIKI_GRAPHRAG_WRITE_EVERY: "10"
+          ALAYASIKI_GRAPHRAG_TOP_K: "24"
+          ALAYASIKI_GRAPHRAG_DEPTH: "2"
+          ALAYASIKI_GRAPHRAG_RESULTS_PATH: "/tmp/graphrag_production_ci.json"
+          ALAYASIKI_GRAPHRAG_MIN_THROUGHPUT: "120"
+          ALAYASIKI_GRAPHRAG_MAX_READ_P95_MS: "80"
+          ALAYASIKI_GRAPHRAG_MAX_WRITE_P95_MS: "250"
+        run: cargo bench -p prototypes --bench graphrag_production_bench
+
   python-ann-bench:
     name: Python ANN Benchmark + Baseline Check
     runs-on: ubuntu-latest
