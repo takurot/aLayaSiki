@@ -43,6 +43,7 @@ jobs:
   bench-smoke:
     name: Benchmark Gate (operational latency)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -84,6 +85,7 @@ jobs:
   python-ann-bench:
     name: Python ANN Benchmark + Baseline Check
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
