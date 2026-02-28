@@ -587,8 +587,8 @@ async fn test_e2e_retention_dynamic_excludes_expired_nodes() {
         .upsert_policy(TenantGovernancePolicy::new("acme", "ap-northeast-1", 0))
         .unwrap();
 
-    let pipeline = IngestionPipeline::new(repo.clone())
-        .with_governance_policy_store(policy_store.clone());
+    let pipeline =
+        IngestionPipeline::new(repo.clone()).with_governance_policy_store(policy_store.clone());
     let engine = QueryEngine::new(repo);
 
     let secret = "jwt-e2e-retention-secret";
