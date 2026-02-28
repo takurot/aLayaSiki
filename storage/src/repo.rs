@@ -1,6 +1,7 @@
 use crate::crypto::{AtRestCipher, NoOpCipher};
 use crate::hyper_index::HyperIndex;
 use crate::index::AdjacencyGraph;
+use crate::session::SessionManager;
 use crate::snapshot::{SnapshotError, SnapshotManager};
 use crate::wal::{Wal, WalError};
 use alayasiki_core::error::{AlayasikiError, ErrorCode};
@@ -10,6 +11,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::fs;
 use tokio::sync::{Mutex, RwLock};
@@ -171,6 +173,38 @@ impl SnapshotView {
         self.hyper_index.search_vector(query, k)
     }
 
+    pub fn search_vector_with_session(
+        &self,
+        query: &[f32],
+        k: usize,
+        session: Option<&crate::session::SessionGraph>,
+    ) -> Vec<(u64, f32)> {
+        let mut results = self.search_vector(query, k);
+        if let Some(session) = session {
+            use alayasiki_core::embedding::cosine_similarity;
+            let mut session_results: Vec<(u64, f32)> = session
+                .nodes
+                .values()
+                .filter_map(|node| {
+                    cosine_similarity(query, &node.embedding).map(|sim| (node.id, sim))
+                })
+                .collect();
+
+            results.append(&mut session_results);
+            results.sort_by(|a, b| {
+                a.0.cmp(&b.0).then_with(|| {
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                })
+            });
+            results.dedup_by_key(|(id, _)| *id);
+            results.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            results.truncate(k);
+        }
+        results
+    }
+
     pub fn neighbors(&self, node_id: u64) -> Vec<(u64, String, f32)> {
         self.hyper_index
             .graph_index
@@ -178,6 +212,22 @@ impl SnapshotView {
             .into_iter()
             .cloned()
             .collect()
+    }
+
+    pub fn neighbors_with_session(
+        &self,
+        node_id: u64,
+        session: Option<&crate::session::SessionGraph>,
+    ) -> Vec<(u64, String, f32)> {
+        let mut results = self.neighbors(node_id);
+        if let Some(session) = session {
+            for edge in &session.edges {
+                if edge.source == node_id {
+                    results.push((edge.target, edge.relation.clone(), edge.weight));
+                }
+            }
+        }
+        results
     }
 
     pub fn get_edge_metadata_bulk(
@@ -202,7 +252,10 @@ pub struct Repository {
     idempotency_index: Arc<RwLock<HashMap<String, Vec<u64>>>>,
     edge_metadata: Arc<RwLock<HashMap<EdgeMetaKey, HashMap<String, String>>>>,
     snapshot_manager: Option<SnapshotManager>,
+    pub session_manager: Arc<SessionManager>,
 }
+
+const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 
 impl Repository {
     /// Create a new empty Repository (no replay)
@@ -215,6 +268,7 @@ impl Repository {
             idempotency_index: Arc::new(RwLock::new(HashMap::new())),
             edge_metadata: Arc::new(RwLock::new(HashMap::new())),
             snapshot_manager: None,
+            session_manager: Arc::new(SessionManager::new(DEFAULT_SESSION_TTL)),
         }
     }
 
@@ -301,6 +355,7 @@ impl Repository {
             idempotency_index: Arc::new(RwLock::new(materialized.idempotency_index)),
             edge_metadata: Arc::new(RwLock::new(materialized.edge_metadata)),
             snapshot_manager,
+            session_manager: Arc::new(SessionManager::new(DEFAULT_SESSION_TTL)),
         })
     }
 
@@ -348,6 +403,121 @@ impl Repository {
     pub async fn delete_node(&self, id: u64) -> Result<(), RepoError> {
         self.apply_index_transaction(vec![IndexMutation::DeleteNode(id)])
             .await
+    }
+
+    pub async fn get_node_with_session(
+        &self,
+        id: u64,
+        session_id: Option<&str>,
+    ) -> Result<Node, RepoError> {
+        if let Some(sid) = session_id {
+            if let Some(session) = self.session_manager.get(sid) {
+                if let Some(node) = session.nodes.get(&id) {
+                    return Ok(node.clone());
+                }
+            }
+        }
+        self.get_node(id).await
+    }
+
+    pub async fn search_vector_with_session(
+        &self,
+        query: &[f32],
+        k: usize,
+        session_id: Option<&str>,
+    ) -> Vec<(u64, f32)> {
+        let mut results = {
+            let index = self.hyper_index.read().await;
+            index.search_vector(query, k)
+        };
+
+        if let Some(sid) = session_id {
+            if let Some(session) = self.session_manager.get(sid) {
+                use alayasiki_core::embedding::cosine_similarity;
+                let mut session_results: Vec<(u64, f32)> = session
+                    .nodes
+                    .values()
+                    .filter_map(|node| {
+                        cosine_similarity(query, &node.embedding).map(|sim| (node.id, sim))
+                    })
+                    .collect();
+
+                results.append(&mut session_results);
+                results.sort_by(|a, b| {
+                    a.0.cmp(&b.0).then_with(|| {
+                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                });
+                results.dedup_by_key(|(id, _)| *id);
+                results.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                results.truncate(k);
+            }
+        }
+        results
+    }
+
+    pub async fn neighbors_with_session(
+        &self,
+        node_id: u64,
+        session_id: Option<&str>,
+    ) -> Vec<(u64, String, f32)> {
+        let mut results: Vec<(u64, String, f32)> = {
+            let index = self.hyper_index.read().await;
+            index
+                .graph_index
+                .neighbors(node_id)
+                .into_iter()
+                .cloned()
+                .collect()
+        };
+        if let Some(sid) = session_id {
+            if let Some(session) = self.session_manager.get(sid) {
+                for edge in &session.edges {
+                    if edge.source == node_id {
+                        results.push((edge.target, edge.relation.clone(), edge.weight));
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    pub fn ingest_to_session(&self, session_id: &str, node: Node) {
+        let mut session = self.session_manager.get_or_create(session_id);
+        session.insert_node(node);
+    }
+
+    pub fn insert_edge_to_session(&self, session_id: &str, edge: Edge) {
+        let mut session = self.session_manager.get_or_create(session_id);
+        session.insert_edge(edge);
+    }
+
+    /// Promote all nodes and edges in a session to persistent storage.
+    /// This is an atomic operation within a single WAL transaction.
+    pub async fn promote_session_to_persistent(&self, session_id: &str) -> Result<(), RepoError> {
+        let (nodes, edges) = {
+            let session = self.session_manager.get(session_id).ok_or(RepoError::NotFound)?;
+            (
+                session.nodes.values().cloned().collect::<Vec<_>>(),
+                session.edges.clone(),
+            )
+        };
+
+        let mut mutations = Vec::with_capacity(nodes.len() + edges.len());
+        for node in nodes {
+            mutations.push(IndexMutation::PutNode(node));
+        }
+        for edge in edges {
+            mutations.push(IndexMutation::PutEdge(edge));
+        }
+
+        self.apply_index_transaction(mutations).await?;
+
+        // Remove session after successful persistence
+        self.session_manager.remove(session_id);
+        Ok(())
     }
 
     /// Apply index updates atomically within one transaction boundary.

@@ -1,3 +1,4 @@
+use alayasiki_core::embedding::cosine_similarity;
 use std::collections::HashMap;
 
 /// Simple linear scan ANN index (placeholder for HNSW/IVF)
@@ -48,21 +49,6 @@ impl Default for LinearAnnIndex {
     }
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f32> {
-    if a.len() != b.len() || a.is_empty() {
-        return None;
-    }
-
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return Some(0.0);
-    }
-
-    Some(dot / (norm_a * norm_b))
-}
 
 #[cfg(test)]
 mod tests {

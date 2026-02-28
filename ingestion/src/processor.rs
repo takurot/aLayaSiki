@@ -162,8 +162,40 @@ impl IngestionPipeline {
 
         let actor = Some(principal.subject.clone());
         let tenant = Some(principal.tenant.clone());
-        self.ingest_with_audit(request, model_id, actor, tenant)
+        self.ingest_with_audit(request, model_id, actor, tenant, None)
             .await
+    }
+
+    pub async fn ingest_to_session_authorized(
+        &self,
+        session_id: &str,
+        request: IngestionRequest,
+        principal: &Principal,
+        authorizer: &Authorizer,
+        resource: &ResourceContext,
+    ) -> Result<Vec<u64>, IngestionError> {
+        let model_id = effective_ingest_model_id(&request, &self.default_model_id);
+        if let Err(err) = authorizer.authorize(principal, Action::Ingest, resource) {
+            self.emit_audit_event(build_audit_event(
+                AuditOutcome::Denied,
+                &model_id,
+                Some(principal.subject.clone()),
+                Some(principal.tenant.clone()),
+                Some(err.to_string()),
+            ));
+            return Err(err.into());
+        }
+
+        let actor = Some(principal.subject.clone());
+        let tenant = Some(principal.tenant.clone());
+        self.ingest_with_audit(
+            request,
+            model_id,
+            actor,
+            tenant,
+            Some(session_id.to_string()),
+        )
+        .await
     }
 
     pub async fn ingest_jwt_authorized(
@@ -195,7 +227,8 @@ impl IngestionPipeline {
 
     pub async fn ingest(&self, request: IngestionRequest) -> Result<Vec<u64>, IngestionError> {
         let model_id = effective_ingest_model_id(&request, &self.default_model_id);
-        self.ingest_with_audit(request, model_id, None, None).await
+        self.ingest_with_audit(request, model_id, None, None, None)
+            .await
     }
 
     async fn ingest_with_audit(
@@ -204,8 +237,11 @@ impl IngestionPipeline {
         model_id: String,
         actor: Option<String>,
         tenant: Option<String>,
+        session_id: Option<String>,
     ) -> Result<Vec<u64>, IngestionError> {
-        let result = self.ingest_internal(request, tenant.as_deref()).await;
+        let result = self
+            .ingest_internal(request, tenant.as_deref(), session_id.as_deref())
+            .await;
         let outcome = match &result {
             Ok(_) => AuditOutcome::Succeeded,
             Err(_) => AuditOutcome::Failed,
@@ -219,6 +255,7 @@ impl IngestionPipeline {
         &self,
         request: IngestionRequest,
         tenant: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<Vec<u64>, IngestionError> {
         self.validate_governance_preflight(tenant, request.metadata())?;
 
@@ -242,14 +279,16 @@ impl IngestionPipeline {
             locks: self.locks.clone(),
         };
 
-        // 1. Check Persistent Idempotency
-        if let Some(key) = idempotency_key.as_deref() {
-            if let Some(ids) = self.repo.check_idempotency(key).await {
+        // 1. Check Persistent Idempotency (only if NOT session ingest)
+        if session_id.is_none() {
+            if let Some(key) = idempotency_key.as_deref() {
+                if let Some(ids) = self.repo.check_idempotency(key).await {
+                    return Ok(ids);
+                }
+            }
+            if let Some(ids) = self.repo.check_idempotency(&content_hash).await {
                 return Ok(ids);
             }
-        }
-        if let Some(ids) = self.repo.check_idempotency(&content_hash).await {
-            return Ok(ids);
         }
 
         let embedding_model_id = request
@@ -296,32 +335,40 @@ impl IngestionPipeline {
                 metadata: chunk.metadata,
             };
 
-            self.repo.put_node(node).await?;
+            if let Some(sid) = session_id {
+                self.repo.ingest_to_session(sid, node);
+            } else {
+                self.repo.put_node(node).await?;
+            }
             node_ids.push(chunk_id);
 
-            // Enqueue Job if queue is present
-            if let Some(queue) = &self.job_queue {
-                let snapshot_id = self.repo.current_snapshot_id().await;
-                let job = Job::ExtractEntities {
-                    node_id: chunk_id,
-                    content: chunk_content,
-                    model_id: extraction_model_id.clone(),
-                    snapshot_id,
-                };
-                if let Err(e) = queue.enqueue(job).await {
-                    // Best-effort: Log warning but continue ingestion to preserve idempotency
-                    tracing::warn!("Failed to enqueue job for node {}: {}", chunk_id, e);
+            // Enqueue Job if queue is present (only if NOT session ingest)
+            if session_id.is_none() {
+                if let Some(queue) = &self.job_queue {
+                    let snapshot_id = self.repo.current_snapshot_id().await;
+                    let job = Job::ExtractEntities {
+                        node_id: chunk_id,
+                        content: chunk_content,
+                        model_id: extraction_model_id.clone(),
+                        snapshot_id,
+                    };
+                    if let Err(e) = queue.enqueue(job).await {
+                        // Best-effort: Log warning but continue ingestion to preserve idempotency
+                        tracing::warn!("Failed to enqueue job for node {}: {}", chunk_id, e);
+                    }
                 }
             }
         }
 
-        // 2. Record Idempotency persistently
-        if let Some(key) = &idempotency_key {
-            self.repo.record_idempotency(key, node_ids.clone()).await?;
+        // 2. Record Idempotency persistently (only if NOT session ingest)
+        if session_id.is_none() {
+            if let Some(key) = &idempotency_key {
+                self.repo.record_idempotency(key, node_ids.clone()).await?;
+            }
+            self.repo
+                .record_idempotency(&content_hash, node_ids.clone())
+                .await?;
         }
-        self.repo
-            .record_idempotency(&content_hash, node_ids.clone())
-            .await?;
 
         // Guard will automatically remove lock on drop
         // self.locks.remove(&lock_key);

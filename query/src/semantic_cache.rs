@@ -49,6 +49,7 @@ impl Default for SemanticCacheConfig {
 pub struct SemanticCacheKey {
     pub model_id: String,
     pub snapshot_id: String,
+    pub session_id: Option<String>,
     pub mode: QueryMode,
     pub search_mode: SearchMode,
     pub effective_search_mode: SearchMode,
@@ -84,6 +85,7 @@ impl SemanticCacheKey {
         Self {
             model_id: model_id.to_string(),
             snapshot_id: snapshot_id.to_string(),
+            session_id: request.session_id.clone(),
             mode: request.mode,
             search_mode: request.search_mode,
             effective_search_mode,
@@ -374,6 +376,7 @@ mod tests {
         SemanticCacheKey {
             model_id: "embedding-default-v1".to_string(),
             snapshot_id: snapshot_id.to_string(),
+            session_id: None,
             mode: QueryMode::Evidence,
             search_mode: SearchMode::Local,
             effective_search_mode: SearchMode::Local,
