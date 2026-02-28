@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use alayasiki_core::auth::{
     Action, Authorizer, AuthzError, JwtAuthenticator, JwtClaims, ResourceContext,
 };
+use alayasiki_core::governance::{InMemoryGovernancePolicyStore, TenantGovernancePolicy};
 use alayasiki_core::ingest::IngestionRequest;
 use ingestion::processor::IngestionPipeline;
 use jobs::queue::ChannelJobQueue;
@@ -573,6 +574,110 @@ async fn test_e2e_dynamic_rbac_abac_permission_transition() {
         .nodes
         .iter()
         .all(|node| node.data.contains("dynamic authz test")));
+}
+
+#[tokio::test]
+async fn test_e2e_retention_dynamic_excludes_expired_nodes() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("e2e_retention_dynamic.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let policy_store = Arc::new(InMemoryGovernancePolicyStore::default());
+    policy_store
+        .upsert_policy(TenantGovernancePolicy::new("acme", "ap-northeast-1", 0))
+        .unwrap();
+
+    let pipeline =
+        IngestionPipeline::new(repo.clone()).with_governance_policy_store(policy_store.clone());
+    let engine = QueryEngine::new(repo);
+
+    let secret = "jwt-e2e-retention-secret";
+    let token = issue_test_token(secret, "acme", &["admin"], "ingest:write query:execute");
+    let authenticator =
+        JwtAuthenticator::new_hs256(secret, Some("alayasiki-auth"), Some("alayasiki-api"));
+    let authorizer = Authorizer::default();
+    let resource = ResourceContext::new("acme");
+
+    pipeline
+        .ingest_jwt_authorized(
+            IngestionRequest::Text {
+                content: "Retention signal expired document".to_string(),
+                metadata: HashMap::from([
+                    (
+                        "source".to_string(),
+                        "tenant/acme-retention-expired.md".to_string(),
+                    ),
+                    ("region".to_string(), "ap-northeast-1".to_string()),
+                ]),
+                idempotency_key: Some("tenant-acme-retention-expired".to_string()),
+                model_id: Some("embedding-default-v1".to_string()),
+            },
+            &token,
+            &authenticator,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    policy_store
+        .upsert_policy(TenantGovernancePolicy::new("acme", "ap-northeast-1", 30))
+        .unwrap();
+
+    pipeline
+        .ingest_jwt_authorized(
+            IngestionRequest::Text {
+                content: "Retention signal active document".to_string(),
+                metadata: HashMap::from([
+                    (
+                        "source".to_string(),
+                        "tenant/acme-retention-active.md".to_string(),
+                    ),
+                    ("region".to_string(), "ap-northeast-1".to_string()),
+                ]),
+                idempotency_key: Some("tenant-acme-retention-active".to_string()),
+                model_id: Some("embedding-default-v1".to_string()),
+            },
+            &token,
+            &authenticator,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    let response = engine
+        .execute_json_jwt_authorized(
+            r#"{
+                "query":"retention signal",
+                "mode":"evidence",
+                "search_mode":"local",
+                "top_k":20
+            }"#,
+            &token,
+            &authenticator,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    assert!(!response.evidence.nodes.is_empty());
+    assert!(response
+        .evidence
+        .nodes
+        .iter()
+        .any(|node| node.data.contains("Retention signal active document")));
+    assert!(response
+        .evidence
+        .nodes
+        .iter()
+        .all(|node| !node.data.contains("Retention signal expired document")));
+    assert!(response
+        .explain
+        .exclusions
+        .iter()
+        .any(|reason| reason.reason == "retention_expired"));
 }
 
 async fn wait_for_min_graph_edges(repo: &Arc<Repository>, min_edges: usize, timeout: Duration) {
