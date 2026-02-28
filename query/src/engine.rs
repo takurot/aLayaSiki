@@ -422,9 +422,10 @@ impl QueryEngine {
         let tenant_scoped = tenant_scope.is_some();
 
         // Resolve session if provided.
-        let session_graph = request.session_id.as_ref().and_then(|sid| {
-            self.repo.session_manager.get(sid).map(|s| s.clone())
-        });
+        let session_graph = request
+            .session_id
+            .as_ref()
+            .and_then(|sid| self.repo.session_manager.get(sid).map(|s| s.clone()));
 
         if !tenant_scoped {
             if let Some(mut cached_response) =
@@ -1101,7 +1102,8 @@ impl QueryEngine {
                         continue;
                     }
 
-                    for (target, relation, weight) in view.neighbors_with_session(current_id, session)
+                    for (target, relation, weight) in
+                        view.neighbors_with_session(current_id, session)
                     {
                         if !relation_is_allowed(relation.as_str(), &relation_filter) {
                             exclusions.push(ExclusionReason {
@@ -1212,7 +1214,6 @@ impl QueryEngine {
                 }
             }
         }
-
 
         let candidate_ids: Vec<u64> = candidate_hops.keys().copied().collect();
         let fetched_nodes = self

@@ -49,7 +49,6 @@ impl Default for LinearAnnIndex {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

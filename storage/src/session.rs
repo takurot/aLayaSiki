@@ -1,7 +1,7 @@
+use alayasiki_core::model::{Edge, Node};
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
-use alayasiki_core::model::{Node, Edge};
 
 /// A session-scoped subgraph that exists only in memory.
 #[derive(Debug, Clone)]
@@ -55,14 +55,20 @@ impl SessionManager {
     }
 
     /// Get or create a session.
-    pub fn get_or_create(&self, session_id: &str) -> dashmap::mapref::one::RefMut<'_, String, SessionGraph> {
-        self.sessions.entry(session_id.to_string()).or_insert_with(|| {
-            SessionGraph::new(session_id.to_string(), self.default_ttl)
-        })
+    pub fn get_or_create(
+        &self,
+        session_id: &str,
+    ) -> dashmap::mapref::one::RefMut<'_, String, SessionGraph> {
+        self.sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionGraph::new(session_id.to_string(), self.default_ttl))
     }
 
     /// Get a session if it exists and is not expired.
-    pub fn get(&self, session_id: &str) -> Option<dashmap::mapref::one::Ref<'_, String, SessionGraph>> {
+    pub fn get(
+        &self,
+        session_id: &str,
+    ) -> Option<dashmap::mapref::one::Ref<'_, String, SessionGraph>> {
         let entry = self.sessions.get(session_id)?;
         if entry.is_expired() {
             drop(entry);
@@ -86,6 +92,10 @@ impl SessionManager {
     /// Total count of active sessions.
     pub fn len(&self) -> usize {
         self.sessions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
     }
 }
 

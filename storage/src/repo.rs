@@ -192,14 +192,11 @@ impl SnapshotView {
 
             results.append(&mut session_results);
             results.sort_by(|a, b| {
-                a.0.cmp(&b.0).then_with(|| {
-                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                })
+                a.0.cmp(&b.0)
+                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
             });
             results.dedup_by_key(|(id, _)| *id);
-            results.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             results.truncate(k);
         }
         results
@@ -444,14 +441,11 @@ impl Repository {
 
                 results.append(&mut session_results);
                 results.sort_by(|a, b| {
-                    a.0.cmp(&b.0).then_with(|| {
-                        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                    })
+                    a.0.cmp(&b.0)
+                        .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
                 });
                 results.dedup_by_key(|(id, _)| *id);
-                results.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                });
+                results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 results.truncate(k);
             }
         }
@@ -498,7 +492,10 @@ impl Repository {
     /// This is an atomic operation within a single WAL transaction.
     pub async fn promote_session_to_persistent(&self, session_id: &str) -> Result<(), RepoError> {
         let (nodes, edges) = {
-            let session = self.session_manager.get(session_id).ok_or(RepoError::NotFound)?;
+            let session = self
+                .session_manager
+                .get(session_id)
+                .ok_or(RepoError::NotFound)?;
             (
                 session.nodes.values().cloned().collect::<Vec<_>>(),
                 session.edges.clone(),

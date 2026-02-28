@@ -58,7 +58,11 @@ async fn test_session_graph_isolation_and_merging() {
         ..Default::default()
     };
     let resp_with_session = engine.execute(query_req_with_session).await.unwrap();
-    assert!(resp_with_session.evidence.nodes.iter().any(|n| n.id == s_id));
+    assert!(resp_with_session
+        .evidence
+        .nodes
+        .iter()
+        .any(|n| n.id == s_id));
 
     // 5. Query with session for persistent content -> persistent node found
     let query_req_p = QueryRequest {
@@ -93,7 +97,9 @@ async fn test_session_promotion_to_persistent() {
     let s_id = s_ids[0];
 
     // Promote
-    repo.promote_session_to_persistent(session_id).await.unwrap();
+    repo.promote_session_to_persistent(session_id)
+        .await
+        .unwrap();
 
     // Now query WITHOUT session_id should find it
     let query_req = QueryRequest {
