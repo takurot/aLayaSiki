@@ -5,9 +5,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use alayasiki_core::auth::{
     Action, Authorizer, AuthzError, JwtAuthenticator, JwtClaims, ResourceContext,
 };
-use alayasiki_core::governance::{InMemoryGovernancePolicyStore, TenantGovernancePolicy};
+use alayasiki_core::governance::{
+    GovernanceError, InMemoryGovernancePolicyStore, TenantGovernancePolicy,
+};
 use alayasiki_core::ingest::IngestionRequest;
-use ingestion::processor::IngestionPipeline;
+use ingestion::processor::{IngestionError, IngestionPipeline};
 use jobs::queue::ChannelJobQueue;
 use jobs::worker::Worker;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -678,6 +680,112 @@ async fn test_e2e_retention_dynamic_excludes_expired_nodes() {
         .exclusions
         .iter()
         .any(|reason| reason.reason == "retention_expired"));
+}
+
+#[tokio::test]
+async fn test_e2e_data_residency_enforces_region_boundary() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("e2e_residency_enforcement.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let policy_store = Arc::new(InMemoryGovernancePolicyStore::default());
+    policy_store
+        .upsert_policy(TenantGovernancePolicy::new("acme", "ap-northeast-1", 30))
+        .unwrap();
+
+    let pipeline =
+        IngestionPipeline::new(repo.clone()).with_governance_policy_store(policy_store.clone());
+    let engine = QueryEngine::new(repo);
+
+    let secret = "jwt-e2e-residency-secret";
+    let token = issue_test_token(secret, "acme", &["admin"], "ingest:write query:execute");
+    let authenticator =
+        JwtAuthenticator::new_hs256(secret, Some("alayasiki-auth"), Some("alayasiki-api"));
+    let authorizer = Authorizer::default();
+    let resource = ResourceContext::new("acme");
+
+    let out_of_region_err = pipeline
+        .ingest_jwt_authorized(
+            IngestionRequest::Text {
+                content: "Residency blocked document".to_string(),
+                metadata: HashMap::from([
+                    (
+                        "source".to_string(),
+                        "tenant/acme-residency-blocked.md".to_string(),
+                    ),
+                    ("region".to_string(), "us-east-1".to_string()),
+                ]),
+                idempotency_key: Some("tenant-acme-residency-blocked".to_string()),
+                model_id: Some("embedding-default-v1".to_string()),
+            },
+            &token,
+            &authenticator,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        out_of_region_err,
+        IngestionError::Governance(GovernanceError::ResidencyViolation {
+            tenant,
+            expected_region,
+            actual_region
+        }) if tenant == "acme"
+            && expected_region == "ap-northeast-1"
+            && actual_region == "us-east-1"
+    ));
+
+    pipeline
+        .ingest_jwt_authorized(
+            IngestionRequest::Text {
+                content: "Residency allowed document".to_string(),
+                metadata: HashMap::from([
+                    (
+                        "source".to_string(),
+                        "tenant/acme-residency-allowed.md".to_string(),
+                    ),
+                    ("region".to_string(), "ap-northeast-1".to_string()),
+                ]),
+                idempotency_key: Some("tenant-acme-residency-allowed".to_string()),
+                model_id: Some("embedding-default-v1".to_string()),
+            },
+            &token,
+            &authenticator,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    let response = engine
+        .execute_json_jwt_authorized(
+            r#"{
+                "query":"residency document",
+                "mode":"evidence",
+                "search_mode":"local",
+                "top_k":10
+            }"#,
+            &token,
+            &authenticator,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    assert!(!response.evidence.nodes.is_empty());
+    assert!(response
+        .evidence
+        .nodes
+        .iter()
+        .any(|node| node.data.contains("Residency allowed document")));
+    assert!(response
+        .evidence
+        .nodes
+        .iter()
+        .all(|node| !node.data.contains("Residency blocked document")));
 }
 
 async fn wait_for_min_graph_edges(repo: &Arc<Repository>, min_edges: usize, timeout: Duration) {
