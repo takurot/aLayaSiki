@@ -1,7 +1,7 @@
 use crate::crypto::{AtRestCipher, NoOpCipher};
 use crate::hyper_index::HyperIndex;
 use crate::index::AdjacencyGraph;
-use crate::session::SessionManager;
+use crate::session::{SessionGraph, SessionManager, SessionOwner};
 use crate::snapshot::{SnapshotError, SnapshotManager};
 use crate::wal::{Wal, WalError};
 use alayasiki_core::error::{AlayasikiError, ErrorCode};
@@ -36,6 +36,8 @@ pub enum RepoError {
     SnapshotNotConfigured,
     #[error("Snapshot error: {0}")]
     Snapshot(#[from] SnapshotError),
+    #[error("Session access denied: {0}")]
+    SessionAccessDenied(String),
 }
 
 impl AlayasikiError for RepoError {
@@ -50,6 +52,7 @@ impl AlayasikiError for RepoError {
             RepoError::SnapshotNotFound(_) => ErrorCode::NotFound,
             RepoError::SnapshotNotConfigured => ErrorCode::Internal,
             RepoError::Snapshot(err) => err.error_code(),
+            RepoError::SessionAccessDenied(_) => ErrorCode::PermissionDenied,
         }
     }
 }
@@ -417,45 +420,75 @@ impl Repository {
         self.get_node(id).await
     }
 
-    pub async fn search_vector_with_session(
+    pub fn get_session_with_owner(
+        &self,
+        session_id: &str,
+        owner: Option<&SessionOwner>,
+    ) -> Result<Option<SessionGraph>, RepoError> {
+        let Some(session) = self.session_manager.get(session_id) else {
+            return Ok(None);
+        };
+
+        if let Some(owner) = owner {
+            match session.owner.as_ref() {
+                Some(existing) if existing == owner => {}
+                _ => {
+                    return Err(RepoError::SessionAccessDenied(session_id.to_string()));
+                }
+            }
+        }
+
+        Ok(Some(session.clone()))
+    }
+
+    pub async fn search_vector_with_session_graph(
         &self,
         query: &[f32],
         k: usize,
-        session_id: Option<&str>,
+        session: Option<&SessionGraph>,
     ) -> Vec<(u64, f32)> {
         let mut results = {
             let index = self.hyper_index.read().await;
             index.search_vector(query, k)
         };
 
-        if let Some(sid) = session_id {
-            if let Some(session) = self.session_manager.get(sid) {
-                use alayasiki_core::embedding::cosine_similarity;
-                let mut session_results: Vec<(u64, f32)> = session
-                    .nodes
-                    .values()
-                    .filter_map(|node| {
-                        cosine_similarity(query, &node.embedding).map(|sim| (node.id, sim))
-                    })
-                    .collect();
+        if let Some(session) = session {
+            use alayasiki_core::embedding::cosine_similarity;
+            let mut session_results: Vec<(u64, f32)> = session
+                .nodes
+                .values()
+                .filter_map(|node| {
+                    cosine_similarity(query, &node.embedding).map(|sim| (node.id, sim))
+                })
+                .collect();
 
-                results.append(&mut session_results);
-                results.sort_by(|a, b| {
-                    a.0.cmp(&b.0)
-                        .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
-                });
-                results.dedup_by_key(|(id, _)| *id);
-                results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                results.truncate(k);
-            }
+            results.append(&mut session_results);
+            results.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+            });
+            results.dedup_by_key(|(id, _)| *id);
+            results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            results.truncate(k);
         }
         results
     }
 
-    pub async fn neighbors_with_session(
+    pub async fn search_vector_with_session(
+        &self,
+        query: &[f32],
+        k: usize,
+        session_id: Option<&str>,
+    ) -> Vec<(u64, f32)> {
+        let session = session_id.and_then(|sid| self.session_manager.get(sid).map(|s| s.clone()));
+        self.search_vector_with_session_graph(query, k, session.as_ref())
+            .await
+    }
+
+    pub async fn neighbors_with_session_graph(
         &self,
         node_id: u64,
-        session_id: Option<&str>,
+        session: Option<&SessionGraph>,
     ) -> Vec<(u64, String, f32)> {
         let mut results: Vec<(u64, String, f32)> = {
             let index = self.hyper_index.read().await;
@@ -466,16 +499,24 @@ impl Repository {
                 .cloned()
                 .collect()
         };
-        if let Some(sid) = session_id {
-            if let Some(session) = self.session_manager.get(sid) {
-                for edge in &session.edges {
-                    if edge.source == node_id {
-                        results.push((edge.target, edge.relation.clone(), edge.weight));
-                    }
+        if let Some(session) = session {
+            for edge in &session.edges {
+                if edge.source == node_id {
+                    results.push((edge.target, edge.relation.clone(), edge.weight));
                 }
             }
         }
         results
+    }
+
+    pub async fn neighbors_with_session(
+        &self,
+        node_id: u64,
+        session_id: Option<&str>,
+    ) -> Vec<(u64, String, f32)> {
+        let session = session_id.and_then(|sid| self.session_manager.get(sid).map(|s| s.clone()));
+        self.neighbors_with_session_graph(node_id, session.as_ref())
+            .await
     }
 
     pub fn ingest_to_session(&self, session_id: &str, node: Node) {
@@ -483,24 +524,62 @@ impl Repository {
         session.insert_node(node);
     }
 
+    pub fn ingest_to_session_with_owner(
+        &self,
+        session_id: &str,
+        owner: &SessionOwner,
+        node: Node,
+    ) -> Result<(), RepoError> {
+        let mut session = self.session_manager.get_or_create(session_id);
+        match session.owner.as_ref() {
+            Some(existing) if existing == owner => {}
+            Some(_) => {
+                return Err(RepoError::SessionAccessDenied(session_id.to_string()));
+            }
+            None => {
+                session.owner = Some(owner.clone());
+            }
+        }
+        session.insert_node(node);
+        Ok(())
+    }
+
     pub fn insert_edge_to_session(&self, session_id: &str, edge: Edge) {
         let mut session = self.session_manager.get_or_create(session_id);
         session.insert_edge(edge);
     }
 
+    pub fn insert_edge_to_session_with_owner(
+        &self,
+        session_id: &str,
+        owner: &SessionOwner,
+        edge: Edge,
+    ) -> Result<(), RepoError> {
+        let mut session = self.session_manager.get_or_create(session_id);
+        match session.owner.as_ref() {
+            Some(existing) if existing == owner => {}
+            Some(_) => {
+                return Err(RepoError::SessionAccessDenied(session_id.to_string()));
+            }
+            None => {
+                session.owner = Some(owner.clone());
+            }
+        }
+        session.insert_edge(edge);
+        Ok(())
+    }
+
     /// Promote all nodes and edges in a session to persistent storage.
     /// This is an atomic operation within a single WAL transaction.
     pub async fn promote_session_to_persistent(&self, session_id: &str) -> Result<(), RepoError> {
-        let (nodes, edges) = {
-            let session = self
-                .session_manager
-                .get(session_id)
-                .ok_or(RepoError::NotFound)?;
-            (
-                session.nodes.values().cloned().collect::<Vec<_>>(),
-                session.edges.clone(),
-            )
-        };
+        let session = self
+            .session_manager
+            .take(session_id)
+            .ok_or(RepoError::NotFound)?;
+        let mut session_to_restore = Some(session.clone());
+
+        let nodes = session.nodes.values().cloned().collect::<Vec<_>>();
+        let edges = session.edges.clone();
 
         let mut mutations = Vec::with_capacity(nodes.len() + edges.len());
         for node in nodes {
@@ -510,10 +589,13 @@ impl Repository {
             mutations.push(IndexMutation::PutEdge(edge));
         }
 
-        self.apply_index_transaction(mutations).await?;
+        if let Err(err) = self.apply_index_transaction(mutations).await {
+            if let Some(session) = session_to_restore.take() {
+                self.session_manager.restore(session);
+            }
+            return Err(err);
+        }
 
-        // Remove session after successful persistence
-        self.session_manager.remove(session_id);
         Ok(())
     }
 
@@ -1454,5 +1536,70 @@ mod tests {
             reopened,
             Err(RepoError::SnapshotNotFound(ref snapshot_id)) if snapshot_id == "wal-lsn-2"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_promote_session_restores_data_on_validation_failure() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("session_promote_failure_restore.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        let session_id = "session-promote-failure";
+        repo.ingest_to_session(
+            session_id,
+            Node::new(1, vec![1.0, 0.0], "session-node".to_string()),
+        );
+        repo.insert_edge_to_session(session_id, Edge::new(1, 2, "missing_target", 1.0));
+
+        let result = repo.promote_session_to_persistent(session_id).await;
+        assert!(matches!(result, Err(RepoError::InvalidTransaction(_))));
+
+        let restored = repo
+            .session_manager
+            .get(session_id)
+            .expect("session should be restored after failed promote");
+        assert_eq!(restored.nodes.len(), 1);
+        assert_eq!(restored.edges.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_session_owner_enforced_for_ingest_and_query() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("session_owner_enforcement.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        let owner_a = SessionOwner::new("tenant-a", "user-a");
+        let owner_b = SessionOwner::new("tenant-a", "user-b");
+        let session_id = "session-owner";
+
+        repo.ingest_to_session_with_owner(
+            session_id,
+            &owner_a,
+            Node::new(1, vec![1.0], "owner-a-node".to_string()),
+        )
+        .unwrap();
+
+        let denied_write = repo.ingest_to_session_with_owner(
+            session_id,
+            &owner_b,
+            Node::new(2, vec![2.0], "owner-b-node".to_string()),
+        );
+        assert!(matches!(
+            denied_write,
+            Err(RepoError::SessionAccessDenied(_))
+        ));
+
+        let denied_read = repo.get_session_with_owner(session_id, Some(&owner_b));
+        assert!(matches!(
+            denied_read,
+            Err(RepoError::SessionAccessDenied(_))
+        ));
+
+        let allowed_read = repo
+            .get_session_with_owner(session_id, Some(&owner_a))
+            .unwrap()
+            .expect("session should exist for owner");
+        assert_eq!(allowed_read.nodes.len(), 1);
+        assert!(allowed_read.nodes.contains_key(&1));
     }
 }

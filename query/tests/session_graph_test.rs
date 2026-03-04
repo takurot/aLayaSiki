@@ -2,10 +2,10 @@ use alayasiki_core::auth::{Authorizer, Principal, ResourceContext};
 use alayasiki_core::ingest::IngestionRequest;
 use ingestion::processor::IngestionPipeline;
 use query::dsl::{QueryRequest, SearchMode};
-use query::engine::QueryEngine;
+use query::engine::{QueryEngine, QueryError};
 use std::collections::HashMap;
 use std::sync::Arc;
-use storage::repo::Repository;
+use storage::repo::{RepoError, Repository};
 use storage::wal::Wal;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
@@ -113,4 +113,93 @@ async fn test_session_promotion_to_persistent() {
 
     // Session should be cleared
     assert!(repo.session_manager.get(session_id).is_none());
+}
+
+#[tokio::test]
+async fn test_session_only_query_works_without_persistent_nodes() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("wal");
+    let wal = Wal::open(&wal_path).await.unwrap();
+    let repo = Arc::new(Repository::new(Arc::new(Mutex::new(wal))));
+    let pipeline = IngestionPipeline::new(repo.clone());
+    let engine = QueryEngine::new(repo.clone());
+
+    let principal = Principal::new("user1", "tenant1").with_roles(["admin"]);
+    let authorizer = Authorizer::new();
+    let resource = ResourceContext::new("tenant1");
+
+    let session_id = "session-only";
+    pipeline
+        .ingest_to_session_authorized(
+            session_id,
+            IngestionRequest::text("only in session memory".to_string(), HashMap::new()),
+            &principal,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    let response = engine
+        .execute(QueryRequest {
+            query: "session memory".to_string(),
+            session_id: Some(session_id.to_string()),
+            search_mode: SearchMode::Local,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(response
+        .evidence
+        .nodes
+        .iter()
+        .any(|node| node.data.contains("only in session memory")));
+}
+
+#[tokio::test]
+async fn test_session_owner_isolation_denies_cross_user_access() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("wal");
+    let wal = Wal::open(&wal_path).await.unwrap();
+    let repo = Arc::new(Repository::new(Arc::new(Mutex::new(wal))));
+    let pipeline = IngestionPipeline::new(repo.clone());
+    let engine = QueryEngine::new(repo.clone());
+
+    let authorizer = Authorizer::new();
+    let resource = ResourceContext::new("tenant1");
+    let owner = Principal::new("owner", "tenant1").with_roles(["admin"]);
+    let other_user = Principal::new("other", "tenant1").with_roles(["admin"]);
+
+    let session_id = "owned-session";
+    pipeline
+        .ingest_to_session_authorized(
+            session_id,
+            IngestionRequest::text("private scratchpad".to_string(), HashMap::new()),
+            &owner,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap();
+
+    let denied = engine
+        .execute_authorized(
+            QueryRequest {
+                query: "scratchpad".to_string(),
+                session_id: Some(session_id.to_string()),
+                search_mode: SearchMode::Local,
+                ..Default::default()
+            },
+            &other_user,
+            &authorizer,
+            &resource,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        denied,
+        QueryError::Repository(RepoError::SessionAccessDenied(_))
+    ));
 }

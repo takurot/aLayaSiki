@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::repo::Repository;
+use storage::session::SessionOwner;
 use thiserror::Error;
 
 use jobs::queue::{Job, JobQueue};
@@ -162,7 +163,7 @@ impl IngestionPipeline {
 
         let actor = Some(principal.subject.clone());
         let tenant = Some(principal.tenant.clone());
-        self.ingest_with_audit(request, model_id, actor, tenant, None)
+        self.ingest_with_audit(request, model_id, actor, tenant, None, None)
             .await
     }
 
@@ -188,12 +189,14 @@ impl IngestionPipeline {
 
         let actor = Some(principal.subject.clone());
         let tenant = Some(principal.tenant.clone());
+        let session_owner = SessionOwner::new(principal.tenant.clone(), principal.subject.clone());
         self.ingest_with_audit(
             request,
             model_id,
             actor,
             tenant,
             Some(session_id.to_string()),
+            Some(session_owner),
         )
         .await
     }
@@ -227,7 +230,7 @@ impl IngestionPipeline {
 
     pub async fn ingest(&self, request: IngestionRequest) -> Result<Vec<u64>, IngestionError> {
         let model_id = effective_ingest_model_id(&request, &self.default_model_id);
-        self.ingest_with_audit(request, model_id, None, None, None)
+        self.ingest_with_audit(request, model_id, None, None, None, None)
             .await
     }
 
@@ -238,9 +241,15 @@ impl IngestionPipeline {
         actor: Option<String>,
         tenant: Option<String>,
         session_id: Option<String>,
+        session_owner: Option<SessionOwner>,
     ) -> Result<Vec<u64>, IngestionError> {
         let result = self
-            .ingest_internal(request, tenant.as_deref(), session_id.as_deref())
+            .ingest_internal(
+                request,
+                tenant.as_deref(),
+                session_id.as_deref(),
+                session_owner.as_ref(),
+            )
             .await;
         let outcome = match &result {
             Ok(_) => AuditOutcome::Succeeded,
@@ -256,6 +265,7 @@ impl IngestionPipeline {
         request: IngestionRequest,
         tenant: Option<&str>,
         session_id: Option<&str>,
+        session_owner: Option<&SessionOwner>,
     ) -> Result<Vec<u64>, IngestionError> {
         self.validate_governance_preflight(tenant, request.metadata())?;
 
@@ -336,7 +346,11 @@ impl IngestionPipeline {
             };
 
             if let Some(sid) = session_id {
-                self.repo.ingest_to_session(sid, node);
+                if let Some(owner) = session_owner {
+                    self.repo.ingest_to_session_with_owner(sid, owner, node)?;
+                } else {
+                    self.repo.ingest_to_session(sid, node);
+                }
             } else {
                 self.repo.put_node(node).await?;
             }
