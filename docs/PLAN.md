@@ -260,11 +260,19 @@
 
 * Depends on: PR-07, PR-09
 
-- [ ] SDK のクライアント実装（ingest/query/response）
-- [ ] サンプルコード（SPEC の擬似コード準拠）
-- [ ] リトライ/バックオフの方針実装
+- [x] SDK のクライアント実装（ingest/query/response）
+- [x] サンプルコード（SPEC の擬似コード準拠）
+- [x] リトライ/バックオフの方針実装
 - [ ] **LlamaIndex 統合**: `GraphStore` / `VectorStore` インターフェース実装
 - [ ] **LangChain 統合**: `GraphVectorStore` 対応
+
+**Notes:**
+- `sdk` crate (`alayasiki-sdk`) を追加し、`Client` / `InProcessTransport` / `ClientBuilder` を実装。
+- `Client::ingest` は `IngestionRequest` を受けて `IngestResult { node_ids, snapshot_id }` を返却。
+- `Client::query` は `QueryRequest` を受けて `QueryResponse` を返却し、既存 Query Engine と整合。
+- `RetryConfig`（max_attempts / initial_backoff / max_backoff / multiplier）を実装し、retryable エラー時に指数バックオフ再試行。
+- `sdk/tests/client_test.rs` で ingest->query の一気通貫、retryable/non-retryable の再試行挙動、repo 注入ビルドを検証。
+- `sdk/examples/basic_client.rs` に SPEC の擬似コードに沿った最小サンプルを追加。
 
 ---
 
