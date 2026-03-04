@@ -3,5 +3,6 @@ pub mod crypto;
 pub mod hyper_index;
 pub mod index;
 pub mod repo;
+pub mod session;
 pub mod snapshot;
 pub mod wal;

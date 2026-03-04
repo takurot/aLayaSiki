@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use storage::community::CommunitySummary;
 use storage::repo::{RepoError, Repository, SnapshotView};
+use storage::session::{SessionGraph, SessionOwner};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -316,6 +317,10 @@ impl QueryEngine {
             Some(principal.subject.clone()),
             Some(principal.tenant.clone()),
             Some(principal.tenant.clone()),
+            Some(SessionOwner::new(
+                principal.tenant.clone(),
+                principal.subject.clone(),
+            )),
         )
         .await
     }
@@ -356,7 +361,8 @@ impl QueryEngine {
     }
 
     pub async fn execute(&self, request: QueryRequest) -> Result<QueryResponse, QueryError> {
-        self.execute_with_audit(request, None, None, None).await
+        self.execute_with_audit(request, None, None, None, None)
+            .await
     }
 
     async fn execute_with_audit(
@@ -365,10 +371,13 @@ impl QueryEngine {
         actor: Option<String>,
         tenant: Option<String>,
         tenant_scope: Option<String>,
+        session_owner: Option<SessionOwner>,
     ) -> Result<QueryResponse, QueryError> {
         let start = Instant::now();
         let model_id = effective_query_model_id(&request);
-        let result = self.execute_internal(request, start, tenant_scope).await;
+        let result = self
+            .execute_internal(request, start, tenant_scope, session_owner)
+            .await;
         match &result {
             Ok(response) => {
                 self.emit_audit_event(build_query_audit_event(
@@ -401,6 +410,7 @@ impl QueryEngine {
         request: QueryRequest,
         start: Instant,
         tenant_scope: Option<String>,
+        session_owner: Option<SessionOwner>,
     ) -> Result<QueryResponse, QueryError> {
         request
             .validate()
@@ -412,15 +422,24 @@ impl QueryEngine {
             .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string());
         let mut plan = QueryPlanner::plan(&request);
         let (resolved_snapshot_id, snapshot_view) = self.resolve_snapshot_view(&request).await?;
+        let tenant_scoped = tenant_scope.is_some();
+        let cache_eligible = !tenant_scoped && request.session_id.is_none();
+
+        // Resolve session if provided.
+        let session_graph = match request.session_id.as_deref() {
+            Some(session_id) => self
+                .repo
+                .get_session_with_owner(session_id, session_owner.as_ref())?,
+            None => None,
+        };
         let cache_key = SemanticCacheKey::from_request(
             &request,
             &effective_model_id,
             &resolved_snapshot_id,
             plan.effective_search_mode,
         );
-        let tenant_scoped = tenant_scope.is_some();
 
-        if !tenant_scoped {
+        if cache_eligible {
             if let Some(mut cached_response) =
                 self.lookup_semantic_cache(&cache_key, &request.query).await
             {
@@ -452,6 +471,7 @@ impl QueryEngine {
                     &effective_model_id,
                     snapshot_view.as_deref(),
                     tenant_scope.as_deref(),
+                    session_graph.as_ref(),
                 )
                 .await?
             }
@@ -463,6 +483,7 @@ impl QueryEngine {
                         &effective_model_id,
                         snapshot_view.as_deref(),
                         tenant_scope.as_deref(),
+                        session_graph.as_ref(),
                     )
                     .await?;
                 (state, plan, None)
@@ -475,6 +496,7 @@ impl QueryEngine {
                         &effective_model_id,
                         snapshot_view.as_deref(),
                         tenant_scope.as_deref(),
+                        session_graph.as_ref(),
                     )
                     .await?;
                 (state, plan, None)
@@ -590,7 +612,7 @@ impl QueryEngine {
                 .contains(&"semantic_cache_hit".to_string()),
         );
 
-        if !tenant_scoped {
+        if cache_eligible {
             self.insert_semantic_cache(cache_key, &request.query, response.clone())
                 .await;
         }
@@ -643,22 +665,52 @@ impl QueryEngine {
         }
     }
 
-    async fn list_node_ids_from_source(&self, snapshot_view: Option<&SnapshotView>) -> Vec<u64> {
-        match snapshot_view {
+    async fn list_node_ids_from_source(
+        &self,
+        snapshot_view: Option<&SnapshotView>,
+        session: Option<&SessionGraph>,
+    ) -> Vec<u64> {
+        let mut out = match snapshot_view {
             Some(view) => view.list_node_ids(),
             None => self.repo.list_node_ids().await,
+        };
+        if let Some(session) = session {
+            out.extend(session.nodes.keys().copied());
+            out.sort_unstable();
+            out.dedup();
         }
+        out
     }
 
     async fn get_nodes_by_ids_from_source(
         &self,
         ids: &[u64],
         snapshot_view: Option<&SnapshotView>,
+        session: Option<&SessionGraph>,
     ) -> Vec<Node> {
-        match snapshot_view {
-            Some(view) => view.get_nodes_by_ids(ids),
-            None => self.repo.get_nodes_by_ids(ids).await,
+        let mut results = Vec::with_capacity(ids.len());
+        let mut remaining_ids = Vec::new();
+
+        if let Some(session) = session {
+            for id in ids {
+                if let Some(node) = session.nodes.get(id) {
+                    results.push(node.clone());
+                } else {
+                    remaining_ids.push(*id);
+                }
+            }
+        } else {
+            remaining_ids = ids.to_vec();
         }
+
+        if !remaining_ids.is_empty() {
+            let mut source_results = match snapshot_view {
+                Some(view) => view.get_nodes_by_ids(&remaining_ids),
+                None => self.repo.get_nodes_by_ids(&remaining_ids).await,
+            };
+            results.append(&mut source_results);
+        }
+        results
     }
 
     async fn get_edge_metadata_bulk_from_source(
@@ -682,6 +734,7 @@ impl QueryEngine {
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
         tenant_scope: Option<&str>,
+        session: Option<&SessionGraph>,
     ) -> Result<(ExecutionState, QueryPlan), QueryError> {
         let mut state = self
             .execute_with_plan(
@@ -690,6 +743,7 @@ impl QueryEngine {
                 embedding_model_id,
                 snapshot_view,
                 tenant_scope,
+                session,
             )
             .await?;
 
@@ -713,6 +767,7 @@ impl QueryEngine {
                     embedding_model_id,
                     snapshot_view,
                     tenant_scope,
+                    session,
                 )
                 .await?;
             let mut drift_state = drift_state;
@@ -737,6 +792,7 @@ impl QueryEngine {
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
         tenant_scope: Option<&str>,
+        session: Option<&SessionGraph>,
     ) -> Result<(ExecutionState, QueryPlan, Option<String>), QueryError> {
         if tenant_scope.is_some() {
             // Community summaries are currently shared across tenants.
@@ -754,6 +810,7 @@ impl QueryEngine {
                     embedding_model_id,
                     snapshot_view,
                     tenant_scope,
+                    session,
                 )
                 .await?;
             state.exclusions.push(ExclusionReason {
@@ -779,6 +836,7 @@ impl QueryEngine {
                     embedding_model_id,
                     snapshot_view,
                     tenant_scope,
+                    session,
                 )
                 .await?;
             state.exclusions.push(ExclusionReason {
@@ -803,6 +861,7 @@ impl QueryEngine {
                     embedding_model_id,
                     snapshot_view,
                     tenant_scope,
+                    session,
                 )
                 .await?;
             state.exclusions.push(ExclusionReason {
@@ -820,6 +879,7 @@ impl QueryEngine {
                 embedding_model_id,
                 snapshot_view,
                 tenant_scope,
+                session,
             )
             .await?;
 
@@ -850,7 +910,7 @@ impl QueryEngine {
             out
         };
         let top_nodes = self
-            .get_nodes_by_ids_from_source(&all_top_node_ids, snapshot_view)
+            .get_nodes_by_ids_from_source(&all_top_node_ids, snapshot_view, None)
             .await;
         let top_node_lookup: HashMap<u64, Node> =
             top_nodes.into_iter().map(|node| (node.id, node)).collect();
@@ -920,6 +980,7 @@ impl QueryEngine {
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
         tenant_scope: Option<&str>,
+        session: Option<&SessionGraph>,
     ) -> Result<(ExecutionState, QueryPlan), QueryError> {
         plan.effective_search_mode = SearchMode::Drift;
 
@@ -940,6 +1001,7 @@ impl QueryEngine {
                     embedding_model_id,
                     snapshot_view,
                     tenant_scope,
+                    session,
                 )
                 .await?;
 
@@ -995,6 +1057,7 @@ impl QueryEngine {
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
         tenant_scope: Option<&str>,
+        session: Option<&SessionGraph>,
     ) -> Result<ExecutionState, QueryError> {
         let mut vector_hits = self
             .collect_vector_scores(
@@ -1003,11 +1066,12 @@ impl QueryEngine {
                 embedding_model_id,
                 snapshot_view,
                 tenant_scope,
+                session,
             )
             .await;
         if vector_hits.is_empty() {
             if let Some(node_id) = self
-                .list_node_ids_from_source(snapshot_view)
+                .list_node_ids_from_source(snapshot_view, session)
                 .await
                 .into_iter()
                 .next()
@@ -1062,7 +1126,9 @@ impl QueryEngine {
                         continue;
                     }
 
-                    for (target, relation, weight) in view.neighbors(current_id) {
+                    for (target, relation, weight) in
+                        view.neighbors_with_session(current_id, session)
+                    {
                         if !relation_is_allowed(relation.as_str(), &relation_filter) {
                             exclusions.push(ExclusionReason {
                                 node_id: Some(target),
@@ -1107,8 +1173,6 @@ impl QueryEngine {
                 }
             }
         } else {
-            let index = self.repo.hyper_index.read().await;
-
             for anchor in &anchors {
                 candidate_hops.entry(anchor.node_id).or_insert(0);
 
@@ -1125,10 +1189,14 @@ impl QueryEngine {
                         continue;
                     }
 
-                    for (target, relation, weight) in index.graph_index.neighbors(current_id) {
+                    for (target, relation, weight) in self
+                        .repo
+                        .neighbors_with_session_graph(current_id, session)
+                        .await
+                    {
                         if !relation_is_allowed(relation.as_str(), &relation_filter) {
                             exclusions.push(ExclusionReason {
-                                node_id: Some(*target),
+                                node_id: Some(target),
                                 reason: format!("relation_filtered:{}", relation),
                             });
                             continue;
@@ -1136,33 +1204,32 @@ impl QueryEngine {
 
                         traversed_edges.push(InternalEdge {
                             source: current_id,
-                            target: *target,
+                            target,
                             relation: relation.clone(),
-                            weight: *weight,
+                            weight,
                             provenance: Provenance::default(),
-                            confidence: *weight,
+                            confidence: weight,
                         });
 
                         let next_hop = current_hop + 1;
                         let should_visit = visited
-                            .get(target)
+                            .get(&target)
                             .map(|prev_hop| next_hop < *prev_hop)
                             .unwrap_or(true);
 
                         if should_visit {
-                            visited.insert(*target, next_hop);
-                            parents.insert(*target, current_id);
-                            queue.push_back(*target);
+                            visited.insert(target, next_hop);
+                            parents.insert(target, current_id);
+                            queue.push_back(target);
                             candidate_hops
-                                .entry(*target)
+                                .entry(target)
                                 .and_modify(|hop| *hop = (*hop).min(next_hop))
                                 .or_insert(next_hop);
 
-                            if let Some(path) = reconstruct_path(anchor.node_id, *target, &parents)
-                            {
+                            if let Some(path) = reconstruct_path(anchor.node_id, target, &parents) {
                                 expansion_paths.push(ExpansionPath {
                                     anchor_id: anchor.node_id,
-                                    target_id: *target,
+                                    target_id: target,
                                     path,
                                 });
                             }
@@ -1174,7 +1241,7 @@ impl QueryEngine {
 
         let candidate_ids: Vec<u64> = candidate_hops.keys().copied().collect();
         let fetched_nodes = self
-            .get_nodes_by_ids_from_source(&candidate_ids, snapshot_view)
+            .get_nodes_by_ids_from_source(&candidate_ids, snapshot_view, session)
             .await;
         let node_lookup: HashMap<u64, Node> = fetched_nodes
             .into_iter()
@@ -1322,11 +1389,13 @@ impl QueryEngine {
         embedding_model_id: &str,
         snapshot_view: Option<&SnapshotView>,
         tenant_scope: Option<&str>,
+        session: Option<&SessionGraph>,
     ) -> Vec<(u64, f32)> {
         let embedding_dim = match snapshot_view {
             Some(view) => view.embedding_dimension(),
             None => self.repo.embedding_dimension().await,
-        };
+        }
+        .or_else(|| session.and_then(SessionGraph::embedding_dimension));
         let Some(embedding_dim) = embedding_dim else {
             return Vec::new();
         };
@@ -1340,10 +1409,11 @@ impl QueryEngine {
         .max(1);
 
         let raw_hits = match snapshot_view {
-            Some(view) => view.search_vector(&query_embedding, vector_limit),
+            Some(view) => view.search_vector_with_session(&query_embedding, vector_limit, session),
             None => {
-                let index = self.repo.hyper_index.read().await;
-                index.search_vector(&query_embedding, vector_limit)
+                self.repo
+                    .search_vector_with_session_graph(&query_embedding, vector_limit, session)
+                    .await
             }
         };
 
@@ -1353,7 +1423,7 @@ impl QueryEngine {
 
         let candidate_ids: Vec<u64> = raw_hits.iter().map(|(node_id, _)| *node_id).collect();
         let allowed_ids: HashSet<u64> = self
-            .get_nodes_by_ids_from_source(&candidate_ids, snapshot_view)
+            .get_nodes_by_ids_from_source(&candidate_ids, snapshot_view, session)
             .await
             .into_iter()
             .filter(|node| node_belongs_to_tenant(node, tenant))

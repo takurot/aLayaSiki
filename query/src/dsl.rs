@@ -74,10 +74,30 @@ pub struct QueryRequest {
     pub model_id: Option<String>,
     #[serde(default)]
     pub snapshot_id: Option<String>,
+    /// Session ID for agentic workflow (session-scoped subgraph).
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Time-travel target: YYYY-MM-DD or RFC3339.
     /// When both snapshot_id and time_travel are provided, snapshot_id takes priority.
     #[serde(default)]
     pub time_travel: Option<String>,
+}
+
+impl Default for QueryRequest {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            filters: QueryFilters::default(),
+            traversal: Traversal::default(),
+            top_k: default_top_k(),
+            mode: QueryMode::default(),
+            search_mode: SearchMode::default(),
+            model_id: None,
+            snapshot_id: None,
+            session_id: None,
+            time_travel: None,
+        }
+    }
 }
 
 const fn default_depth() -> u8 {
