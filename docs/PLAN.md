@@ -319,7 +319,7 @@
 
 ## PR-15: ドキュメント整備
 
-* Depends on: PR-13, PR-14
+* Depends on: PR-13, PR-14, PR-17.1, PR-17.2, PR-17.3, PR-17.4
 
 - [ ] 運用ガイド（バックアップ/復元/監査ログ）
 - [ ] APIリファレンス（JSON DSL スキーマ/レスポンス）
@@ -378,7 +378,7 @@
 
 ## PR-16: レプリケーション / HA（商用化向け）
 
-* Depends on: PR-02, PR-03, PR-07
+* Depends on: PR-02, PR-03, PR-07, PR-17.1
 
 - [ ] シャード単位のレプリケーション（準同期/遅延許容）
 - [ ] フェイルオーバー設計と整合性ポリシー
@@ -387,28 +387,108 @@
 
 ---
 
+## PR-17: コア信頼性ハードニング（Epic）(NEW)
+
+* Depends on: PR-02, PR-04, PR-06, PR-11
+
+- [ ] PR-17.1 WAL整合性ハードニング
+- [ ] PR-17.2 time_travel解決とスナップショット整合
+- [ ] PR-17.3 ANN置換（HNSW化）
+- [ ] PR-17.4 Mock脱却（抽出器本実装化）
+
+**Notes:**
+- PR-17 は単一PRではなく、段階リリースと切り戻し容易性を優先したエピック（複数PR）として運用する。
+
+---
+
+## PR-17.1: WAL整合性ハードニング (NEW)
+
+* Depends on: PR-02
+
+- [ ] `Wal::open_with_cipher` で既存WALを走査し `current_lsn` を復元（TODOの `0` 初期化を廃止）
+- [ ] 起動時LSN復元と `replay` 読み取りロジックを共通化し、末尾部分書き込み切り詰め/CRC検証を一元化
+- [ ] CRC不整合時は fail-fast を既定化し、運用向けに `last_good_offset` まで復旧するリカバリモードを追加
+- [ ] `flush_policy`（always / interval / batch）を設定化し、耐久性と遅延トレードオフを測定可能にする
+
+**Done Criteria:**
+- [ ] 再起動後の LSN が単調増加し、クラッシュリカバリ後も欠番/巻き戻りが発生しない
+- [ ] WAL破損系の回帰テスト（CRC mismatch / partial write）が追加される
+
+---
+
+## PR-17.2: time_travel解決とスナップショット整合 (NEW)
+
+* Depends on: PR-11, PR-17.1
+
+- [ ] `snapshot_id` 優先を維持しつつ、`time_travel(YYYY-MM-DD/RFC3339)` を UTC as-of として `snapshot_id` に解決
+- [ ] スナップショット台帳（`snapshot_id`, `lsn`, `created_at_unix`）を保存し、日時→LSN解決を O(log N) で実行
+- [ ] コミュニティ要約のスナップショット版管理（最低限 `snapshot_lsn_range`）を導入し、`search_mode=global` で時点混線を防止
+- [ ] エラー規約を統一（該当時点なし: `NOT_FOUND`、形式不正: `INVALID_ARGUMENT`）
+
+**Done Criteria:**
+- [ ] 同一データに対する `snapshot_id` と `time_travel` 解決結果が再現可能
+- [ ] `search_mode=global` + `time_travel` の回帰テストで要約混線が発生しない
+
+---
+
+## PR-17.3: ANN置換（HNSW化）(NEW)
+
+* Depends on: PR-04, PR-14.6
+
+- [ ] `LinearAnnIndex` 依存を `VectorIndex` 抽象へ分離し、`HyperIndex` から実装差し替え可能にする
+- [ ] `usearch` ベース HNSW を第一実装として導入（挿入・検索・削除・次元整合チェック・top-k 安定ソート）
+- [ ] 再起動時は WAL replay + ノード再走査で再構築し、将来の高速起動向けに ANN サイドカースナップショット形式を定義
+- [ ] 線形探索を真値として `recall@k` と `p95 latency` をCI計測し、PR-14.6 ベンチゲートへ統合
+
+**Done Criteria:**
+- [ ] ANN回帰ゲート（recall/latency）を満たした状態で関連ベンチが通過
+- [ ] feature flag で線形探索フォールバックへ安全に切り戻せる
+
+---
+
+## PR-17.4: Mock脱却（抽出器本実装化）(NEW)
+
+* Depends on: PR-06
+
+- [ ] `MockEntityExtractor` を本番デフォルトから外し、テスト専用実装へ隔離
+- [ ] ルールベース抽出 + 軽量SLM抽出（Triplex/GLM-4-Flash等）のハイブリッド抽出器を `ModelRegistry` で切替可能にする
+- [ ] entityノードの `embedding` 方針（生成する/しない）を明文化し、`confidence`/`provenance` を抽出経路ごとに記録
+- [ ] 固定fixture抽出回帰、失敗時フェイルセーフ（ベクトル化継続）E2E、マルチモーダル抽出E2E（PR-14.7）を接続
+
+**Done Criteria:**
+- [ ] デフォルト経路に Mock 実装が残らない（テスト用途のみ）
+- [ ] 抽出失敗時の ingest 継続性が E2E で保証される
+
+---
+
 ## 依存関係サマリ
 
 - PR-00 → 技術選定と方針確定
 - PR-01 → すべての基盤
-- PR-02 → PR-03/11/16
+- PR-02 → PR-03/11/16/17/17.1
 - PR-03 → PR-04/07
-- PR-04 → PR-06.5/08/14
+- PR-04 → PR-06.5/08/14/17/17.3
 - PR-05 → PR-06
-- PR-06 → PR-06.5/08
+- PR-06 → PR-06.5/08/17/17.4
 - PR-06.5 → PR-08/13.5 (NEW: コミュニティ検出)
 - PR-07 → PR-08/09/11/12/13
 - PR-08 → PR-09/14
 - PR-09 → PR-13
 - PR-10 → 独立 (PR-01依存)
+- PR-11 → PR-11.5/17/17.2
 - PR-12 → PR-14
 - PR-13 → PR-13.5/15
 - PR-13.5 → PR-15 (NEW: 可視化UI)
 - PR-14 → PR-15
 - PR-14.5 → PR-15 (NEW: 品質ゲートと性能計測の継続運用)
-- PR-14.6 → PR-15 (NEW: 実運用レイテンシ改善と回帰防止)
+- PR-14.6 → PR-15/17.3 (NEW: 実運用レイテンシ改善と回帰防止)
 - PR-14.7 → PR-15 (NEW: E2Eテスト網羅性の向上)
 - PR-16 → 商用化フェーズのHA/冗長性
+- PR-17 (Epic) → PR-17.1/17.2/17.3/17.4
+- PR-17.1 → PR-16/17.2/15
+- PR-17.2 → PR-15
+- PR-17.3 → PR-15
+- PR-17.4 → PR-15
 
 ---
 
