@@ -6,6 +6,7 @@ members = [
     "slm",
     "jobs",
     "query",
+    "sdk",
     "prototypes",
 ]
 resolver = "2"

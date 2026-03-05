@@ -56,6 +56,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "alayasiki-sdk"
+version = "0.1.0"
+dependencies = [
+ "alayasiki-core",
+ "async-trait",
+ "ingestion",
+ "query",
+ "storage",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
