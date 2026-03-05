@@ -405,7 +405,7 @@
 
 * Depends on: PR-02
 
-- [ ] `Wal::open_with_cipher` で既存WALを走査し `current_lsn` を復元（TODOの `0` 初期化を廃止）
+- [x] `Wal::open_with_cipher` で既存WALを走査し `current_lsn` を復元（TODOの `0` 初期化を廃止）
 - [ ] 起動時LSN復元と `replay` 読み取りロジックを共通化し、末尾部分書き込み切り詰め/CRC検証を一元化
 - [ ] CRC不整合時は fail-fast を既定化し、運用向けに `last_good_offset` まで復旧するリカバリモードを追加
 - [ ] `flush_policy`（always / interval / batch）を設定化し、耐久性と遅延トレードオフを測定可能にする

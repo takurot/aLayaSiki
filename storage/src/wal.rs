@@ -69,14 +69,16 @@ impl Wal {
             .open(&path)
             .await?;
 
-        // TODO: Scan existing file to recovery last LSN (simplified for now to 0)
-        let current_lsn = AtomicU64::new(0);
-
-        Ok(Self {
+        let mut wal = Self {
             file: BufWriter::new(file),
-            current_lsn,
+            current_lsn: AtomicU64::new(0),
             cipher,
-        })
+        };
+
+        // Recover the latest committed LSN at startup so new appends remain monotonic.
+        wal.replay(|_lsn, _payload| Ok(())).await?;
+
+        Ok(wal)
     }
 
     /// Append an entry to the WAL. Returns the assigned LSN.
@@ -238,6 +240,25 @@ mod tests {
             assert_eq!(recovered[0].1, b"Entry 1");
             assert_eq!(recovered[1].1, b"Entry 2");
             assert_eq!(wal.current_lsn(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wal_open_restores_current_lsn_without_replay() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("restore_lsn.wal");
+
+        {
+            let mut wal = Wal::open(&path).await.unwrap();
+            assert_eq!(wal.append(b"Entry 1").await.unwrap(), 1);
+            assert_eq!(wal.append(b"Entry 2").await.unwrap(), 2);
+            wal.flush().await.unwrap();
+        }
+
+        {
+            let mut wal = Wal::open(&path).await.unwrap();
+            assert_eq!(wal.current_lsn(), 2);
+            assert_eq!(wal.append(b"Entry 3").await.unwrap(), 3);
         }
     }
 }
