@@ -5,10 +5,8 @@ use async_trait::async_trait;
 use query::dsl::Traversal;
 use query::{QueryMode, QueryRequest, QueryResponse, SearchMode};
 
+use crate::integrations::{normalize_depth, normalize_top_k};
 use crate::{Client, ClientError, IngestResult};
-
-const MAX_TOP_K: usize = 1_000;
-const MAX_DEPTH: u8 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LlamaVectorQuery {
@@ -97,21 +95,5 @@ impl GraphStore for LlamaIndexAdapter {
         };
 
         self.client.query(request).await
-    }
-}
-
-fn normalize_top_k(value: usize) -> usize {
-    if value == 0 {
-        1
-    } else {
-        value.min(MAX_TOP_K)
-    }
-}
-
-fn normalize_depth(value: u8) -> u8 {
-    if value == 0 {
-        1
-    } else {
-        value.min(MAX_DEPTH)
     }
 }
