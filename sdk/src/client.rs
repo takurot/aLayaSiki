@@ -65,6 +65,8 @@ pub enum ClientBuildError {
     Repository(#[from] RepoError),
     #[error("missing repository: call with_repo() or connect_in_process()")]
     MissingRepository,
+    #[error("conflicting builder configuration: with_repo() cannot be combined with connect_in_process()")]
+    ConflictingRepositoryAndWalPath,
 }
 
 #[derive(Debug, Error)]
@@ -227,6 +229,9 @@ impl ClientBuilder {
         self,
         wal_path: impl AsRef<Path>,
     ) -> Result<Client, ClientBuildError> {
+        if self.repo.is_some() {
+            return Err(ClientBuildError::ConflictingRepositoryAndWalPath);
+        }
         let transport = InProcessTransport::connect(wal_path).await?;
         Ok(Client::new(Arc::new(transport), self.retry_config))
     }
