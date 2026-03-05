@@ -69,14 +69,16 @@ impl Wal {
             .open(&path)
             .await?;
 
-        // TODO: Scan existing file to recovery last LSN (simplified for now to 0)
-        let current_lsn = AtomicU64::new(0);
-
-        Ok(Self {
+        let mut wal = Self {
             file: BufWriter::new(file),
-            current_lsn,
+            current_lsn: AtomicU64::new(0),
             cipher,
-        })
+        };
+
+        // Recover the latest committed LSN at startup so new appends remain monotonic.
+        wal.replay(|_lsn, _payload| Ok(())).await?;
+
+        Ok(wal)
     }
 
     /// Append an entry to the WAL. Returns the assigned LSN.
@@ -238,6 +240,73 @@ mod tests {
             assert_eq!(recovered[0].1, b"Entry 1");
             assert_eq!(recovered[1].1, b"Entry 2");
             assert_eq!(wal.current_lsn(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wal_open_restores_current_lsn_without_replay() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("restore_lsn.wal");
+
+        {
+            let mut wal = Wal::open(&path).await.unwrap();
+            assert_eq!(wal.append(b"Entry 1").await.unwrap(), 1);
+            assert_eq!(wal.append(b"Entry 2").await.unwrap(), 2);
+            wal.flush().await.unwrap();
+        }
+
+        {
+            let mut wal = Wal::open(&path).await.unwrap();
+            assert_eq!(wal.current_lsn(), 2);
+            assert_eq!(wal.append(b"Entry 3").await.unwrap(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wal_open_truncates_partial_tail_and_restores_lsn() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("partial_tail_recovery.wal");
+
+        let stable_len = {
+            let mut wal = Wal::open(&path).await.unwrap();
+            assert_eq!(wal.append(b"Entry 1").await.unwrap(), 1);
+            assert_eq!(wal.append(b"Entry 2").await.unwrap(), 2);
+            wal.flush().await.unwrap();
+            tokio::fs::metadata(&path).await.unwrap().len()
+        };
+
+        {
+            let payload = b"Entry 3";
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(payload);
+            let crc = hasher.finalize();
+
+            let mut file = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .await
+                .unwrap();
+            file.write_u64(3).await.unwrap();
+            file.write_u32(crc).await.unwrap();
+            file.write_u32(payload.len() as u32).await.unwrap();
+            file.write_all(&payload[..3]).await.unwrap(); // Intentionally partial payload
+            file.flush().await.unwrap();
+        }
+
+        let corrupted_len = tokio::fs::metadata(&path).await.unwrap().len();
+        assert!(corrupted_len > stable_len);
+
+        {
+            let wal = Wal::open(&path).await.unwrap();
+            assert_eq!(wal.current_lsn(), 2);
+        }
+
+        let recovered_len = tokio::fs::metadata(&path).await.unwrap().len();
+        assert_eq!(recovered_len, stable_len);
+
+        {
+            let mut wal = Wal::open(&path).await.unwrap();
+            assert_eq!(wal.append(b"Entry 3").await.unwrap(), 3);
         }
     }
 }
