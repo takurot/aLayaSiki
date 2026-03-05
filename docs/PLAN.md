@@ -263,8 +263,8 @@
 - [x] SDK のクライアント実装（ingest/query/response）
 - [x] サンプルコード（SPEC の擬似コード準拠）
 - [x] リトライ/バックオフの方針実装
-- [ ] **LlamaIndex 統合**: `GraphStore` / `VectorStore` インターフェース実装
-- [ ] **LangChain 統合**: `GraphVectorStore` 対応
+- [x] **LlamaIndex 統合**: `GraphStore` / `VectorStore` インターフェース実装
+- [x] **LangChain 統合**: `GraphVectorStore` 対応
 
 **Notes:**
 - `sdk` crate (`alayasiki-sdk`) を追加し、`Client` / `InProcessTransport` / `ClientBuilder` を実装。
@@ -273,6 +273,10 @@
 - `RetryConfig`（max_attempts / initial_backoff / max_backoff / multiplier）を実装し、retryable エラー時に指数バックオフ再試行。
 - `sdk/tests/client_test.rs` で ingest->query の一気通貫、retryable/non-retryable の再試行挙動、repo 注入ビルドを検証。
 - `sdk/examples/basic_client.rs` に SPEC の擬似コードに沿った最小サンプルを追加。
+- `sdk::integrations::llama_index` を追加し、`VectorStore`/`GraphStore` trait と `LlamaIndexAdapter` を実装。
+- `sdk::integrations::langchain` を追加し、`GraphVectorStore` trait と `LangChainAdapter` を実装。
+- アダプタは `Client` を利用し、`top_k`/`depth` の不正値を正規化して `QueryRequest` バリデーションエラーを回避。
+- `sdk/tests/framework_adapters_test.rs` で LlamaIndex/LangChain の追加・検索・正規化挙動を検証。
 
 ---
 
