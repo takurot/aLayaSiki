@@ -4,6 +4,7 @@ use crc32fast::Hasher;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
@@ -37,17 +38,75 @@ impl From<CryptoError> for WalError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WalRecoveryMode {
+    #[default]
+    FailFast,
+    RecoverToLastGoodOffset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WalFlushPolicy {
+    #[default]
+    Always,
+    Interval(Duration),
+    Batch {
+        max_entries: usize,
+    },
+}
+
+impl WalFlushPolicy {
+    fn normalized(self) -> Self {
+        match self {
+            Self::Always => Self::Always,
+            Self::Interval(interval) if interval.is_zero() => Self::Always,
+            Self::Interval(interval) => Self::Interval(interval),
+            Self::Batch { max_entries } => Self::Batch {
+                max_entries: max_entries.max(1),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WalOptions {
+    pub recovery_mode: WalRecoveryMode,
+    pub flush_policy: WalFlushPolicy,
+}
+
+impl WalOptions {
+    fn normalized(self) -> Self {
+        Self {
+            recovery_mode: self.recovery_mode,
+            flush_policy: self.flush_policy.normalized(),
+        }
+    }
+}
+
 pub struct Wal {
     file: BufWriter<File>,
     current_lsn: AtomicU64,
+    durable_lsn: AtomicU64,
     cipher: Arc<dyn AtRestCipher>,
+    recovery_mode: WalRecoveryMode,
+    flush_policy: WalFlushPolicy,
+    pending_appends: usize,
+    last_flush_at: Instant,
 }
 
 impl Wal {
     /// Open a WAL file. If it doesn't exist, it will be created.
     /// If it exists, it will be read to determine the next LSN.
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, WalError> {
-        Self::open_with_cipher(path, Arc::new(NoOpCipher)).await
+        Self::open_with_options(path, WalOptions::default()).await
+    }
+
+    /// Open a WAL file with custom recovery and flush options.
+    pub async fn open_with_options(
+        path: impl AsRef<Path>,
+        options: WalOptions,
+    ) -> Result<Self, WalError> {
+        Self::open_with_cipher_and_options(path, Arc::new(NoOpCipher), options).await
     }
 
     /// Open a WAL file with a custom at-rest cipher (KMS hook point).
@@ -55,7 +114,17 @@ impl Wal {
         path: impl AsRef<Path>,
         cipher: Arc<dyn AtRestCipher>,
     ) -> Result<Self, WalError> {
+        Self::open_with_cipher_and_options(path, cipher, WalOptions::default()).await
+    }
+
+    /// Open a WAL file with custom cipher, recovery mode, and flush policy.
+    pub async fn open_with_cipher_and_options(
+        path: impl AsRef<Path>,
+        cipher: Arc<dyn AtRestCipher>,
+        options: WalOptions,
+    ) -> Result<Self, WalError> {
         let path = path.as_ref().to_path_buf();
+        let options = options.normalized();
 
         // Ensure directory exists
         if let Some(parent) = path.parent() {
@@ -72,11 +141,16 @@ impl Wal {
         let mut wal = Self {
             file: BufWriter::new(file),
             current_lsn: AtomicU64::new(0),
+            durable_lsn: AtomicU64::new(0),
             cipher,
+            recovery_mode: options.recovery_mode,
+            flush_policy: options.flush_policy,
+            pending_appends: 0,
+            last_flush_at: Instant::now(),
         };
 
         // Recover the latest committed LSN at startup so new appends remain monotonic.
-        wal.replay(|_lsn, _payload| Ok(())).await?;
+        wal.scan_entries(|_lsn, _payload| Ok(())).await?;
 
         Ok(wal)
     }
@@ -100,16 +174,35 @@ impl Wal {
         // Write Payload
         self.file.write_all(&encrypted_payload).await?;
 
-        // Note: We don't flush here by default for batch performance,
-        // explicit flush() or periodic flush is expected.
+        self.pending_appends += 1;
+        self.flush_if_needed().await?;
 
         Ok(lsn)
     }
 
     /// Flush the internal buffer to disk, ensuring durability.
     pub async fn flush(&mut self) -> Result<(), WalError> {
+        self.durable_flush().await
+    }
+
+    pub fn durable_lsn(&self) -> u64 {
+        self.durable_lsn.load(Ordering::SeqCst)
+    }
+
+    pub fn flush_policy(&self) -> WalFlushPolicy {
+        self.flush_policy
+    }
+
+    pub fn recovery_mode(&self) -> WalRecoveryMode {
+        self.recovery_mode
+    }
+
+    async fn durable_flush(&mut self) -> Result<(), WalError> {
         self.file.flush().await?;
         self.file.get_ref().sync_all().await?; // fsync
+        self.durable_lsn.store(self.current_lsn(), Ordering::SeqCst);
+        self.pending_appends = 0;
+        self.last_flush_at = Instant::now();
         Ok(())
     }
 
@@ -124,57 +217,113 @@ impl Wal {
     where
         F: FnMut(u64, Vec<u8>) -> Result<(), WalError>,
     {
-        // Seek to start
-        self.file.flush().await?; // Ensure everything is written before seeking
+        self.scan_entries(&mut callback).await
+    }
+
+    async fn flush_if_needed(&mut self) -> Result<(), WalError> {
+        let should_flush = match self.flush_policy {
+            WalFlushPolicy::Always => true,
+            WalFlushPolicy::Interval(interval) => self.last_flush_at.elapsed() >= interval,
+            WalFlushPolicy::Batch { max_entries } => self.pending_appends >= max_entries,
+        };
+
+        if should_flush {
+            self.durable_flush().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn scan_entries<F>(&mut self, mut callback: F) -> Result<u64, WalError>
+    where
+        F: FnMut(u64, Vec<u8>) -> Result<(), WalError>,
+    {
+        self.file.flush().await?;
         let file = self.file.get_mut();
         file.seek(std::io::SeekFrom::Start(0)).await?;
 
         let mut last_lsn = 0;
-        let mut valid_end_pos = 0;
+        let mut last_good_offset = 0;
+        let total_len = file.metadata().await?.len();
 
         loop {
-            // Read Header
+            let entry_start = file.stream_position().await?;
             let lsn = match file.read_u64().await {
                 Ok(v) => v,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // End of file
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    if entry_start < total_len {
+                        truncate_tail(file, last_good_offset).await?;
+                    }
+                    break;
+                }
                 Err(e) => return Err(WalError::Io(e)),
             };
 
-            let crc = file.read_u32().await?;
-            let len = file.read_u32().await? as usize;
+            let crc = match file.read_u32().await {
+                Ok(v) => v,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    truncate_tail(file, last_good_offset).await?;
+                    break;
+                }
+                Err(e) => return Err(WalError::Io(e)),
+            };
 
-            // Read Payload
+            let len = match file.read_u32().await {
+                Ok(v) => v as usize,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    truncate_tail(file, last_good_offset).await?;
+                    break;
+                }
+                Err(e) => return Err(WalError::Io(e)),
+            };
+
+            let payload_start = file.stream_position().await?;
+            if (len as u64) > total_len.saturating_sub(payload_start) {
+                truncate_tail(file, last_good_offset).await?;
+                break;
+            }
+
             let mut payload = vec![0u8; len];
             match file.read_exact(&mut payload).await {
                 Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // Partial write
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    truncate_tail(file, last_good_offset).await?;
+                    break;
+                }
                 Err(e) => return Err(WalError::Io(e)),
             }
 
-            // Verify CRC
             let mut hasher = Hasher::new();
             hasher.update(&payload);
             if hasher.finalize() != crc {
+                if matches!(self.recovery_mode, WalRecoveryMode::RecoverToLastGoodOffset) {
+                    truncate_tail(file, last_good_offset).await?;
+                    break;
+                }
                 return Err(WalError::CrcMismatch);
             }
 
             let decrypted_payload = self.cipher.decrypt(&payload)?;
             callback(lsn, decrypted_payload)?;
             last_lsn = lsn;
-            valid_end_pos = file.stream_position().await?;
+            last_good_offset = file.stream_position().await?;
         }
 
-        // Truncate partial writes at the end
-        if valid_end_pos < file.metadata().await?.len() {
-            file.set_len(valid_end_pos).await?;
-        }
-
-        // Restore cursor to end
         file.seek(std::io::SeekFrom::End(0)).await?;
         self.current_lsn.store(last_lsn, Ordering::SeqCst);
+        self.durable_lsn.store(last_lsn, Ordering::SeqCst);
+        self.pending_appends = 0;
+        self.last_flush_at = Instant::now();
 
         Ok(last_lsn)
     }
+}
+
+async fn truncate_tail(file: &mut File, last_good_offset: u64) -> Result<(), WalError> {
+    if last_good_offset < file.metadata().await?.len() {
+        file.set_len(last_good_offset).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

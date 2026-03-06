@@ -3,7 +3,7 @@ use crate::hyper_index::HyperIndex;
 use crate::index::AdjacencyGraph;
 use crate::session::{SessionGraph, SessionManager, SessionOwner};
 use crate::snapshot::{SnapshotError, SnapshotManager};
-use crate::wal::{Wal, WalError};
+use crate::wal::{Wal, WalError, WalOptions};
 use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use alayasiki_core::model::{Edge, Node};
 use rkyv::ser::{serializers::AllocSerializer, Serializer};
@@ -274,7 +274,15 @@ impl Repository {
 
     /// Open a Repository with WAL replay to restore previous state
     pub async fn open(wal_path: impl AsRef<Path>) -> Result<Self, RepoError> {
-        Self::open_with_cipher(wal_path, Arc::new(NoOpCipher)).await
+        Self::open_with_options(wal_path, WalOptions::default()).await
+    }
+
+    /// Open a repository with custom WAL recovery and flush options.
+    pub async fn open_with_options(
+        wal_path: impl AsRef<Path>,
+        wal_options: WalOptions,
+    ) -> Result<Self, RepoError> {
+        Self::open_with_cipher_and_options(wal_path, Arc::new(NoOpCipher), wal_options).await
     }
 
     /// Open a repository with a custom at-rest cipher for WAL replay and writes.
@@ -282,7 +290,16 @@ impl Repository {
         wal_path: impl AsRef<Path>,
         cipher: Arc<dyn AtRestCipher>,
     ) -> Result<Self, RepoError> {
-        Self::open_internal(wal_path.as_ref().to_path_buf(), cipher, None).await
+        Self::open_with_cipher_and_options(wal_path, cipher, WalOptions::default()).await
+    }
+
+    /// Open a repository with custom at-rest cipher and WAL options.
+    pub async fn open_with_cipher_and_options(
+        wal_path: impl AsRef<Path>,
+        cipher: Arc<dyn AtRestCipher>,
+        wal_options: WalOptions,
+    ) -> Result<Self, RepoError> {
+        Self::open_internal(wal_path.as_ref().to_path_buf(), cipher, None, wal_options).await
     }
 
     /// Open a repository and restore state from backup snapshots first, then WAL deltas.
@@ -290,7 +307,13 @@ impl Repository {
         wal_path: impl AsRef<Path>,
         snapshot_dir: impl AsRef<Path>,
     ) -> Result<Self, RepoError> {
-        Self::open_with_cipher_and_snapshots(wal_path, Arc::new(NoOpCipher), snapshot_dir).await
+        Self::open_with_cipher_and_snapshots_and_options(
+            wal_path,
+            Arc::new(NoOpCipher),
+            snapshot_dir,
+            WalOptions::default(),
+        )
+        .await
     }
 
     /// Open a repository with custom cipher and snapshot-backed recovery.
@@ -299,11 +322,28 @@ impl Repository {
         cipher: Arc<dyn AtRestCipher>,
         snapshot_dir: impl AsRef<Path>,
     ) -> Result<Self, RepoError> {
+        Self::open_with_cipher_and_snapshots_and_options(
+            wal_path,
+            cipher,
+            snapshot_dir,
+            WalOptions::default(),
+        )
+        .await
+    }
+
+    /// Open a repository with custom cipher, snapshot-backed recovery, and WAL options.
+    pub async fn open_with_cipher_and_snapshots_and_options(
+        wal_path: impl AsRef<Path>,
+        cipher: Arc<dyn AtRestCipher>,
+        snapshot_dir: impl AsRef<Path>,
+        wal_options: WalOptions,
+    ) -> Result<Self, RepoError> {
         let snapshot_manager = SnapshotManager::new(snapshot_dir.as_ref());
         Self::open_internal(
             wal_path.as_ref().to_path_buf(),
             cipher,
             Some(snapshot_manager),
+            wal_options,
         )
         .await
     }
@@ -312,8 +352,10 @@ impl Repository {
         wal_path: PathBuf,
         cipher: Arc<dyn AtRestCipher>,
         snapshot_manager: Option<SnapshotManager>,
+        wal_options: WalOptions,
     ) -> Result<Self, RepoError> {
-        let wal_instance = Wal::open_with_cipher(&wal_path, cipher).await?;
+        let wal_instance =
+            Wal::open_with_cipher_and_options(&wal_path, cipher, wal_options).await?;
         let wal = Arc::new(Mutex::new(wal_instance));
         let tx_lock = Arc::new(Mutex::new(()));
         let (mut materialized, base_lsn) =
@@ -618,11 +660,11 @@ impl Repository {
         let tx_entry = WalEntry::Transaction(tx_operations);
         let tx_bytes = serialize_wal_entry(&tx_entry)?;
 
-        // Durability first for the full transaction boundary.
+        // Append the full transaction before applying the in-memory mutation set.
+        // Call Repository::flush() before shutdown when using buffered WAL policies.
         {
             let mut wal = self.wal.lock().await;
             wal.append(&tx_bytes).await?;
-            wal.flush().await?;
         }
 
         // Apply in-memory updates under write locks so readers don't observe partial state.
@@ -664,6 +706,16 @@ impl Repository {
         index.get(key).cloned()
     }
 
+    /// Force pending WAL entries to durable storage.
+    ///
+    /// Call this before graceful shutdown when using buffered flush policies.
+    pub async fn flush(&self) -> Result<(), RepoError> {
+        let _tx_guard = self.tx_lock.lock().await;
+        let mut wal = self.wal.lock().await;
+        wal.flush().await?;
+        Ok(())
+    }
+
     /// Get metadata for an edge identified by (source, target, relation).
     pub async fn get_edge_metadata(
         &self,
@@ -690,9 +742,10 @@ impl Repository {
             .collect()
     }
 
+    /// Return the latest durable WAL snapshot id.
     pub async fn current_snapshot_id(&self) -> String {
         let wal = self.wal.lock().await;
-        format!("wal-lsn-{}", wal.current_lsn())
+        format!("wal-lsn-{}", wal.durable_lsn())
     }
 
     /// Create a durable backup snapshot file at the current WAL LSN.
@@ -706,8 +759,9 @@ impl Repository {
             let _tx_guard = self.tx_lock.lock().await;
 
             let lsn = {
-                let wal = self.wal.lock().await;
-                wal.current_lsn()
+                let mut wal = self.wal.lock().await;
+                wal.flush().await?;
+                wal.durable_lsn()
             };
 
             let mut nodes: Vec<Node> = self.nodes.read().await.values().cloned().collect();
@@ -891,7 +945,6 @@ impl Repository {
             {
                 let mut wal = self.wal.lock().await;
                 wal.append(&bytes).await?;
-                wal.flush().await?;
             }
 
             index.insert(key.to_string(), node_ids);
@@ -1132,6 +1185,7 @@ fn parse_wal_snapshot_lsn(snapshot_id: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::WalFlushPolicy;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -1429,6 +1483,69 @@ mod tests {
 
         let invalid = repo.load_snapshot_view("snap-custom").await;
         assert!(matches!(invalid, Err(RepoError::InvalidSnapshotId(_))));
+    }
+
+    #[tokio::test]
+    async fn test_current_snapshot_id_tracks_durable_lsn_for_buffered_policies() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("durable_snapshot_id_batch.wal");
+        let repo = Repository::open_with_options(
+            &wal_path,
+            WalOptions {
+                flush_policy: WalFlushPolicy::Batch { max_entries: 8 },
+                ..WalOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(repo.current_snapshot_id().await, "wal-lsn-0");
+
+        repo.flush().await.unwrap();
+        assert_eq!(repo.current_snapshot_id().await, "wal-lsn-1");
+
+        drop(repo);
+
+        let reopened = Repository::open(&wal_path).await.unwrap();
+        assert_eq!(reopened.list_node_ids().await, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_create_backup_snapshot_flushes_pending_wal_before_persisting() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("snapshot_flush_batch.wal");
+        let snapshot_dir = dir.path().join("snapshots");
+
+        {
+            let repo = Repository::open_with_cipher_and_snapshots_and_options(
+                &wal_path,
+                Arc::new(NoOpCipher),
+                &snapshot_dir,
+                WalOptions {
+                    flush_policy: WalFlushPolicy::Batch { max_entries: 8 },
+                    ..WalOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+            repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+                .await
+                .unwrap();
+            repo.put_node(Node::new(2, vec![2.0], "N2".to_string()))
+                .await
+                .unwrap();
+
+            let snapshot_id = repo.create_backup_snapshot().await.unwrap();
+            assert_eq!(snapshot_id, "wal-lsn-2");
+        }
+
+        let reopened = Repository::open_with_snapshots(&wal_path, &snapshot_dir)
+            .await
+            .unwrap();
+        assert_eq!(reopened.list_node_ids().await, vec![1, 2]);
     }
 
     #[tokio::test]

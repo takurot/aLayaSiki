@@ -406,13 +406,19 @@
 * Depends on: PR-02
 
 - [x] `Wal::open_with_cipher` で既存WALを走査し `current_lsn` を復元（TODOの `0` 初期化を廃止）
-- [ ] 起動時LSN復元と `replay` 読み取りロジックを共通化し、末尾部分書き込み切り詰め/CRC検証を一元化
-- [ ] CRC不整合時は fail-fast を既定化し、運用向けに `last_good_offset` まで復旧するリカバリモードを追加
-- [ ] `flush_policy`（always / interval / batch）を設定化し、耐久性と遅延トレードオフを測定可能にする
+- [x] 起動時LSN復元と `replay` 読み取りロジックを共通化し、末尾部分書き込み切り詰め/CRC検証を一元化
+- [x] CRC不整合時は fail-fast を既定化し、運用向けに `last_good_offset` まで復旧するリカバリモードを追加
+- [x] `flush_policy`（always / interval / batch）を設定化し、耐久性と遅延トレードオフを測定可能にする
 
 **Done Criteria:**
-- [ ] 再起動後の LSN が単調増加し、クラッシュリカバリ後も欠番/巻き戻りが発生しない
-- [ ] WAL破損系の回帰テスト（CRC mismatch / partial write）が追加される
+- [x] 再起動後の LSN が単調増加し、クラッシュリカバリ後も欠番/巻き戻りが発生しない
+- [x] WAL破損系の回帰テスト（CRC mismatch / partial write）が追加される
+
+**Notes:**
+- `storage::wal` に `WalOptions` / `WalRecoveryMode` / `WalFlushPolicy` を追加し、起動時復元と通常 `replay` の読み取り経路を `scan_entries` へ統合
+- CRC mismatch は既定で fail-fast とし、`RecoverToLastGoodOffset` 指定時のみ破損エントリ手前まで切り詰めて継続
+- `Wal::append` が `flush_policy` に従って自動 flush し、`Repository::open_with_options` / `open_with_cipher_and_options` から上位層へ設定を伝搬
+- `storage/tests/wal_policy_test.rs` で CRC fail-fast / recovery truncation / batch flush / interval flush を回帰検証
 
 ---
 
