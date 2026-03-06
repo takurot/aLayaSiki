@@ -660,7 +660,8 @@ impl Repository {
         let tx_entry = WalEntry::Transaction(tx_operations);
         let tx_bytes = serialize_wal_entry(&tx_entry)?;
 
-        // Durability first for the full transaction boundary.
+        // Append the full transaction before applying the in-memory mutation set.
+        // Call Repository::flush() before shutdown when using buffered WAL policies.
         {
             let mut wal = self.wal.lock().await;
             wal.append(&tx_bytes).await?;
@@ -705,6 +706,16 @@ impl Repository {
         index.get(key).cloned()
     }
 
+    /// Force pending WAL entries to durable storage.
+    ///
+    /// Call this before graceful shutdown when using buffered flush policies.
+    pub async fn flush(&self) -> Result<(), RepoError> {
+        let _tx_guard = self.tx_lock.lock().await;
+        let mut wal = self.wal.lock().await;
+        wal.flush().await?;
+        Ok(())
+    }
+
     /// Get metadata for an edge identified by (source, target, relation).
     pub async fn get_edge_metadata(
         &self,
@@ -731,9 +742,10 @@ impl Repository {
             .collect()
     }
 
+    /// Return the latest durable WAL snapshot id.
     pub async fn current_snapshot_id(&self) -> String {
         let wal = self.wal.lock().await;
-        format!("wal-lsn-{}", wal.current_lsn())
+        format!("wal-lsn-{}", wal.durable_lsn())
     }
 
     /// Create a durable backup snapshot file at the current WAL LSN.
@@ -747,8 +759,9 @@ impl Repository {
             let _tx_guard = self.tx_lock.lock().await;
 
             let lsn = {
-                let wal = self.wal.lock().await;
-                wal.current_lsn()
+                let mut wal = self.wal.lock().await;
+                wal.flush().await?;
+                wal.durable_lsn()
             };
 
             let mut nodes: Vec<Node> = self.nodes.read().await.values().cloned().collect();
@@ -1172,6 +1185,7 @@ fn parse_wal_snapshot_lsn(snapshot_id: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::WalFlushPolicy;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -1469,6 +1483,69 @@ mod tests {
 
         let invalid = repo.load_snapshot_view("snap-custom").await;
         assert!(matches!(invalid, Err(RepoError::InvalidSnapshotId(_))));
+    }
+
+    #[tokio::test]
+    async fn test_current_snapshot_id_tracks_durable_lsn_for_buffered_policies() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("durable_snapshot_id_batch.wal");
+        let repo = Repository::open_with_options(
+            &wal_path,
+            WalOptions {
+                flush_policy: WalFlushPolicy::Batch { max_entries: 8 },
+                ..WalOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(repo.current_snapshot_id().await, "wal-lsn-0");
+
+        repo.flush().await.unwrap();
+        assert_eq!(repo.current_snapshot_id().await, "wal-lsn-1");
+
+        drop(repo);
+
+        let reopened = Repository::open(&wal_path).await.unwrap();
+        assert_eq!(reopened.list_node_ids().await, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_create_backup_snapshot_flushes_pending_wal_before_persisting() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("snapshot_flush_batch.wal");
+        let snapshot_dir = dir.path().join("snapshots");
+
+        {
+            let repo = Repository::open_with_cipher_and_snapshots_and_options(
+                &wal_path,
+                Arc::new(NoOpCipher),
+                &snapshot_dir,
+                WalOptions {
+                    flush_policy: WalFlushPolicy::Batch { max_entries: 8 },
+                    ..WalOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+            repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+                .await
+                .unwrap();
+            repo.put_node(Node::new(2, vec![2.0], "N2".to_string()))
+                .await
+                .unwrap();
+
+            let snapshot_id = repo.create_backup_snapshot().await.unwrap();
+            assert_eq!(snapshot_id, "wal-lsn-2");
+        }
+
+        let reopened = Repository::open_with_snapshots(&wal_path, &snapshot_dir)
+            .await
+            .unwrap();
+        assert_eq!(reopened.list_node_ids().await, vec![1, 2]);
     }
 
     #[tokio::test]

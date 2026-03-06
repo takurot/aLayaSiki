@@ -86,6 +86,7 @@ impl WalOptions {
 pub struct Wal {
     file: BufWriter<File>,
     current_lsn: AtomicU64,
+    durable_lsn: AtomicU64,
     cipher: Arc<dyn AtRestCipher>,
     recovery_mode: WalRecoveryMode,
     flush_policy: WalFlushPolicy,
@@ -140,6 +141,7 @@ impl Wal {
         let mut wal = Self {
             file: BufWriter::new(file),
             current_lsn: AtomicU64::new(0),
+            durable_lsn: AtomicU64::new(0),
             cipher,
             recovery_mode: options.recovery_mode,
             flush_policy: options.flush_policy,
@@ -183,6 +185,10 @@ impl Wal {
         self.durable_flush().await
     }
 
+    pub fn durable_lsn(&self) -> u64 {
+        self.durable_lsn.load(Ordering::SeqCst)
+    }
+
     pub fn flush_policy(&self) -> WalFlushPolicy {
         self.flush_policy
     }
@@ -194,6 +200,7 @@ impl Wal {
     async fn durable_flush(&mut self) -> Result<(), WalError> {
         self.file.flush().await?;
         self.file.get_ref().sync_all().await?; // fsync
+        self.durable_lsn.store(self.current_lsn(), Ordering::SeqCst);
         self.pending_appends = 0;
         self.last_flush_at = Instant::now();
         Ok(())
@@ -304,6 +311,7 @@ impl Wal {
 
         file.seek(std::io::SeekFrom::End(0)).await?;
         self.current_lsn.store(last_lsn, Ordering::SeqCst);
+        self.durable_lsn.store(last_lsn, Ordering::SeqCst);
         self.pending_appends = 0;
         self.last_flush_at = Instant::now();
 
