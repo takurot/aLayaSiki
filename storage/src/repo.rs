@@ -3,7 +3,7 @@ use crate::hyper_index::HyperIndex;
 use crate::index::AdjacencyGraph;
 use crate::session::{SessionGraph, SessionManager, SessionOwner};
 use crate::snapshot::{SnapshotError, SnapshotManager};
-use crate::wal::{Wal, WalError};
+use crate::wal::{Wal, WalError, WalOptions};
 use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use alayasiki_core::model::{Edge, Node};
 use rkyv::ser::{serializers::AllocSerializer, Serializer};
@@ -274,7 +274,15 @@ impl Repository {
 
     /// Open a Repository with WAL replay to restore previous state
     pub async fn open(wal_path: impl AsRef<Path>) -> Result<Self, RepoError> {
-        Self::open_with_cipher(wal_path, Arc::new(NoOpCipher)).await
+        Self::open_with_options(wal_path, WalOptions::default()).await
+    }
+
+    /// Open a repository with custom WAL recovery and flush options.
+    pub async fn open_with_options(
+        wal_path: impl AsRef<Path>,
+        wal_options: WalOptions,
+    ) -> Result<Self, RepoError> {
+        Self::open_with_cipher_and_options(wal_path, Arc::new(NoOpCipher), wal_options).await
     }
 
     /// Open a repository with a custom at-rest cipher for WAL replay and writes.
@@ -282,7 +290,16 @@ impl Repository {
         wal_path: impl AsRef<Path>,
         cipher: Arc<dyn AtRestCipher>,
     ) -> Result<Self, RepoError> {
-        Self::open_internal(wal_path.as_ref().to_path_buf(), cipher, None).await
+        Self::open_with_cipher_and_options(wal_path, cipher, WalOptions::default()).await
+    }
+
+    /// Open a repository with custom at-rest cipher and WAL options.
+    pub async fn open_with_cipher_and_options(
+        wal_path: impl AsRef<Path>,
+        cipher: Arc<dyn AtRestCipher>,
+        wal_options: WalOptions,
+    ) -> Result<Self, RepoError> {
+        Self::open_internal(wal_path.as_ref().to_path_buf(), cipher, None, wal_options).await
     }
 
     /// Open a repository and restore state from backup snapshots first, then WAL deltas.
@@ -290,7 +307,13 @@ impl Repository {
         wal_path: impl AsRef<Path>,
         snapshot_dir: impl AsRef<Path>,
     ) -> Result<Self, RepoError> {
-        Self::open_with_cipher_and_snapshots(wal_path, Arc::new(NoOpCipher), snapshot_dir).await
+        Self::open_with_cipher_and_snapshots_and_options(
+            wal_path,
+            Arc::new(NoOpCipher),
+            snapshot_dir,
+            WalOptions::default(),
+        )
+        .await
     }
 
     /// Open a repository with custom cipher and snapshot-backed recovery.
@@ -299,11 +322,28 @@ impl Repository {
         cipher: Arc<dyn AtRestCipher>,
         snapshot_dir: impl AsRef<Path>,
     ) -> Result<Self, RepoError> {
+        Self::open_with_cipher_and_snapshots_and_options(
+            wal_path,
+            cipher,
+            snapshot_dir,
+            WalOptions::default(),
+        )
+        .await
+    }
+
+    /// Open a repository with custom cipher, snapshot-backed recovery, and WAL options.
+    pub async fn open_with_cipher_and_snapshots_and_options(
+        wal_path: impl AsRef<Path>,
+        cipher: Arc<dyn AtRestCipher>,
+        snapshot_dir: impl AsRef<Path>,
+        wal_options: WalOptions,
+    ) -> Result<Self, RepoError> {
         let snapshot_manager = SnapshotManager::new(snapshot_dir.as_ref());
         Self::open_internal(
             wal_path.as_ref().to_path_buf(),
             cipher,
             Some(snapshot_manager),
+            wal_options,
         )
         .await
     }
@@ -312,8 +352,10 @@ impl Repository {
         wal_path: PathBuf,
         cipher: Arc<dyn AtRestCipher>,
         snapshot_manager: Option<SnapshotManager>,
+        wal_options: WalOptions,
     ) -> Result<Self, RepoError> {
-        let wal_instance = Wal::open_with_cipher(&wal_path, cipher).await?;
+        let wal_instance =
+            Wal::open_with_cipher_and_options(&wal_path, cipher, wal_options).await?;
         let wal = Arc::new(Mutex::new(wal_instance));
         let tx_lock = Arc::new(Mutex::new(()));
         let (mut materialized, base_lsn) =
@@ -622,7 +664,6 @@ impl Repository {
         {
             let mut wal = self.wal.lock().await;
             wal.append(&tx_bytes).await?;
-            wal.flush().await?;
         }
 
         // Apply in-memory updates under write locks so readers don't observe partial state.
@@ -891,7 +932,6 @@ impl Repository {
             {
                 let mut wal = self.wal.lock().await;
                 wal.append(&bytes).await?;
-                wal.flush().await?;
             }
 
             index.insert(key.to_string(), node_ids);
