@@ -58,8 +58,8 @@ def build_profile(name: str) -> SuiteProfile:
         ),
         "scale": SuiteProfile(
             name="scale",
-            design_target_nodes=100_000_000,
-            design_target_edges=300_000_000,
+            design_target_nodes=1_000_000_000,
+            design_target_edges=3_000_000_000,
             operational_env={
                 "ALAYASIKI_BENCH_NODES": "20000",
                 "ALAYASIKI_BENCH_WORKERS": "12",
@@ -91,8 +91,15 @@ def build_profile(name: str) -> SuiteProfile:
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
+    if not path.exists():
+        print(f"[warn] JSON result file not found: {path}")
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"[error] Failed to load JSON from {path}: {exc}")
+        return {}
 
 
 def build_suite_report(
@@ -105,6 +112,7 @@ def build_suite_report(
     graphrag = load_json(graphrag_result)
     ann = load_json(ann_result)
 
+    # Use .get() to avoid KeyError if load_json returned empty dict
     return {
         "profile": profile.name,
         "generated_at_unix": int(time.time()),
@@ -113,26 +121,32 @@ def build_suite_report(
             "edges": profile.design_target_edges,
         },
         "operational": {
-            "throughput_ops_per_sec": operational["totals"]["throughput_ops_per_sec"],
-            "read_p95_ms": operational["read_latency_ns"]["p95_ms"],
-            "write_p95_ms": operational["write_latency_ns"]["p95_ms"],
+            "throughput_ops_per_sec": operational.get("totals", {}).get(
+                "throughput_ops_per_sec", 0.0
+            ),
+            "read_p95_ms": operational.get("read_latency_ns", {}).get("p95_ms", 0.0),
+            "write_p95_ms": operational.get("write_latency_ns", {}).get("p95_ms", 0.0),
         },
         "graph_rag": {
-            "throughput_ops_per_sec": graphrag["totals"]["throughput_ops_per_sec"],
-            "read_p95_ms": graphrag["read_latency_ns"]["p95_ms"],
-            "write_p95_ms": graphrag["write_latency_ns"]["p95_ms"],
-            "avg_groundedness": graphrag["read_quality"]["avg_groundedness"],
-            "evidence_attachment_rate": graphrag["read_quality"][
-                "evidence_attachment_rate"
-            ],
-            "answer_with_evidence_rate": graphrag["read_quality"][
-                "answer_with_evidence_rate"
-            ],
+            "throughput_ops_per_sec": graphrag.get("totals", {}).get(
+                "throughput_ops_per_sec", 0.0
+            ),
+            "read_p95_ms": graphrag.get("read_latency_ns", {}).get("p95_ms", 0.0),
+            "write_p95_ms": graphrag.get("write_latency_ns", {}).get("p95_ms", 0.0),
+            "avg_groundedness": graphrag.get("read_quality", {}).get(
+                "avg_groundedness", 0.0
+            ),
+            "evidence_attachment_rate": graphrag.get("read_quality", {}).get(
+                "evidence_attachment_rate", 0.0
+            ),
+            "answer_with_evidence_rate": graphrag.get("read_quality", {}).get(
+                "answer_with_evidence_rate", 0.0
+            ),
         },
         "ann": {
             "search_sec": {
                 name: metrics["search_sec"]
-                for name, metrics in ann["metrics"].items()
+                for name, metrics in ann.get("metrics", {}).items()
                 if "search_sec" in metrics
             }
         },

@@ -329,7 +329,7 @@ async fn run_worker(
                 .explain
                 .steps
                 .iter()
-                .any(|step| step == "semantic_cache_hit");
+                .any(|step| step == query::SEMANTIC_CACHE_HIT_STEP);
             stats.quality.record(ReadObservation::new(
                 response.answer.is_some(),
                 response.evidence.nodes.len(),

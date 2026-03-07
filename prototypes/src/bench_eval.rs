@@ -46,9 +46,28 @@ pub fn format_ns(ns: u128) -> String {
 }
 
 pub fn build_latency_summary(samples: &[u128]) -> LatencySummary {
-    let p50 = percentile_ns(samples, 0.50);
-    let p95 = percentile_ns(samples, 0.95);
-    let p99 = percentile_ns(samples, 0.99);
+    if samples.is_empty() {
+        return LatencySummary {
+            p50_ns: 0,
+            p95_ns: 0,
+            p99_ns: 0,
+            p50_ms: 0.0,
+            p95_ms: 0.0,
+            p99_ms: 0.0,
+        };
+    }
+
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+
+    let get_p = |p: f64| {
+        let rank = ((sorted.len() - 1) as f64 * p).round() as usize;
+        sorted[rank]
+    };
+
+    let p50 = get_p(0.50);
+    let p95 = get_p(0.95);
+    let p99 = get_p(0.99);
 
     LatencySummary {
         p50_ns: p50,

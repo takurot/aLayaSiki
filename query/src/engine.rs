@@ -448,12 +448,12 @@ impl QueryEngine {
                     .explain
                     .steps
                     .iter()
-                    .any(|step| step == "semantic_cache_hit")
+                    .any(|step| step == crate::SEMANTIC_CACHE_HIT_STEP)
                 {
                     cached_response
                         .explain
                         .steps
-                        .insert(0, "semantic_cache_hit".to_string());
+                        .insert(0, crate::SEMANTIC_CACHE_HIT_STEP.to_string());
                 }
 
                 self.metrics
@@ -609,7 +609,8 @@ impl QueryEngine {
             response
                 .explain
                 .steps
-                .contains(&"semantic_cache_hit".to_string()),
+                .iter()
+                .any(|s| s == crate::SEMANTIC_CACHE_HIT_STEP),
         );
 
         if cache_eligible {
