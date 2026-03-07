@@ -296,9 +296,16 @@
 
 * Depends on: PR-04, PR-08, PR-12
 
-- [ ] ベンチマークスイート（1億ノード/3億エッジ想定）
-- [ ] read:write=9:1 プロファイルでの負荷試験
-- [ ] GraphRAG 精度（根拠付き回答率）測定
+- [x] ベンチマークスイート（1億ノード/3億エッジ想定）
+- [x] read:write=9:1 プロファイルでの負荷試験
+- [x] GraphRAG 精度（根拠付き回答率）測定
+
+**Notes:**
+- `benchmarks/benchmark_suite.py` を追加し、Operational Latency / GraphRAG Production / Python ANN ベンチを `baseline` / `scale` プロファイルで一括実行・集計できるようにした。
+- `prototypes/src/bench_eval.rs` にレイテンシ要約と read-quality 集計を抽出し、GraphRAG ベンチで `evidence_attachment_rate` / `answer_with_evidence_rate` / `answer_with_citations_rate` を明示的に測定するようにした。
+- `prototypes/benches/operational_latency_bench.rs` は JSON レポート出力を追加し、スイート集計で再利用可能にした。
+- ベースライン実行結果を `benchmarks/results/pr14_suite_baseline.json` / `benchmarks/results/pr14_suite_baseline.md` に保存した。
+- ベースライン結果: operational throughput `389.38 ops/s`, read p95 `16.96 ms`, write p95 `188.67 ms`; GraphRAG throughput `221.73 ops/s`, read p95 `32.89 ms`, write p95 `141.74 ms`, `evidence_attachment_rate=1.0`, `answer_with_evidence_rate=1.0`; ANN search `usearch=0.0035 s`, `faiss_flat=0.0306 s`.
 
 ---
 

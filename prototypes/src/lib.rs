@@ -1,3 +1,5 @@
+pub mod bench_eval;
+
 use bytecheck::CheckBytes;
 use rkyv::{Archive, Deserialize, Serialize};
 

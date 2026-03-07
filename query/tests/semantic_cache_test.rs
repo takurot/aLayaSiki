@@ -68,7 +68,7 @@ async fn semantic_cache_hits_for_semantically_equivalent_query() {
         .explain
         .steps
         .iter()
-        .any(|step| step == "semantic_cache_hit"));
+        .any(|step| step == query::SEMANTIC_CACHE_HIT_STEP));
 
     let second = engine
         .execute(second_request)
@@ -78,7 +78,7 @@ async fn semantic_cache_hits_for_semantically_equivalent_query() {
         .explain
         .steps
         .iter()
-        .any(|step| step == "semantic_cache_hit"));
+        .any(|step| step == query::SEMANTIC_CACHE_HIT_STEP));
 
     assert_eq!(first.snapshot_id, second.snapshot_id);
     assert_eq!(first.evidence.nodes, second.evidence.nodes);
@@ -108,7 +108,7 @@ async fn semantic_cache_does_not_cross_snapshot_boundaries() {
         .explain
         .steps
         .iter()
-        .any(|step| step == "semantic_cache_hit"));
+        .any(|step| step == query::SEMANTIC_CACHE_HIT_STEP));
 
     repo.put_node(Node::new(
         3,
@@ -123,7 +123,7 @@ async fn semantic_cache_does_not_cross_snapshot_boundaries() {
         .explain
         .steps
         .iter()
-        .any(|step| step == "semantic_cache_hit"));
+        .any(|step| step == query::SEMANTIC_CACHE_HIT_STEP));
 
     assert_ne!(first.snapshot_id, second.snapshot_id);
 }
