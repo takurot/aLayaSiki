@@ -1,0 +1,34 @@
+{
+  "benchmark": "operational_latency_bench",
+  "generated_at_unix": 1772854733,
+  "config": {
+    "nodes": 4000,
+    "workers": 6,
+    "ops_per_worker": 100,
+    "write_every": 10,
+    "read_to_write_ratio": "9:1"
+  },
+  "totals": {
+    "elapsed_sec": 1.540916416,
+    "total_ops": 600,
+    "read_ops": 540,
+    "write_ops": 60,
+    "throughput_ops_per_sec": 389.3786799659872
+  },
+  "read_latency_ns": {
+    "p50_ns": 8161833,
+    "p95_ns": 16964958,
+    "p99_ns": 24617625,
+    "p50_ms": 8.161833,
+    "p95_ms": 16.964958,
+    "p99_ms": 24.617625
+  },
+  "write_latency_ns": {
+    "p50_ns": 54365542,
+    "p95_ns": 188665708,
+    "p99_ns": 224992042,
+    "p50_ms": 54.365542,
+    "p95_ms": 188.665708,
+    "p99_ms": 224.992042
+  }
+}

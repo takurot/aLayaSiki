@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::ingest::IngestionRequest;
@@ -12,6 +12,10 @@ use ingestion::chunker::SemanticChunker;
 use ingestion::embedding::DeterministicEmbedder;
 use ingestion::policy::NoOpPolicy;
 use ingestion::processor::IngestionPipeline;
+use prototypes::bench_eval::{
+    build_latency_summary, format_ns, now_unix, write_json_report, LatencySummary, ReadObservation,
+    ReadQualityAccumulator, ReadQualitySummary,
+};
 use query::{QueryEngine, QueryRequest};
 use serde::Serialize;
 use storage::community::{CommunityEngine, DeterministicSummarizer};
@@ -51,9 +55,7 @@ struct WorkerStats {
     write_latencies_ns: Vec<u128>,
     read_ops: usize,
     write_ops: usize,
-    cache_hits: usize,
-    groundedness_sum: f64,
-    evidence_nodes_sum: usize,
+    quality: ReadQualityAccumulator,
     local_reads: usize,
     global_reads: usize,
     drift_reads: usize,
@@ -75,9 +77,7 @@ impl WorkerStats {
         self.write_latencies_ns.extend(other.write_latencies_ns);
         self.read_ops += other.read_ops;
         self.write_ops += other.write_ops;
-        self.cache_hits += other.cache_hits;
-        self.groundedness_sum += other.groundedness_sum;
-        self.evidence_nodes_sum += other.evidence_nodes_sum;
+        self.quality.merge(other.quality);
         self.local_reads += other.local_reads;
         self.global_reads += other.global_reads;
         self.drift_reads += other.drift_reads;
@@ -93,7 +93,7 @@ struct BenchmarkReport {
     totals: Totals,
     read_latency_ns: LatencySummary,
     write_latency_ns: LatencySummary,
-    read_quality: ReadQuality,
+    read_quality: ReadQualitySummary,
     mode_mix: ModeMix,
     query_engine_metrics: MetricsSnapshot,
 }
@@ -117,23 +117,6 @@ struct Totals {
     read_ops: usize,
     write_ops: usize,
     throughput_ops_per_sec: f64,
-}
-
-#[derive(Debug, Serialize)]
-struct LatencySummary {
-    p50_ns: u128,
-    p95_ns: u128,
-    p99_ns: u128,
-    p50_ms: f64,
-    p95_ms: f64,
-    p99_ms: f64,
-}
-
-#[derive(Debug, Serialize)]
-struct ReadQuality {
-    avg_groundedness: f64,
-    avg_evidence_nodes: f64,
-    semantic_cache_hit_rate: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,37 +152,6 @@ fn env_f64(key: &str) -> Option<f64> {
     env::var(key)
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn percentile_ns(samples: &[u128], percentile: f64) -> u128 {
-    if samples.is_empty() {
-        return 0;
-    }
-    let mut sorted = samples.to_vec();
-    sorted.sort_unstable();
-    let rank = ((sorted.len() - 1) as f64 * percentile).round() as usize;
-    sorted[rank]
-}
-
-fn to_ms(ns: u128) -> f64 {
-    ns as f64 / 1_000_000.0
-}
-
-fn format_ns(ns: u128) -> String {
-    if ns >= 1_000_000 {
-        format!("{:.3} ms", to_ms(ns))
-    } else if ns >= 1_000 {
-        format!("{:.3} us", ns as f64 / 1_000.0)
-    } else {
-        format!("{ns} ns")
-    }
 }
 
 fn load_config() -> BenchConfig {
@@ -373,17 +325,18 @@ async fn run_worker(
             let response = engine.execute(request).await.unwrap();
             stats.read_latencies_ns.push(begin.elapsed().as_nanos());
             stats.read_ops += 1;
-            stats.groundedness_sum += response.groundedness as f64;
-            stats.evidence_nodes_sum += response.evidence.nodes.len();
-
-            if response
+            let semantic_cache_hit = response
                 .explain
                 .steps
                 .iter()
-                .any(|step| step == "semantic_cache_hit")
-            {
-                stats.cache_hits += 1;
-            }
+                .any(|step| step == "semantic_cache_hit");
+            stats.quality.record(ReadObservation::new(
+                response.answer.is_some(),
+                response.evidence.nodes.len(),
+                response.citations.len(),
+                response.groundedness,
+                semantic_cache_hit,
+            ));
 
             match mode_index {
                 0 => stats.local_reads += 1,
@@ -395,29 +348,6 @@ async fn run_worker(
     }
 
     stats
-}
-
-fn build_latency_summary(samples: &[u128]) -> LatencySummary {
-    let p50 = percentile_ns(samples, 0.50);
-    let p95 = percentile_ns(samples, 0.95);
-    let p99 = percentile_ns(samples, 0.99);
-
-    LatencySummary {
-        p50_ns: p50,
-        p95_ns: p95,
-        p99_ns: p99,
-        p50_ms: to_ms(p50),
-        p95_ms: to_ms(p95),
-        p99_ms: to_ms(p99),
-    }
-}
-
-fn write_report(path: &str, report: &BenchmarkReport) {
-    if let Some(parent) = Path::new(path).parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    let payload = serde_json::to_vec_pretty(report).unwrap();
-    std::fs::write(path, payload).unwrap();
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -482,21 +412,7 @@ async fn main() {
     let read_summary = build_latency_summary(&combined.read_latencies_ns);
     let write_summary = build_latency_summary(&combined.write_latencies_ns);
 
-    let avg_groundedness = if combined.read_ops > 0 {
-        combined.groundedness_sum / combined.read_ops as f64
-    } else {
-        0.0
-    };
-    let avg_evidence_nodes = if combined.read_ops > 0 {
-        combined.evidence_nodes_sum as f64 / combined.read_ops as f64
-    } else {
-        0.0
-    };
-    let cache_hit_rate = if combined.read_ops > 0 {
-        combined.cache_hits as f64 / combined.read_ops as f64
-    } else {
-        0.0
-    };
+    let read_quality = combined.quality.summary();
 
     if let Some(limit) = config.min_throughput_ops {
         assert!(
@@ -545,11 +461,7 @@ async fn main() {
         },
         read_latency_ns: read_summary,
         write_latency_ns: write_summary,
-        read_quality: ReadQuality {
-            avg_groundedness,
-            avg_evidence_nodes,
-            semantic_cache_hit_rate: cache_hit_rate,
-        },
+        read_quality,
         mode_mix: ModeMix {
             local: combined.local_reads,
             global: combined.global_reads,
@@ -559,7 +471,7 @@ async fn main() {
         query_engine_metrics: engine.metrics(),
     };
 
-    write_report(&config.results_path, &report);
+    write_json_report(Path::new(&config.results_path), &report);
 
     println!("=== GraphRAG Production-like Benchmark ===");
     println!(
@@ -593,10 +505,15 @@ async fn main() {
         format_ns(report.write_latency_ns.p99_ns)
     );
     println!(
-        "quality: avg_groundedness={:.4}, avg_evidence_nodes={:.2}, semantic_cache_hit_rate={:.4}",
+        "quality: answer_reads={}, avg_groundedness={:.4}, avg_answer_groundedness={:.4}, avg_evidence_nodes={:.2}, semantic_cache_hit_rate={:.4}, evidence_attachment_rate={:.4}, answer_with_evidence_rate={:.4}, answer_with_citations_rate={:.4}",
+        report.read_quality.answer_reads,
         report.read_quality.avg_groundedness,
+        report.read_quality.avg_answer_groundedness,
         report.read_quality.avg_evidence_nodes,
-        report.read_quality.semantic_cache_hit_rate
+        report.read_quality.semantic_cache_hit_rate,
+        report.read_quality.evidence_attachment_rate,
+        report.read_quality.answer_with_evidence_rate,
+        report.read_quality.answer_with_citations_rate
     );
     println!(
         "mode_mix: local={}, global={}, drift={}, auto={}",

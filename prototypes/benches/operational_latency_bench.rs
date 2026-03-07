@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,11 +8,43 @@ use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::ingest::IngestionRequest;
 use alayasiki_core::model::{Edge, Node};
 use ingestion::processor::IngestionPipeline;
+use prototypes::bench_eval::{
+    build_latency_summary, format_ns, now_unix, write_json_report, LatencySummary,
+};
 use query::{QueryEngine, QueryRequest};
+use serde::Serialize;
 use storage::repo::Repository;
 
 const DIMS: usize = 32;
 const MODEL_ID: &str = "embedding-default-v1";
+
+#[derive(Debug, Serialize)]
+struct OperationalBenchmarkReport {
+    benchmark: String,
+    generated_at_unix: u64,
+    config: ReportConfig,
+    totals: Totals,
+    read_latency_ns: LatencySummary,
+    write_latency_ns: LatencySummary,
+}
+
+#[derive(Debug, Serialize)]
+struct ReportConfig {
+    nodes: u64,
+    workers: usize,
+    ops_per_worker: usize,
+    write_every: usize,
+    read_to_write_ratio: String,
+}
+
+#[derive(Debug, Serialize)]
+struct Totals {
+    elapsed_sec: f64,
+    total_ops: usize,
+    read_ops: usize,
+    write_ops: usize,
+    throughput_ops_per_sec: f64,
+}
 
 fn env_usize(key: &str, default: usize) -> usize {
     env::var(key)
@@ -31,24 +64,12 @@ fn env_f64(key: &str) -> Option<f64> {
     env::var(key).ok().and_then(|v| v.parse::<f64>().ok())
 }
 
-fn percentile_ns(samples: &[u128], p: f64) -> u128 {
-    if samples.is_empty() {
-        return 0;
-    }
-    let mut sorted = samples.to_vec();
-    sorted.sort_unstable();
-    let rank = ((sorted.len() - 1) as f64 * p).round() as usize;
-    sorted[rank]
-}
-
-fn fmt_ns(ns: u128) -> String {
-    if ns >= 1_000_000 {
-        format!("{:.3} ms", ns as f64 / 1_000_000.0)
-    } else if ns >= 1_000 {
-        format!("{:.3} us", ns as f64 / 1_000.0)
-    } else {
-        format!("{ns} ns")
-    }
+fn default_results_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("benchmarks")
+        .join("results")
+        .join("operational_latency_latest.json")
 }
 
 async fn seed_repo(repo: &Arc<Repository>, node_count: u64) {
@@ -92,6 +113,9 @@ async fn main() {
     let workers = env_usize("ALAYASIKI_BENCH_WORKERS", 8);
     let ops_per_worker = env_usize("ALAYASIKI_BENCH_OPS_PER_WORKER", 120);
     let write_every = env_usize("ALAYASIKI_BENCH_WRITE_EVERY", 10).max(1);
+    let results_path = env::var("ALAYASIKI_BENCH_RESULTS_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| default_results_path());
 
     let temp_dir = tempfile::tempdir().unwrap();
     let wal_path = temp_dir.path().join("operational_latency_bench.wal");
@@ -173,6 +197,31 @@ async fn main() {
     } else {
         0.0
     };
+    let read_summary = build_latency_summary(&read_samples);
+    let write_summary = build_latency_summary(&write_samples);
+
+    let report = OperationalBenchmarkReport {
+        benchmark: "operational_latency_bench".to_string(),
+        generated_at_unix: now_unix(),
+        config: ReportConfig {
+            nodes: node_count,
+            workers,
+            ops_per_worker,
+            write_every,
+            read_to_write_ratio: format!("{}:1", write_every.saturating_sub(1)),
+        },
+        totals: Totals {
+            elapsed_sec: total_elapsed.as_secs_f64(),
+            total_ops,
+            read_ops: read_samples.len(),
+            write_ops: write_samples.len(),
+            throughput_ops_per_sec: throughput,
+        },
+        read_latency_ns: read_summary,
+        write_latency_ns: write_summary,
+    };
+
+    write_json_report(&results_path, &report);
 
     println!("=== Operational Latency Benchmark (Query + Ingestion) ===");
     println!(
@@ -195,19 +244,19 @@ async fn main() {
 
     println!(
         "read latency: p50={}, p95={}, p99={}",
-        fmt_ns(percentile_ns(&read_samples, 0.50)),
-        fmt_ns(percentile_ns(&read_samples, 0.95)),
-        fmt_ns(percentile_ns(&read_samples, 0.99))
+        format_ns(report.read_latency_ns.p50_ns),
+        format_ns(report.read_latency_ns.p95_ns),
+        format_ns(report.read_latency_ns.p99_ns)
     );
     println!(
         "write latency: p50={}, p95={}, p99={}",
-        fmt_ns(percentile_ns(&write_samples, 0.50)),
-        fmt_ns(percentile_ns(&write_samples, 0.95)),
-        fmt_ns(percentile_ns(&write_samples, 0.99))
+        format_ns(report.write_latency_ns.p50_ns),
+        format_ns(report.write_latency_ns.p95_ns),
+        format_ns(report.write_latency_ns.p99_ns)
     );
 
-    let read_p95_ms = percentile_ns(&read_samples, 0.95) as f64 / 1_000_000.0;
-    let write_p95_ms = percentile_ns(&write_samples, 0.95) as f64 / 1_000_000.0;
+    let read_p95_ms = report.read_latency_ns.p95_ms;
+    let write_p95_ms = report.write_latency_ns.p95_ms;
     let min_throughput = env_f64("ALAYASIKI_BENCH_MIN_THROUGHPUT");
     let max_read_p95_ms = env_f64("ALAYASIKI_BENCH_MAX_READ_P95_MS");
     let max_write_p95_ms = env_f64("ALAYASIKI_BENCH_MAX_WRITE_P95_MS");
@@ -236,4 +285,6 @@ async fn main() {
             limit
         );
     }
+
+    println!("result_json: {}", results_path.display());
 }
