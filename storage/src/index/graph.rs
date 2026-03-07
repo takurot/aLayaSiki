@@ -243,4 +243,27 @@ mod tests {
         assert_eq!(likes.len(), 1);
         assert!((likes[0].2 - 0.8).abs() < f32::EPSILON);
     }
+
+    #[test]
+    fn test_graph_expand_zero_hops() {
+        let mut graph = AdjacencyGraph::new();
+        graph.add_edge(1, 2, "knows", 1.0);
+
+        let result = graph.expand(1, 0);
+        assert!(
+            result.is_empty(),
+            "expand with 0 hops should return empty vector"
+        );
+    }
+
+    #[test]
+    fn test_graph_expand_nonexistent_node() {
+        let mut graph = AdjacencyGraph::new();
+        graph.add_edge(1, 2, "knows", 1.0);
+        let result = graph.expand(999, 1);
+        assert!(
+            result.is_empty(),
+            "expand from nonexistent node should return empty vector"
+        );
+    }
 }
