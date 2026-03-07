@@ -535,24 +535,43 @@ fn compute_pagerank(graph: &AdjacencyGraph, iterations: usize, damping: f64) -> 
     let mut ordered_nodes = nodes;
     ordered_nodes.sort_unstable();
 
+    struct PageRankNode {
+        id: u64,
+        edges: Vec<(u64, f64)>,
+        out_sum: f64,
+    }
+
+    let node_metadata: Vec<PageRankNode> = ordered_nodes
+        .iter()
+        .map(|&node_id| {
+            let edges = out_neighbors.remove(&node_id).unwrap_or_default();
+            let out_sum: f64 = edges.iter().map(|(_, w)| *w).sum();
+            PageRankNode {
+                id: node_id,
+                edges,
+                out_sum,
+            }
+        })
+        .collect();
+
     for _ in 0..iterations {
-        let mut next: HashMap<u64, f64> =
-            ordered_nodes.iter().copied().map(|id| (id, base)).collect();
+        let mut next: HashMap<u64, f64> = node_metadata
+            .iter()
+            .map(|node| (node.id, base))
+            .collect();
         let mut dangling_mass = 0.0;
 
-        for node_id in &ordered_nodes {
-            let current_rank = *rank.get(node_id).unwrap_or(&0.0);
-            let edges = out_neighbors.get(node_id).cloned().unwrap_or_default();
-            let out_sum: f64 = edges.iter().map(|(_, w)| *w).sum();
+        for node in &node_metadata {
+            let current_rank = *rank.get(&node.id).unwrap_or(&0.0);
 
-            if out_sum <= f64::EPSILON {
+            if node.out_sum <= f64::EPSILON {
                 dangling_mass += current_rank;
                 continue;
             }
 
-            for (target_id, weight) in edges {
-                let contribution = damping * current_rank * (weight / out_sum);
-                if let Some(value) = next.get_mut(&target_id) {
+            for (target_id, weight) in &node.edges {
+                let contribution = damping * current_rank * (*weight / node.out_sum);
+                if let Some(value) = next.get_mut(target_id) {
                     *value += contribution;
                 }
             }
