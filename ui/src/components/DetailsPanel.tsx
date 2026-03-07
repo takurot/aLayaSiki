@@ -23,7 +23,7 @@ const DetailsPanel: React.FC<DetailsPanelProps> = ({ selectedNode, onClose }) =>
     if (!metadata) return null;
     try {
       return JSON.parse(metadata);
-    } catch (e) {
+    } catch {
       return { raw: metadata };
     }
   };

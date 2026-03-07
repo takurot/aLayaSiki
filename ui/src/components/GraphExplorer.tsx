@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from 'react';
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { useEffect, useRef } from 'react';
 import * as d3 from 'd3';
 import type { Node, GraphData } from '../types';
 
@@ -10,7 +11,7 @@ interface GraphExplorerProps {
 }
 
 // Extend d3 simulation types to include x and y which are injected by d3
-interface SimulationNode extends Node, d3.SimulationNodeDatum {}
+interface SimulationNode extends Node, d3.SimulationNodeDatum { }
 interface SimulationLink extends d3.SimulationLinkDatum<SimulationNode> {
   relation_type: number;
 }
@@ -194,7 +195,7 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
       simulation.stop();
       window.removeEventListener('resize', handleResize);
     };
-  }, [data]);
+  }, [data, onNodeClick]);
 
   // Handle highlights externally without restarting simulation
   useEffect(() => {

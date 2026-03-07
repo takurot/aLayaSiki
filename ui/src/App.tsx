@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import GraphExplorer from './components/GraphExplorer';
 import DetailsPanel from './components/DetailsPanel';
 import ChatInterface from './components/ChatInterface';
 import type { Node, GraphData } from './types';
-import './App.css';
+
 import { DatabaseZap } from 'lucide-react';
 
 // Sample mock data resembling aLayaSiki entities
@@ -37,10 +37,10 @@ function App() {
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
   const [highlightedNodeId, setHighlightedNodeId] = useState<number | null>(null);
 
-  const handleNodeClick = (node: Node) => {
+  const handleNodeClick = useCallback((node: Node) => {
     setSelectedNode(node);
     setHighlightedNodeId(node.id);
-  };
+  }, []);
 
   const handleClosePanel = () => {
     setSelectedNode(null);
