@@ -10,7 +10,6 @@ use alayasiki_core::governance::{
 };
 use alayasiki_core::ingest::IngestionRequest;
 use ingestion::processor::{IngestionError, IngestionPipeline};
-use ingestion::policy::BasicPolicy;
 use jobs::queue::ChannelJobQueue;
 use jobs::worker::Worker;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
@@ -21,7 +20,6 @@ use storage::repo::Repository;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
-use std::fs;
 
 #[tokio::test]
 async fn test_e2e_ingest_to_query_with_filters_and_citations() {
