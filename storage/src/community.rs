@@ -514,61 +514,71 @@ fn compute_pagerank(graph: &AdjacencyGraph, iterations: usize, damping: f64) -> 
     let n_f64 = n as f64;
     let base = (1.0 - damping) / n_f64;
 
-    let mut out_neighbors: HashMap<u64, Vec<(u64, f64)>> = HashMap::new();
-    for node_id in &nodes {
-        out_neighbors.entry(*node_id).or_default();
-    }
-    for (source, target, weight) in graph.edges() {
-        out_neighbors
-            .entry(source)
-            .or_default()
-            .push((target, weight as f64));
-        out_neighbors.entry(target).or_default();
-    }
-
-    for edges in out_neighbors.values_mut() {
-        edges.sort_by(|a, b| a.0.cmp(&b.0));
-    }
-
-    let mut rank: HashMap<u64, f64> = nodes.iter().copied().map(|id| (id, 1.0 / n_f64)).collect();
-
     let mut ordered_nodes = nodes;
     ordered_nodes.sort_unstable();
 
+    let mut node_to_idx = HashMap::with_capacity(n);
+    for (idx, &node_id) in ordered_nodes.iter().enumerate() {
+        node_to_idx.insert(node_id, idx);
+    }
+
+    let mut out_neighbors: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for (source, target, weight) in graph.edges() {
+        if let (Some(&s_idx), Some(&t_idx)) = (node_to_idx.get(&source), node_to_idx.get(&target)) {
+            out_neighbors[s_idx].push((t_idx, weight as f64));
+        }
+    }
+
+    let mut is_dangling = vec![false; n];
+    for (idx, edges) in out_neighbors.iter_mut().enumerate() {
+        edges.sort_by(|a, b| a.0.cmp(&b.0));
+        let out_sum: f64 = edges.iter().map(|(_, w)| *w).sum();
+
+        if out_sum <= f64::EPSILON {
+            is_dangling[idx] = true;
+        } else {
+            for (_, w) in edges.iter_mut() {
+                *w = damping * (*w / out_sum);
+            }
+        }
+    }
+
+    let mut rank = vec![1.0 / n_f64; n];
+    let mut next = vec![base; n];
+
     for _ in 0..iterations {
-        let mut next: HashMap<u64, f64> =
-            ordered_nodes.iter().copied().map(|id| (id, base)).collect();
+        next.fill(base);
         let mut dangling_mass = 0.0;
 
-        for node_id in &ordered_nodes {
-            let current_rank = *rank.get(node_id).unwrap_or(&0.0);
-            let edges = out_neighbors.get(node_id).cloned().unwrap_or_default();
-            let out_sum: f64 = edges.iter().map(|(_, w)| *w).sum();
+        for (idx, edges) in out_neighbors.iter().enumerate() {
+            let current_rank = rank[idx];
 
-            if out_sum <= f64::EPSILON {
+            if is_dangling[idx] {
                 dangling_mass += current_rank;
                 continue;
             }
 
-            for (target_id, weight) in edges {
-                let contribution = damping * current_rank * (weight / out_sum);
-                if let Some(value) = next.get_mut(&target_id) {
-                    *value += contribution;
-                }
+            for &(target_idx, norm_weight) in edges {
+                next[target_idx] += current_rank * norm_weight;
             }
         }
 
         if dangling_mass > 0.0 {
             let distribute = damping * dangling_mass / n_f64;
-            for value in next.values_mut() {
+            for value in next.iter_mut() {
                 *value += distribute;
             }
         }
 
-        rank = next;
+        std::mem::swap(&mut rank, &mut next);
     }
 
-    rank
+    let mut final_rank = HashMap::with_capacity(n);
+    for (idx, &node_id) in ordered_nodes.iter().enumerate() {
+        final_rank.insert(node_id, rank[idx]);
+    }
+
+    final_rank
 }
 
 #[cfg(test)]
