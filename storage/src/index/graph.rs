@@ -258,7 +258,8 @@ mod tests {
 
     #[test]
     fn test_graph_expand_nonexistent_node() {
-        let graph = AdjacencyGraph::new();
+        let mut graph = AdjacencyGraph::new();
+        graph.add_edge(1, 2, "knows", 1.0);
         let result = graph.expand(999, 1);
         assert!(
             result.is_empty(),
