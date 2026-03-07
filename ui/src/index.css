@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 m-0 p-0 font-sans;
+  }
+}
+
+.graph-node {
+  transition: r 0.2s ease, stroke 0.2s ease, stroke-width 0.2s ease;
+}
+
+.graph-node:hover {
+  r: 22;
+  cursor: pointer;
+}
