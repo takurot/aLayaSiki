@@ -21,6 +21,14 @@ class SuiteProfile:
     ann_args: dict[str, str]
 
 
+@dataclass(frozen=True)
+class OperationalScenario:
+    slug: str
+    family: str
+    description: str
+    env: dict[str, str]
+
+
 def build_profile(name: str) -> SuiteProfile:
     profiles = {
         "baseline": SuiteProfile(
@@ -90,6 +98,139 @@ def build_profile(name: str) -> SuiteProfile:
         raise ValueError(f"unknown profile: {name}") from exc
 
 
+def base_operational_env(
+    *,
+    nodes: int,
+    workers: int,
+    ops_per_worker: int,
+    write_every: int = 10,
+    flush_policy: str = "always",
+    flush_interval_ms: int | None = None,
+    flush_batch_entries: int | None = None,
+    seed_batch_entries: int = 2048,
+) -> dict[str, str]:
+    env = {
+        "ALAYASIKI_BENCH_NODES": str(nodes),
+        "ALAYASIKI_BENCH_WORKERS": str(workers),
+        "ALAYASIKI_BENCH_OPS_PER_WORKER": str(ops_per_worker),
+        "ALAYASIKI_BENCH_WRITE_EVERY": str(write_every),
+        "ALAYASIKI_BENCH_WAL_FLUSH_POLICY": flush_policy,
+        "ALAYASIKI_BENCH_SEED_WAL_BATCH_MAX_ENTRIES": str(seed_batch_entries),
+    }
+    if flush_interval_ms is not None:
+        env["ALAYASIKI_BENCH_WAL_FLUSH_INTERVAL_MS"] = str(flush_interval_ms)
+    if flush_batch_entries is not None:
+        env["ALAYASIKI_BENCH_WAL_FLUSH_BATCH_MAX_ENTRIES"] = str(flush_batch_entries)
+    return env
+
+
+def build_pr14_6_operational_scenarios() -> dict[str, list[OperationalScenario]]:
+    return {
+        "flush_policy": [
+            OperationalScenario(
+                slug="flush_always",
+                family="flush_policy",
+                description="WAL flush policy: always",
+                env=base_operational_env(
+                    nodes=100_000,
+                    workers=8,
+                    ops_per_worker=40,
+                    flush_policy="always",
+                ),
+            ),
+            OperationalScenario(
+                slug="flush_interval_15ms",
+                family="flush_policy",
+                description="WAL flush policy: interval(15ms)",
+                env=base_operational_env(
+                    nodes=100_000,
+                    workers=8,
+                    ops_per_worker=40,
+                    flush_policy="interval",
+                    flush_interval_ms=15,
+                ),
+            ),
+            OperationalScenario(
+                slug="flush_batch_32",
+                family="flush_policy",
+                description="WAL flush policy: batch(32)",
+                env=base_operational_env(
+                    nodes=100_000,
+                    workers=8,
+                    ops_per_worker=40,
+                    flush_policy="batch",
+                    flush_batch_entries=32,
+                ),
+            ),
+        ],
+        "scale": [
+            OperationalScenario(
+                slug="scale_100k_nodes",
+                family="scale",
+                description="Scale sweep: 100k nodes",
+                env=base_operational_env(
+                    nodes=100_000,
+                    workers=8,
+                    ops_per_worker=20,
+                    flush_policy="batch",
+                    flush_batch_entries=32,
+                ),
+            ),
+            OperationalScenario(
+                slug="scale_1m_nodes",
+                family="scale",
+                description="Scale sweep: 1M nodes",
+                env=base_operational_env(
+                    nodes=1_000_000,
+                    workers=8,
+                    ops_per_worker=20,
+                    flush_policy="batch",
+                    flush_batch_entries=32,
+                    seed_batch_entries=4096,
+                ),
+            ),
+        ],
+        "workers": [
+            OperationalScenario(
+                slug="workers_8",
+                family="workers",
+                description="Worker sweep: 8 workers",
+                env=base_operational_env(
+                    nodes=100_000,
+                    workers=8,
+                    ops_per_worker=30,
+                    flush_policy="batch",
+                    flush_batch_entries=32,
+                ),
+            ),
+            OperationalScenario(
+                slug="workers_32",
+                family="workers",
+                description="Worker sweep: 32 workers",
+                env=base_operational_env(
+                    nodes=100_000,
+                    workers=32,
+                    ops_per_worker=30,
+                    flush_policy="batch",
+                    flush_batch_entries=32,
+                ),
+            ),
+            OperationalScenario(
+                slug="workers_128",
+                family="workers",
+                description="Worker sweep: 128 workers",
+                env=base_operational_env(
+                    nodes=100_000,
+                    workers=128,
+                    ops_per_worker=30,
+                    flush_policy="batch",
+                    flush_batch_entries=32,
+                ),
+            ),
+        ],
+    }
+
+
 def load_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         print(f"[warn] JSON result file not found: {path}")
@@ -153,6 +294,103 @@ def build_suite_report(
     }
 
 
+def extract_operational_metrics(result: dict[str, Any]) -> dict[str, Any]:
+    config = result.get("config", {})
+    totals = result.get("totals", {})
+    read_latency = result.get("read_latency_ns", {})
+    write_latency = result.get("write_latency_ns", {})
+    return {
+        "nodes": config.get("nodes", 0),
+        "workers": config.get("workers", 0),
+        "ops_per_worker": config.get("ops_per_worker", 0),
+        "write_every": config.get("write_every", 0),
+        "read_to_write_ratio": config.get("read_to_write_ratio", ""),
+        "wal_flush_policy": config.get("wal_flush_policy", ""),
+        "seed_wal_flush_policy": config.get("seed_wal_flush_policy", ""),
+        "throughput_ops_per_sec": totals.get("throughput_ops_per_sec", 0.0),
+        "read_p95_ms": read_latency.get("p95_ms", 0.0),
+        "write_p95_ms": write_latency.get("p95_ms", 0.0),
+        "read_p99_ms": read_latency.get("p99_ms", 0.0),
+        "write_p99_ms": write_latency.get("p99_ms", 0.0),
+    }
+
+
+def validate_operational_metrics(metrics: dict[str, Any], scenario_slug: str) -> None:
+    required_numeric_fields = ("nodes", "workers", "ops_per_worker", "write_every")
+    missing_numeric = [field for field in required_numeric_fields if metrics[field] <= 0]
+    required_text_fields = (
+        "read_to_write_ratio",
+        "wal_flush_policy",
+        "seed_wal_flush_policy",
+    )
+    missing_text = [field for field in required_text_fields if not metrics[field]]
+    if missing_numeric or missing_text or metrics["throughput_ops_per_sec"] <= 0.0:
+        details = []
+        if missing_numeric:
+            details.append(f"numeric={','.join(missing_numeric)}")
+        if missing_text:
+            details.append(f"text={','.join(missing_text)}")
+        if metrics["throughput_ops_per_sec"] <= 0.0:
+            details.append("throughput_ops_per_sec<=0")
+        raise ValueError(
+            f"invalid operational result for scenario '{scenario_slug}': {'; '.join(details)}"
+        )
+
+
+def compute_relative_delta(value: float, baseline: float) -> float:
+    if baseline == 0.0:
+        return 0.0
+    return ((value - baseline) / baseline) * 100.0
+
+
+def build_pr14_6_operational_report(
+    scenario_groups: dict[str, list[OperationalScenario]],
+    results_dir: Path,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "analysis": "pr14_6_operational_matrix",
+        "generated_at_unix": int(time.time()),
+        "scenario_groups": {},
+    }
+
+    for family, scenarios in scenario_groups.items():
+        family_rows: list[dict[str, Any]] = []
+        baseline_metrics: dict[str, Any] | None = None
+
+        for scenario in scenarios:
+            scenario_path = results_dir / f"pr14_6_operational_{scenario.slug}.json"
+            metrics = extract_operational_metrics(load_json(scenario_path))
+            validate_operational_metrics(metrics, scenario.slug)
+            row = {
+                "slug": scenario.slug,
+                "description": scenario.description,
+                **metrics,
+            }
+            if baseline_metrics is None:
+                baseline_metrics = metrics
+                row["delta_vs_baseline"] = {
+                    "throughput_pct": 0.0,
+                    "read_p95_ms": 0.0,
+                    "write_p95_ms": 0.0,
+                }
+            else:
+                row["delta_vs_baseline"] = {
+                    "throughput_pct": compute_relative_delta(
+                        metrics["throughput_ops_per_sec"],
+                        baseline_metrics["throughput_ops_per_sec"],
+                    ),
+                    "read_p95_ms": metrics["read_p95_ms"]
+                    - baseline_metrics["read_p95_ms"],
+                    "write_p95_ms": metrics["write_p95_ms"]
+                    - baseline_metrics["write_p95_ms"],
+                }
+            family_rows.append(row)
+
+        report["scenario_groups"][family] = family_rows
+
+    return report
+
+
 def render_markdown_summary(report: dict[str, Any]) -> str:
     lines = [
         "# PR-14 Benchmark Suite Summary",
@@ -191,17 +429,80 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_pr14_6_operational_summary(report: dict[str, Any]) -> str:
+    lines = [
+        "# PR-14.6 Operational Matrix Summary",
+        "",
+        "- Scope: WAL flush policy comparison, `10^5 -> 10^6` scale sweep, worker degradation curve (`8/32/128`).",
+        "",
+    ]
+
+    labels = {
+        "flush_policy": "WAL Flush Policy",
+        "scale": "Scale Sweep",
+        "workers": "Worker Sweep",
+    }
+
+    for family in ("flush_policy", "scale", "workers"):
+        rows = report["scenario_groups"].get(family, [])
+        lines.append(f"## {labels[family]}")
+        for row in rows:
+            delta = row["delta_vs_baseline"]
+            lines.extend(
+                [
+                    f"- {row['description']}",
+                    (
+                        f"  nodes={row['nodes']}, workers={row['workers']}, "
+                        f"wal={row['wal_flush_policy']}, throughput={row['throughput_ops_per_sec']:.2f} ops/s, "
+                        f"read p95={row['read_p95_ms']:.2f} ms, write p95={row['write_p95_ms']:.2f} ms"
+                    ),
+                    (
+                        f"  vs baseline: throughput={delta['throughput_pct']:+.2f}%, "
+                        f"read p95={delta['read_p95_ms']:+.2f} ms, "
+                        f"write p95={delta['write_p95_ms']:+.2f} ms"
+                    ),
+                ]
+            )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def run_command(
     label: str,
     command: list[str],
     cwd: Path,
     extra_env: dict[str, str] | None = None,
+    cleared_env_prefixes: tuple[str, ...] = (),
 ) -> None:
-    env = os.environ.copy()
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not any(key.startswith(prefix) for prefix in cleared_env_prefixes)
+    }
     if extra_env:
         env.update(extra_env)
     print(f"[run] {label}: {' '.join(command)}")
     subprocess.run(command, cwd=cwd, env=env, check=True)
+
+
+def run_operational_scenario(
+    scenario: OperationalScenario,
+    repo_root: Path,
+    results_dir: Path,
+) -> None:
+    run_command(
+        scenario.description,
+        ["cargo", "bench", "-p", "prototypes", "--bench", "operational_latency_bench"],
+        repo_root,
+        {
+            **scenario.env,
+            "ALAYASIKI_BENCH_RESULTS_PATH": str(
+                results_dir / f"pr14_6_operational_{scenario.slug}.json"
+            ),
+        },
+        cleared_env_prefixes=("ALAYASIKI_BENCH_",),
+    )
 
 
 def write_text(path: Path, content: str) -> None:
@@ -270,8 +571,29 @@ def run_suite(profile: SuiteProfile, repo_root: Path, results_dir: Path) -> dict
     return report
 
 
+def run_pr14_6_operational_analysis(repo_root: Path, results_dir: Path) -> dict[str, Any]:
+    scenario_groups = build_pr14_6_operational_scenarios()
+    for family in ("flush_policy", "scale", "workers"):
+        for scenario in scenario_groups[family]:
+            run_operational_scenario(scenario, repo_root, results_dir)
+
+    report = build_pr14_6_operational_report(scenario_groups, results_dir)
+    write_json(results_dir / "pr14_6_operational_matrix.json", report)
+    write_text(
+        results_dir / "pr14_6_operational_matrix.md",
+        render_pr14_6_operational_summary(report),
+    )
+    return report
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        default="suite",
+        choices=["suite", "pr14-6-operational"],
+        help="Run the original PR-14 benchmark suite or the PR-14.6 operational matrix.",
+    )
     parser.add_argument("--profile", default="baseline", choices=["baseline", "scale"])
     parser.add_argument(
         "--results-dir",
@@ -289,9 +611,14 @@ def main() -> None:
         results_dir = requested_results_dir
     else:
         results_dir = (repo_root / requested_results_dir).resolve()
-    profile = build_profile(args.profile)
-    report = run_suite(profile, repo_root, results_dir)
-    print(render_markdown_summary(report))
+    if args.mode == "suite":
+        profile = build_profile(args.profile)
+        report = run_suite(profile, repo_root, results_dir)
+        print(render_markdown_summary(report))
+        return
+
+    report = run_pr14_6_operational_analysis(repo_root, results_dir)
+    print(render_pr14_6_operational_summary(report))
 
 
 if __name__ == "__main__":

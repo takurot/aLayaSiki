@@ -353,6 +353,9 @@
 - CI に `Benchmark Gate (graphrag p95 thresholds)` ジョブを追加し、`ALAYASIKI_GRAPHRAG_MAX_READ_P95_MS` / `ALAYASIKI_GRAPHRAG_MAX_WRITE_P95_MS` / `ALAYASIKI_GRAPHRAG_MIN_THROUGHPUT` による回帰判定を常時実行
 - Operational ベンチ条件を baseline プロファイル（`nodes=4000, workers=6, ops_per_worker=100, read:write=9:1`）へ統一し、閾値を `read_p95<=30ms`, `write_p95<=200ms`, `throughput>=250ops/s` に更新
 - ANN ベンチ入力を baseline（`n_samples=10000, n_dims=128, n_queries=100, top_k=10, seed=42`）に合わせ、回帰率閾値を `10.0` から `2.0` に引き締め
+- `prototypes/benches/operational_latency_bench.rs` は `ALAYASIKI_BENCH_WAL_FLUSH_POLICY`（`always` / `interval` / `batch`）と seed 用 batch flush を受け付けるよう拡張し、WAL flush 方針比較と大規模 seed を同じベンチで扱えるようにした
+- `benchmarks/benchmark_suite.py --mode pr14-6-operational` を追加し、WAL flush 比較・`10^5 -> 10^6` ノード scale sweep・`8/32/128` worker sweep を `benchmarks/results/pr14_6_operational_*.json` と `pr14_6_operational_matrix.{json,md}` に保存できるようにした
+- 長時間の実ベンチ結果はこの変更では未同梱。上記 runner を実行して成果物を生成し、閾値/採用 flush policy を確定した時点でチェックボックスを更新する
 
 ---
 

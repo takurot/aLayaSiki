@@ -25,6 +25,12 @@ Run the larger manual profile:
 .venv-benchmarks/bin/python benchmarks/benchmark_suite.py --profile scale
 ```
 
+Run the `PR-14.6` operational matrix:
+
+```bash
+.venv-benchmarks/bin/python benchmarks/benchmark_suite.py --mode pr14-6-operational
+```
+
 ## Outputs
 
 The runner writes:
@@ -37,3 +43,15 @@ The runner writes:
 - `benchmarks/results/pr14_suite_<profile>.md`
 
 `pr14_suite_<profile>.md` is the top-level summary artifact for PR-14.
+
+When `--mode pr14-6-operational` is used, the runner also writes:
+
+- `benchmarks/results/pr14_6_operational_<scenario>.json`
+- `benchmarks/results/pr14_6_operational_matrix.json`
+- `benchmarks/results/pr14_6_operational_matrix.md`
+
+The PR-14.6 matrix covers:
+
+- WAL flush policy comparison (`always`, `interval(15ms)`, `batch(32)`)
+- Scale sweep (`10^5`, `10^6` nodes)
+- Worker sweep (`8`, `32`, `128` workers)
