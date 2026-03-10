@@ -1,13 +1,42 @@
-use alayasiki_core::ingest::IngestionRequest;
-use ingestion::chunker::SemanticChunker;
+use alayasiki_core::ingest::{Chunk, IngestionRequest};
+use ingestion::chunker::{BoxFuture, Chunker, SemanticChunker};
 use ingestion::embedding::DeterministicEmbedder;
 use ingestion::policy::BasicPolicy;
 use ingestion::processor::IngestionPipeline;
 use std::collections::HashMap;
 use std::sync::Arc;
 use storage::repo::Repository;
+use storage::wal::Wal;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
+
+struct FixedChunker {
+    chunks: Vec<String>,
+}
+
+impl Chunker for FixedChunker {
+    fn chunk<'a>(
+        &'a self,
+        _content: &'a str,
+        base_metadata: HashMap<String, String>,
+    ) -> BoxFuture<'a, Vec<Chunk>> {
+        Box::pin(async move {
+            self.chunks
+                .iter()
+                .enumerate()
+                .map(|(index, content)| {
+                    let mut metadata = base_metadata.clone();
+                    metadata.insert("chunk_index".to_string(), index.to_string());
+                    Chunk {
+                        content: content.clone(),
+                        metadata,
+                        embedding: None,
+                    }
+                })
+                .collect()
+        })
+    }
+}
 
 #[tokio::test]
 async fn test_ingestion_flow() {
@@ -65,6 +94,65 @@ async fn test_ingestion_idempotency_key() {
     let second_ids = pipeline.ingest(request).await.unwrap();
 
     assert_eq!(first_ids, second_ids);
+}
+
+#[tokio::test]
+async fn test_ingestion_batches_chunks_and_idempotency_into_single_wal_record() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("batched_ingest.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let pipeline = IngestionPipeline::with_components(
+        repo.clone(),
+        Box::new(FixedChunker {
+            chunks: vec!["chunk-a".to_string(), "chunk-b".to_string()],
+        }),
+        Box::new(DeterministicEmbedder::default()),
+        Box::new(BasicPolicy::new(Vec::new(), false)),
+        "embedding-default-v1",
+    );
+
+    let request = IngestionRequest::Text {
+        content: "ignored by fixed chunker".to_string(),
+        metadata: HashMap::new(),
+        idempotency_key: Some("batched-key".to_string()),
+        model_id: None,
+    };
+
+    let node_ids = pipeline.ingest(request.clone()).await.unwrap();
+    assert_eq!(node_ids.len(), 2);
+    assert_eq!(repo.current_snapshot_id().await, "wal-lsn-1");
+    assert_eq!(
+        repo.check_idempotency("batched-key").await,
+        Some(node_ids.clone())
+    );
+    assert_eq!(
+        pipeline.ingest(request).await.unwrap(),
+        node_ids,
+        "idempotent retry should reuse previously committed node ids"
+    );
+
+    drop(pipeline);
+    drop(repo);
+
+    let reopened = Arc::new(Repository::open(&wal_path).await.unwrap());
+    assert_eq!(reopened.current_snapshot_id().await, "wal-lsn-1");
+    assert_eq!(
+        reopened.check_idempotency("batched-key").await,
+        Some(node_ids.clone())
+    );
+
+    let mut wal = Wal::open(&wal_path).await.unwrap();
+    let mut record_count = 0usize;
+
+    wal.replay(|_lsn, _payload| {
+        record_count += 1;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(record_count, 1);
 }
 
 #[tokio::test]

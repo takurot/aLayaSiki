@@ -327,6 +327,8 @@ impl IngestionPipeline {
         let chunks = self.chunker.chunk(&text, metadata).await;
 
         let mut node_ids = Vec::new();
+        let mut persistent_nodes = Vec::new();
+        let mut queued_extractions = Vec::new();
         for (i, mut chunk) in chunks.into_iter().enumerate() {
             let embedding = self
                 .embedder
@@ -352,19 +354,31 @@ impl IngestionPipeline {
                     self.repo.ingest_to_session(sid, node);
                 }
             } else {
-                self.repo.put_node(node).await?;
+                persistent_nodes.push(node);
+                queued_extractions.push((chunk_id, chunk_content));
             }
             node_ids.push(chunk_id);
+        }
 
-            // Enqueue Job if queue is present (only if NOT session ingest)
-            if session_id.is_none() {
-                if let Some(queue) = &self.job_queue {
-                    let snapshot_id = self.repo.current_snapshot_id().await;
+        // 2. Record Idempotency persistently (only if NOT session ingest)
+        if session_id.is_none() {
+            let mut idempotency_records = vec![(content_hash.clone(), node_ids.clone())];
+            if let Some(key) = &idempotency_key {
+                idempotency_records.push((key.clone(), node_ids.clone()));
+            }
+
+            self.repo
+                .persist_ingest_batch(persistent_nodes, idempotency_records)
+                .await?;
+
+            if let Some(queue) = &self.job_queue {
+                let snapshot_id = self.repo.current_snapshot_id().await;
+                for (chunk_id, chunk_content) in queued_extractions {
                     let job = Job::ExtractEntities {
                         node_id: chunk_id,
                         content: chunk_content,
                         model_id: extraction_model_id.clone(),
-                        snapshot_id,
+                        snapshot_id: snapshot_id.clone(),
                     };
                     if let Err(e) = queue.enqueue(job).await {
                         // Best-effort: Log warning but continue ingestion to preserve idempotency
@@ -372,16 +386,6 @@ impl IngestionPipeline {
                     }
                 }
             }
-        }
-
-        // 2. Record Idempotency persistently (only if NOT session ingest)
-        if session_id.is_none() {
-            if let Some(key) = &idempotency_key {
-                self.repo.record_idempotency(key, node_ids.clone()).await?;
-            }
-            self.repo
-                .record_idempotency(&content_hash, node_ids.clone())
-                .await?;
         }
 
         // Guard will automatically remove lock on drop

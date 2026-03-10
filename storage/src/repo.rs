@@ -74,6 +74,7 @@ pub enum TxOperation {
     Put(Node),
     PutEdge(Edge),
     Delete(u64),
+    RecordIdempotency { key: String, node_ids: Vec<u64> },
 }
 
 #[derive(Debug, Clone)]
@@ -701,6 +702,60 @@ impl Repository {
 
         Ok(())
     }
+
+    /// Persist a batch of ingested nodes and their idempotency keys in one WAL transaction.
+    pub async fn persist_ingest_batch(
+        &self,
+        nodes_to_put: Vec<Node>,
+        idempotency_records: Vec<(String, Vec<u64>)>,
+    ) -> Result<(), RepoError> {
+        if nodes_to_put.is_empty() && idempotency_records.is_empty() {
+            return Ok(());
+        }
+
+        let _tx_guard = self.tx_lock.lock().await;
+
+        let node_mutations: Vec<IndexMutation> = nodes_to_put
+            .iter()
+            .cloned()
+            .map(IndexMutation::PutNode)
+            .collect();
+        self.validate_index_transaction(&node_mutations).await?;
+
+        let mut tx_operations = mutations_to_tx_operations(&node_mutations);
+        tx_operations.extend(idempotency_records.iter().map(|(key, node_ids)| {
+            TxOperation::RecordIdempotency {
+                key: key.clone(),
+                node_ids: node_ids.clone(),
+            }
+        }));
+
+        let tx_entry = WalEntry::Transaction(tx_operations.clone());
+        let tx_bytes = serialize_wal_entry(&tx_entry)?;
+
+        {
+            let mut wal = self.wal.lock().await;
+            wal.append(&tx_bytes).await?;
+        }
+
+        let mut nodes = self.nodes.write().await;
+        let mut index = self.hyper_index.write().await;
+        let mut idempotency_index = self.idempotency_index.write().await;
+        let mut edge_meta = self.edge_metadata.write().await;
+
+        for operation in &tx_operations {
+            apply_tx_operation(
+                operation,
+                &mut nodes,
+                &mut index,
+                &mut idempotency_index,
+                &mut edge_meta,
+            );
+        }
+
+        Ok(())
+    }
+
     pub async fn check_idempotency(&self, key: &str) -> Option<Vec<u64>> {
         let index = self.idempotency_index.read().await;
         index.get(key).cloned()
@@ -1142,16 +1197,17 @@ fn apply_replayed_entry(
         }
         WalEntry::Transaction(operations) => {
             for operation in operations {
-                apply_replayed_tx_operation(operation, node_map, h_index, edge_meta);
+                apply_tx_operation(operation, node_map, h_index, idem_map, edge_meta);
             }
         }
     }
 }
 
-fn apply_replayed_tx_operation(
+fn apply_tx_operation(
     operation: &TxOperation,
     node_map: &mut HashMap<u64, Node>,
     h_index: &mut HyperIndex,
+    idem_map: &mut HashMap<String, Vec<u64>>,
     edge_meta: &mut HashMap<EdgeMetaKey, HashMap<String, String>>,
 ) {
     match operation {
@@ -1174,6 +1230,9 @@ fn apply_replayed_tx_operation(
             node_map.remove(id);
             h_index.remove_node(*id);
             edge_meta.retain(|(src, tgt, _), _| *src != *id && *tgt != *id);
+        }
+        TxOperation::RecordIdempotency { key, node_ids } => {
+            idem_map.insert(key.clone(), node_ids.clone());
         }
     }
 }
@@ -1388,6 +1447,67 @@ mod tests {
             "transaction should be written as one WAL record"
         );
         assert_eq!(tx_mutation_count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_persist_ingest_batch_persists_nodes_and_idempotency_in_single_wal_record() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("ingest_batch_single_record.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        let node_ids = vec![11_u64, 12_u64];
+        repo.persist_ingest_batch(
+            vec![
+                Node::new(node_ids[0], vec![1.0], "N1".to_string()),
+                Node::new(node_ids[1], vec![2.0], "N2".to_string()),
+            ],
+            vec![
+                ("content-hash".to_string(), node_ids.clone()),
+                ("request-key".to_string(), node_ids.clone()),
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(repo.current_snapshot_id().await, "wal-lsn-1");
+        assert_eq!(
+            repo.check_idempotency("request-key").await,
+            Some(node_ids.clone())
+        );
+
+        drop(repo);
+
+        let reopened = Repository::open(&wal_path).await.unwrap();
+        assert_eq!(reopened.list_node_ids().await, node_ids);
+        assert_eq!(
+            reopened.check_idempotency("content-hash").await,
+            Some(vec![11, 12])
+        );
+
+        let mut wal = Wal::open(&wal_path).await.unwrap();
+        let mut record_count = 0usize;
+        let mut tx_mutation_count = 0usize;
+
+        wal.replay(|_lsn, payload| {
+            record_count += 1;
+            let archived = rkyv::check_archived_root::<WalEntry>(&payload[..])
+                .map_err(|_| WalError::CorruptEntry)?;
+            let entry: WalEntry = archived.deserialize(&mut rkyv::Infallible).unwrap();
+
+            match entry {
+                WalEntry::Transaction(entries) => {
+                    tx_mutation_count = entries.len();
+                }
+                _ => return Err(WalError::CorruptEntry),
+            }
+
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(record_count, 1);
+        assert_eq!(tx_mutation_count, 4);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

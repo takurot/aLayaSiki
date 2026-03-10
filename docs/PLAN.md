@@ -338,7 +338,7 @@
 
 * Depends on: PR-14.5
 
-- [ ] **Writeレイテンシ改善**: ingest の WAL flush 周りを計測し、group commit / バッチ書き込みの改善案を検証
+- [x] **Writeレイテンシ改善**: ingest の WAL flush 周りを計測し、group commit / バッチ書き込みの改善案を検証
 - [ ] **スケール検証拡張**: `10^5 -> 10^6` ノードで read/write p50/p95/p99 と throughput を比較
 - [ ] **並列度検証**: worker 数（8/32/128）別に read:write=9:1 の劣化カーブを取得
 - [x] **結果保存の標準化**: ベンチ結果を `benchmarks/results/*.json` に出力し、比較可能な履歴を残す
@@ -355,6 +355,8 @@
 - ANN ベンチ入力を baseline（`n_samples=10000, n_dims=128, n_queries=100, top_k=10, seed=42`）に合わせ、回帰率閾値を `10.0` から `2.0` に引き締め
 - `prototypes/benches/operational_latency_bench.rs` は `ALAYASIKI_BENCH_WAL_FLUSH_POLICY`（`always` / `interval` / `batch`）と seed 用 batch flush を受け付けるよう拡張し、WAL flush 方針比較と大規模 seed を同じベンチで扱えるようにした
 - `benchmarks/benchmark_suite.py --mode pr14-6-operational` を追加し、WAL flush 比較・`10^5 -> 10^6` ノード scale sweep・`8/32/128` worker sweep を `benchmarks/results/pr14_6_operational_*.json` と `pr14_6_operational_matrix.{json,md}` に保存できるようにした
+- ingest 永続化を `Repository::persist_ingest_batch` に集約し、複数チャンク文書でも node 書き込み + idempotency 記録を 1 WAL transaction にまとめるよう変更
+- baseline 条件 (`nodes=4000, workers=6, ops_per_worker=100, write_every=10`) の再計測結果を `benchmarks/results/operational_latency_pr14_6_write_batch.json` に保存し、既存 baseline 比で throughput `389.38 -> 917.39 ops/s`、read p95 `16.96 -> 11.76 ms`、write p95 `188.67 -> 69.40 ms` を確認
 - 長時間の実ベンチ結果はこの変更では未同梱。上記 runner を実行して成果物を生成し、閾値/採用 flush policy を確定した時点でチェックボックスを更新する
 
 ---
