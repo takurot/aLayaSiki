@@ -91,6 +91,17 @@ fn parse_wal_flush_policy() -> WalFlushPolicy {
     }
 }
 
+fn normalize_wal_flush_policy(policy: WalFlushPolicy) -> WalFlushPolicy {
+    match policy {
+        WalFlushPolicy::Always => WalFlushPolicy::Always,
+        WalFlushPolicy::Interval(interval) if interval.is_zero() => WalFlushPolicy::Always,
+        WalFlushPolicy::Interval(interval) => WalFlushPolicy::Interval(interval),
+        WalFlushPolicy::Batch { max_entries } => WalFlushPolicy::Batch {
+            max_entries: max_entries.max(1),
+        },
+    }
+}
+
 fn format_wal_flush_policy(policy: WalFlushPolicy) -> String {
     match policy {
         WalFlushPolicy::Always => "always".to_string(),
@@ -148,11 +159,11 @@ async fn main() {
     let workers = env_usize("ALAYASIKI_BENCH_WORKERS", 8);
     let ops_per_worker = env_usize("ALAYASIKI_BENCH_OPS_PER_WORKER", 120);
     let write_every = env_usize("ALAYASIKI_BENCH_WRITE_EVERY", 10).max(1);
-    let wal_flush_policy = parse_wal_flush_policy();
+    let wal_flush_policy = normalize_wal_flush_policy(parse_wal_flush_policy());
     let seed_batch_entries = env_usize("ALAYASIKI_BENCH_SEED_WAL_BATCH_MAX_ENTRIES", 1_024);
-    let seed_wal_flush_policy = WalFlushPolicy::Batch {
+    let seed_wal_flush_policy = normalize_wal_flush_policy(WalFlushPolicy::Batch {
         max_entries: seed_batch_entries.max(1),
-    };
+    });
     let results_path = env::var("ALAYASIKI_BENCH_RESULTS_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| default_results_path());
@@ -252,6 +263,9 @@ async fn main() {
         handle.await.unwrap();
     }
 
+    // Buffered WAL policies need an explicit final flush so the scenario only
+    // completes after all measured writes reach durable storage.
+    repo.flush().await.unwrap();
     let total_elapsed = scenario_start.elapsed();
     let read_samples = read_latencies.lock().await.clone();
     let write_samples = write_latencies.lock().await.clone();

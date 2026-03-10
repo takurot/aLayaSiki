@@ -315,6 +315,28 @@ def extract_operational_metrics(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_operational_metrics(metrics: dict[str, Any], scenario_slug: str) -> None:
+    required_numeric_fields = ("nodes", "workers", "ops_per_worker", "write_every")
+    missing_numeric = [field for field in required_numeric_fields if metrics[field] <= 0]
+    required_text_fields = (
+        "read_to_write_ratio",
+        "wal_flush_policy",
+        "seed_wal_flush_policy",
+    )
+    missing_text = [field for field in required_text_fields if not metrics[field]]
+    if missing_numeric or missing_text or metrics["throughput_ops_per_sec"] <= 0.0:
+        details = []
+        if missing_numeric:
+            details.append(f"numeric={','.join(missing_numeric)}")
+        if missing_text:
+            details.append(f"text={','.join(missing_text)}")
+        if metrics["throughput_ops_per_sec"] <= 0.0:
+            details.append("throughput_ops_per_sec<=0")
+        raise ValueError(
+            f"invalid operational result for scenario '{scenario_slug}': {'; '.join(details)}"
+        )
+
+
 def compute_relative_delta(value: float, baseline: float) -> float:
     if baseline == 0.0:
         return 0.0
@@ -338,6 +360,7 @@ def build_pr14_6_operational_report(
         for scenario in scenarios:
             scenario_path = results_dir / f"pr14_6_operational_{scenario.slug}.json"
             metrics = extract_operational_metrics(load_json(scenario_path))
+            validate_operational_metrics(metrics, scenario.slug)
             row = {
                 "slug": scenario.slug,
                 "description": scenario.description,
@@ -450,8 +473,13 @@ def run_command(
     command: list[str],
     cwd: Path,
     extra_env: dict[str, str] | None = None,
+    cleared_env_prefixes: tuple[str, ...] = (),
 ) -> None:
-    env = os.environ.copy()
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not any(key.startswith(prefix) for prefix in cleared_env_prefixes)
+    }
     if extra_env:
         env.update(extra_env)
     print(f"[run] {label}: {' '.join(command)}")
@@ -473,6 +501,7 @@ def run_operational_scenario(
                 results_dir / f"pr14_6_operational_{scenario.slug}.json"
             ),
         },
+        cleared_env_prefixes=("ALAYASIKI_BENCH_",),
     )
 
 

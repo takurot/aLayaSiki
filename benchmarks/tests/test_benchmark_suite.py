@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "benchmark_suite.py"
@@ -250,6 +251,46 @@ class BenchmarkSuiteTests(unittest.TestCase):
             self.assertEqual(worker_rows[2]["workers"], 128)
             self.assertAlmostEqual(
                 worker_rows[2]["delta_vs_baseline"]["write_p95_ms"], 52.0
+            )
+
+    def test_build_pr14_6_operational_report_rejects_missing_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results_dir = Path(tmp)
+            scenario_groups = benchmark_suite.build_pr14_6_operational_scenarios()
+
+            with self.assertRaisesRegex(ValueError, "flush_always"):
+                benchmark_suite.build_pr14_6_operational_report(
+                    scenario_groups, results_dir
+                )
+
+    def test_run_operational_scenario_clears_ambient_bench_env(self) -> None:
+        scenario = benchmark_suite.build_pr14_6_operational_scenarios()["flush_policy"][0]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            results_dir = repo_root / "results"
+            with mock.patch.dict(
+                benchmark_suite.os.environ,
+                {
+                    "ALAYASIKI_BENCH_MIN_THROUGHPUT": "250",
+                    "ALAYASIKI_BENCH_MAX_READ_P95_MS": "30",
+                    "ALAYASIKI_BENCH_STRAY": "stale",
+                },
+                clear=False,
+            ):
+                with mock.patch.object(benchmark_suite.subprocess, "run") as run_mock:
+                    benchmark_suite.run_operational_scenario(
+                        scenario, repo_root, results_dir
+                    )
+
+            env = run_mock.call_args.kwargs["env"]
+            self.assertNotIn("ALAYASIKI_BENCH_MIN_THROUGHPUT", env)
+            self.assertNotIn("ALAYASIKI_BENCH_MAX_READ_P95_MS", env)
+            self.assertNotIn("ALAYASIKI_BENCH_STRAY", env)
+            self.assertEqual(env["ALAYASIKI_BENCH_NODES"], "100000")
+            self.assertEqual(
+                env["ALAYASIKI_BENCH_RESULTS_PATH"],
+                str(results_dir / "pr14_6_operational_flush_always.json"),
             )
 
 
