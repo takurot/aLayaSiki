@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use alayasiki_core::embedding::deterministic_embedding;
@@ -14,6 +15,7 @@ use prototypes::bench_eval::{
 use query::{QueryEngine, QueryRequest};
 use serde::Serialize;
 use storage::repo::Repository;
+use storage::wal::{WalFlushPolicy, WalOptions};
 
 const DIMS: usize = 32;
 const MODEL_ID: &str = "embedding-default-v1";
@@ -35,6 +37,8 @@ struct ReportConfig {
     ops_per_worker: usize,
     write_every: usize,
     read_to_write_ratio: String,
+    wal_flush_policy: String,
+    seed_wal_flush_policy: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +66,37 @@ fn env_u64(key: &str, default: u64) -> u64 {
 
 fn env_f64(key: &str) -> Option<f64> {
     env::var(key).ok().and_then(|v| v.parse::<f64>().ok())
+}
+
+fn env_u64_optional(key: &str) -> Option<u64> {
+    env::var(key).ok().and_then(|v| v.parse::<u64>().ok())
+}
+
+fn parse_wal_flush_policy() -> WalFlushPolicy {
+    match env::var("ALAYASIKI_BENCH_WAL_FLUSH_POLICY")
+        .unwrap_or_else(|_| "always".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "always" => WalFlushPolicy::Always,
+        "interval" => WalFlushPolicy::Interval(Duration::from_millis(
+            env_u64_optional("ALAYASIKI_BENCH_WAL_FLUSH_INTERVAL_MS").unwrap_or(10),
+        )),
+        "batch" => WalFlushPolicy::Batch {
+            max_entries: env_usize("ALAYASIKI_BENCH_WAL_FLUSH_BATCH_MAX_ENTRIES", 16),
+        },
+        other => panic!(
+            "unsupported ALAYASIKI_BENCH_WAL_FLUSH_POLICY value: {other} (expected always|interval|batch)"
+        ),
+    }
+}
+
+fn format_wal_flush_policy(policy: WalFlushPolicy) -> String {
+    match policy {
+        WalFlushPolicy::Always => "always".to_string(),
+        WalFlushPolicy::Interval(interval) => format!("interval:{}ms", interval.as_millis()),
+        WalFlushPolicy::Batch { max_entries } => format!("batch:{max_entries}"),
+    }
 }
 
 fn default_results_path() -> PathBuf {
@@ -113,15 +148,44 @@ async fn main() {
     let workers = env_usize("ALAYASIKI_BENCH_WORKERS", 8);
     let ops_per_worker = env_usize("ALAYASIKI_BENCH_OPS_PER_WORKER", 120);
     let write_every = env_usize("ALAYASIKI_BENCH_WRITE_EVERY", 10).max(1);
+    let wal_flush_policy = parse_wal_flush_policy();
+    let seed_batch_entries = env_usize("ALAYASIKI_BENCH_SEED_WAL_BATCH_MAX_ENTRIES", 1_024);
+    let seed_wal_flush_policy = WalFlushPolicy::Batch {
+        max_entries: seed_batch_entries.max(1),
+    };
     let results_path = env::var("ALAYASIKI_BENCH_RESULTS_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| default_results_path());
 
     let temp_dir = tempfile::tempdir().unwrap();
     let wal_path = temp_dir.path().join("operational_latency_bench.wal");
-    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+    let seed_repo_handle = Arc::new(
+        Repository::open_with_options(
+            &wal_path,
+            WalOptions {
+                flush_policy: seed_wal_flush_policy,
+                ..WalOptions::default()
+            },
+        )
+        .await
+        .unwrap(),
+    );
 
-    seed_repo(&repo, node_count).await;
+    seed_repo(&seed_repo_handle, node_count).await;
+    seed_repo_handle.flush().await.unwrap();
+    drop(seed_repo_handle);
+
+    let repo = Arc::new(
+        Repository::open_with_options(
+            &wal_path,
+            WalOptions {
+                flush_policy: wal_flush_policy,
+                ..WalOptions::default()
+            },
+        )
+        .await
+        .unwrap(),
+    );
 
     let read_latencies = Arc::new(tokio::sync::Mutex::new(Vec::<u128>::new()));
     let write_latencies = Arc::new(tokio::sync::Mutex::new(Vec::<u128>::new()));
@@ -209,6 +273,8 @@ async fn main() {
             ops_per_worker,
             write_every,
             read_to_write_ratio: format!("{}:1", write_every.saturating_sub(1)),
+            wal_flush_policy: format_wal_flush_policy(wal_flush_policy),
+            seed_wal_flush_policy: format_wal_flush_policy(seed_wal_flush_policy),
         },
         totals: Totals {
             elapsed_sec: total_elapsed.as_secs_f64(),
@@ -225,13 +291,15 @@ async fn main() {
 
     println!("=== Operational Latency Benchmark (Query + Ingestion) ===");
     println!(
-        "config: nodes={}, workers={}, ops_per_worker={}, write_every={} (read:write ~= {}:{})",
+        "config: nodes={}, workers={}, ops_per_worker={}, write_every={} (read:write ~= {}:{}), wal_flush_policy={}, seed_wal_flush_policy={}",
         node_count,
         workers,
         ops_per_worker,
         write_every,
         write_every - 1,
-        1
+        1,
+        report.config.wal_flush_policy,
+        report.config.seed_wal_flush_policy
     );
     println!(
         "workload: total_ops={}, read_ops={}, write_ops={}, elapsed={:.3}s, throughput={:.2} ops/s",
