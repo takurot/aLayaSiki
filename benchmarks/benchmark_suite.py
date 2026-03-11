@@ -299,6 +299,7 @@ def extract_operational_metrics(result: dict[str, Any]) -> dict[str, Any]:
     totals = result.get("totals", {})
     read_latency = result.get("read_latency_ns", {})
     write_latency = result.get("write_latency_ns", {})
+    durability_barrier = result.get("durability_barrier", {})
     return {
         "nodes": config.get("nodes", 0),
         "workers": config.get("workers", 0),
@@ -307,11 +308,13 @@ def extract_operational_metrics(result: dict[str, Any]) -> dict[str, Any]:
         "read_to_write_ratio": config.get("read_to_write_ratio", ""),
         "wal_flush_policy": config.get("wal_flush_policy", ""),
         "seed_wal_flush_policy": config.get("seed_wal_flush_policy", ""),
+        "write_latency_scope": config.get("write_latency_scope", ""),
         "throughput_ops_per_sec": totals.get("throughput_ops_per_sec", 0.0),
-        "read_p95_ms": read_latency.get("p95_ms", 0.0),
-        "write_p95_ms": write_latency.get("p95_ms", 0.0),
-        "read_p99_ms": read_latency.get("p99_ms", 0.0),
-        "write_p99_ms": write_latency.get("p99_ms", 0.0),
+        "read_p95_ms": read_latency.get("p95_ms"),
+        "write_p95_ms": write_latency.get("p95_ms"),
+        "read_p99_ms": read_latency.get("p99_ms"),
+        "write_p99_ms": write_latency.get("p99_ms"),
+        "final_flush_ms": durability_barrier.get("final_flush_ms"),
     }
 
 
@@ -322,14 +325,37 @@ def validate_operational_metrics(metrics: dict[str, Any], scenario_slug: str) ->
         "read_to_write_ratio",
         "wal_flush_policy",
         "seed_wal_flush_policy",
+        "write_latency_scope",
     )
     missing_text = [field for field in required_text_fields if not metrics[field]]
-    if missing_numeric or missing_text or metrics["throughput_ops_per_sec"] <= 0.0:
+    required_latency_fields = (
+        "read_p95_ms",
+        "write_p95_ms",
+        "read_p99_ms",
+        "write_p99_ms",
+    )
+    missing_latency = [
+        field
+        for field in required_latency_fields
+        if not isinstance(metrics[field], (int, float)) or metrics[field] <= 0.0
+    ]
+    invalid_final_flush = not isinstance(metrics["final_flush_ms"], (int, float))
+    if (
+        missing_numeric
+        or missing_text
+        or missing_latency
+        or invalid_final_flush
+        or metrics["throughput_ops_per_sec"] <= 0.0
+    ):
         details = []
         if missing_numeric:
             details.append(f"numeric={','.join(missing_numeric)}")
         if missing_text:
             details.append(f"text={','.join(missing_text)}")
+        if missing_latency:
+            details.append(f"latency={','.join(missing_latency)}")
+        if invalid_final_flush:
+            details.append("final_flush_ms_missing")
         if metrics["throughput_ops_per_sec"] <= 0.0:
             details.append("throughput_ops_per_sec<=0")
         raise ValueError(
@@ -368,12 +394,19 @@ def build_pr14_6_operational_report(
             }
             if baseline_metrics is None:
                 baseline_metrics = metrics
+                row["write_latency_comparable_to_baseline"] = True
                 row["delta_vs_baseline"] = {
                     "throughput_pct": 0.0,
                     "read_p95_ms": 0.0,
                     "write_p95_ms": 0.0,
+                    "final_flush_ms": 0.0,
                 }
             else:
+                write_latency_comparable = (
+                    metrics["write_latency_scope"]
+                    == baseline_metrics["write_latency_scope"]
+                )
+                row["write_latency_comparable_to_baseline"] = write_latency_comparable
                 row["delta_vs_baseline"] = {
                     "throughput_pct": compute_relative_delta(
                         metrics["throughput_ops_per_sec"],
@@ -381,8 +414,13 @@ def build_pr14_6_operational_report(
                     ),
                     "read_p95_ms": metrics["read_p95_ms"]
                     - baseline_metrics["read_p95_ms"],
-                    "write_p95_ms": metrics["write_p95_ms"]
-                    - baseline_metrics["write_p95_ms"],
+                    "write_p95_ms": (
+                        metrics["write_p95_ms"] - baseline_metrics["write_p95_ms"]
+                        if write_latency_comparable
+                        else None
+                    ),
+                    "final_flush_ms": metrics["final_flush_ms"]
+                    - baseline_metrics["final_flush_ms"],
                 }
             family_rows.append(row)
 
@@ -448,18 +486,24 @@ def render_pr14_6_operational_summary(report: dict[str, Any]) -> str:
         lines.append(f"## {labels[family]}")
         for row in rows:
             delta = row["delta_vs_baseline"]
+            if delta["write_p95_ms"] is None:
+                write_delta = "write p95=n/a (scope mismatch)"
+            else:
+                write_delta = f"write p95={delta['write_p95_ms']:+.2f} ms"
             lines.extend(
                 [
                     f"- {row['description']}",
                     (
                         f"  nodes={row['nodes']}, workers={row['workers']}, "
                         f"wal={row['wal_flush_policy']}, throughput={row['throughput_ops_per_sec']:.2f} ops/s, "
-                        f"read p95={row['read_p95_ms']:.2f} ms, write p95={row['write_p95_ms']:.2f} ms"
+                        f"read p95={row['read_p95_ms']:.2f} ms, "
+                        f"write p95={row['write_p95_ms']:.2f} ms ({row['write_latency_scope']}), "
+                        f"final flush={row['final_flush_ms']:.2f} ms"
                     ),
                     (
                         f"  vs baseline: throughput={delta['throughput_pct']:+.2f}%, "
                         f"read p95={delta['read_p95_ms']:+.2f} ms, "
-                        f"write p95={delta['write_p95_ms']:+.2f} ms"
+                        f"{write_delta}, final flush={delta['final_flush_ms']:+.2f} ms"
                     ),
                 ]
             )
@@ -529,6 +573,7 @@ def run_suite(profile: SuiteProfile, repo_root: Path, results_dir: Path) -> dict
             **profile.operational_env,
             "ALAYASIKI_BENCH_RESULTS_PATH": str(operational_result),
         },
+        cleared_env_prefixes=("ALAYASIKI_BENCH_",),
     )
     run_command(
         "graphrag production",
@@ -538,6 +583,7 @@ def run_suite(profile: SuiteProfile, repo_root: Path, results_dir: Path) -> dict
             **profile.graphrag_env,
             "ALAYASIKI_GRAPHRAG_RESULTS_PATH": str(graphrag_result),
         },
+        cleared_env_prefixes=("ALAYASIKI_GRAPHRAG_",),
     )
     run_command(
         "python ann benchmark",
