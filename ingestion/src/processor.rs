@@ -372,6 +372,9 @@ impl IngestionPipeline {
                 .await?;
 
             if let Some(queue) = &self.job_queue {
+                // Queue provenance should point at a durable snapshot that already includes
+                // the ingest batch, even when WAL writes are buffered.
+                self.repo.flush().await?;
                 let snapshot_id = self.repo.current_snapshot_id().await;
                 for (chunk_id, chunk_content) in queued_extractions {
                     let job = Job::ExtractEntities {

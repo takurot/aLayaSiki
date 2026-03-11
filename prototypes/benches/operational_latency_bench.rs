@@ -28,6 +28,7 @@ struct OperationalBenchmarkReport {
     totals: Totals,
     read_latency_ns: LatencySummary,
     write_latency_ns: LatencySummary,
+    durability_barrier: DurabilityBarrier,
 }
 
 #[derive(Debug, Serialize)]
@@ -39,6 +40,7 @@ struct ReportConfig {
     read_to_write_ratio: String,
     wal_flush_policy: String,
     seed_wal_flush_policy: String,
+    write_latency_scope: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +50,12 @@ struct Totals {
     read_ops: usize,
     write_ops: usize,
     throughput_ops_per_sec: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct DurabilityBarrier {
+    final_flush_ns: u128,
+    final_flush_ms: f64,
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -107,6 +115,13 @@ fn format_wal_flush_policy(policy: WalFlushPolicy) -> String {
         WalFlushPolicy::Always => "always".to_string(),
         WalFlushPolicy::Interval(interval) => format!("interval:{}ms", interval.as_millis()),
         WalFlushPolicy::Batch { max_entries } => format!("batch:{max_entries}"),
+    }
+}
+
+fn write_latency_scope(policy: WalFlushPolicy) -> &'static str {
+    match policy {
+        WalFlushPolicy::Always => "durable",
+        WalFlushPolicy::Interval(_) | WalFlushPolicy::Batch { .. } => "submit_only",
     }
 }
 
@@ -263,9 +278,10 @@ async fn main() {
         handle.await.unwrap();
     }
 
-    // Buffered WAL policies need an explicit final flush so the scenario only
-    // completes after all measured writes reach durable storage.
+    // Buffered WAL policies defer some fsync cost to a final durability barrier.
+    let final_flush_start = Instant::now();
     repo.flush().await.unwrap();
+    let final_flush_ns = final_flush_start.elapsed().as_nanos();
     let total_elapsed = scenario_start.elapsed();
     let read_samples = read_latencies.lock().await.clone();
     let write_samples = write_latencies.lock().await.clone();
@@ -289,6 +305,7 @@ async fn main() {
             read_to_write_ratio: format!("{}:1", write_every.saturating_sub(1)),
             wal_flush_policy: format_wal_flush_policy(wal_flush_policy),
             seed_wal_flush_policy: format_wal_flush_policy(seed_wal_flush_policy),
+            write_latency_scope: write_latency_scope(wal_flush_policy).to_string(),
         },
         totals: Totals {
             elapsed_sec: total_elapsed.as_secs_f64(),
@@ -299,13 +316,17 @@ async fn main() {
         },
         read_latency_ns: read_summary,
         write_latency_ns: write_summary,
+        durability_barrier: DurabilityBarrier {
+            final_flush_ns,
+            final_flush_ms: final_flush_ns as f64 / 1_000_000.0,
+        },
     };
 
     write_json_report(&results_path, &report);
 
     println!("=== Operational Latency Benchmark (Query + Ingestion) ===");
     println!(
-        "config: nodes={}, workers={}, ops_per_worker={}, write_every={} (read:write ~= {}:{}), wal_flush_policy={}, seed_wal_flush_policy={}",
+        "config: nodes={}, workers={}, ops_per_worker={}, write_every={} (read:write ~= {}:{}), wal_flush_policy={}, seed_wal_flush_policy={}, write_latency_scope={}",
         node_count,
         workers,
         ops_per_worker,
@@ -313,7 +334,8 @@ async fn main() {
         write_every - 1,
         1,
         report.config.wal_flush_policy,
-        report.config.seed_wal_flush_policy
+        report.config.seed_wal_flush_policy,
+        report.config.write_latency_scope,
     );
     println!(
         "workload: total_ops={}, read_ops={}, write_ops={}, elapsed={:.3}s, throughput={:.2} ops/s",
@@ -335,6 +357,10 @@ async fn main() {
         format_ns(report.write_latency_ns.p50_ns),
         format_ns(report.write_latency_ns.p95_ns),
         format_ns(report.write_latency_ns.p99_ns)
+    );
+    println!(
+        "durability barrier: final_flush={}",
+        format_ns(report.durability_barrier.final_flush_ns)
     );
 
     let read_p95_ms = report.read_latency_ns.p95_ms;

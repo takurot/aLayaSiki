@@ -6,7 +6,7 @@ use ingestion::processor::IngestionPipeline;
 use std::collections::HashMap;
 use std::sync::Arc;
 use storage::repo::Repository;
-use storage::wal::Wal;
+use storage::wal::{Wal, WalFlushPolicy, WalOptions};
 use tempfile::tempdir;
 use tokio::sync::Mutex;
 
@@ -316,6 +316,51 @@ async fn test_ingestion_enqueues_fixed_model_and_snapshot_for_reproducibility() 
             assert!(snapshot_id.starts_with("wal-lsn-"));
         }
     }
+}
+
+#[tokio::test]
+async fn test_ingestion_flushes_buffered_wal_before_enqueuing_snapshot() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("repro_buffered.wal");
+    let repo = Arc::new(
+        Repository::open_with_options(
+            &wal_path,
+            WalOptions {
+                flush_policy: WalFlushPolicy::Batch { max_entries: 16 },
+                ..WalOptions::default()
+            },
+        )
+        .await
+        .unwrap(),
+    );
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let queue = Arc::new(CapturingQueue {
+        jobs: captured.clone(),
+    });
+
+    let mut pipeline = IngestionPipeline::new(repo.clone());
+    pipeline.set_job_queue(queue);
+
+    let request = IngestionRequest::Text {
+        content: "Graph database query".to_string(),
+        metadata: HashMap::new(),
+        idempotency_key: None,
+        model_id: Some("triplex-lite@1.0.0".to_string()),
+    };
+
+    pipeline.ingest(request).await.unwrap();
+
+    let jobs = captured.lock().await;
+    assert!(!jobs.is_empty());
+    match &jobs[0] {
+        jobs::queue::Job::ExtractEntities { snapshot_id, .. } => {
+            assert_eq!(snapshot_id, "wal-lsn-1");
+        }
+    }
+    drop(jobs);
+
+    assert_eq!(repo.current_snapshot_id().await, "wal-lsn-1");
 }
 
 struct FailingExtractor;

@@ -356,7 +356,7 @@
 - `prototypes/benches/operational_latency_bench.rs` は `ALAYASIKI_BENCH_WAL_FLUSH_POLICY`（`always` / `interval` / `batch`）と seed 用 batch flush を受け付けるよう拡張し、WAL flush 方針比較と大規模 seed を同じベンチで扱えるようにした
 - `benchmarks/benchmark_suite.py --mode pr14-6-operational` を追加し、WAL flush 比較・`10^5 -> 10^6` ノード scale sweep・`8/32/128` worker sweep を `benchmarks/results/pr14_6_operational_*.json` と `pr14_6_operational_matrix.{json,md}` に保存できるようにした
 - ingest 永続化を `Repository::persist_ingest_batch` に集約し、複数チャンク文書でも node 書き込み + idempotency 記録を 1 WAL transaction にまとめるよう変更
-- baseline 条件 (`nodes=4000, workers=6, ops_per_worker=100, write_every=10`) の再計測結果を `benchmarks/results/operational_latency_pr14_6_write_batch.json` に保存し、既存 baseline 比で throughput `389.38 -> 917.39 ops/s`、read p95 `16.96 -> 11.76 ms`、write p95 `188.67 -> 69.40 ms` を確認
+- baseline 条件 (`nodes=4000, workers=6, ops_per_worker=100, write_every=10`) の再計測結果を `benchmarks/results/operational_latency_pr14_6_write_batch.json` に保存し、既存 baseline 比で throughput `389.38 -> 758.20 ops/s`、read p95 `16.96 -> 16.41 ms`、write p95 `188.67 -> 72.83 ms` を確認
 - 長時間の実ベンチ結果はこの変更では未同梱。上記 runner を実行して成果物を生成し、閾値/採用 flush policy を確定した時点でチェックボックスを更新する
 
 ---

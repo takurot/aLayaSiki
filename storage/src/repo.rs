@@ -722,13 +722,23 @@ impl Repository {
             .collect();
         self.validate_index_transaction(&node_mutations).await?;
 
+        let mut idempotency_index = self.idempotency_index.write().await;
+        let new_idempotency_records: Vec<(String, Vec<u64>)> = idempotency_records
+            .into_iter()
+            .filter(|(key, _)| !idempotency_index.contains_key(key))
+            .collect();
+
         let mut tx_operations = mutations_to_tx_operations(&node_mutations);
-        tx_operations.extend(idempotency_records.iter().map(|(key, node_ids)| {
+        tx_operations.extend(new_idempotency_records.iter().map(|(key, node_ids)| {
             TxOperation::RecordIdempotency {
                 key: key.clone(),
                 node_ids: node_ids.clone(),
             }
         }));
+
+        if tx_operations.is_empty() {
+            return Ok(());
+        }
 
         let tx_entry = WalEntry::Transaction(tx_operations.clone());
         let tx_bytes = serialize_wal_entry(&tx_entry)?;
@@ -740,7 +750,6 @@ impl Repository {
 
         let mut nodes = self.nodes.write().await;
         let mut index = self.hyper_index.write().await;
-        let mut idempotency_index = self.idempotency_index.write().await;
         let mut edge_meta = self.edge_metadata.write().await;
 
         for operation in &tx_operations {
@@ -1193,7 +1202,7 @@ fn apply_replayed_entry(
             edge_meta.retain(|(src, tgt, _), _| *src != *id && *tgt != *id);
         }
         WalEntry::IdempotencyKey { key, node_ids } => {
-            idem_map.insert(key.clone(), node_ids.clone());
+            record_idempotency_if_absent(idem_map, key, node_ids);
         }
         WalEntry::Transaction(operations) => {
             for operation in operations {
@@ -1201,6 +1210,16 @@ fn apply_replayed_entry(
             }
         }
     }
+}
+
+fn record_idempotency_if_absent(
+    idem_map: &mut HashMap<String, Vec<u64>>,
+    key: &str,
+    node_ids: &[u64],
+) {
+    idem_map
+        .entry(key.to_string())
+        .or_insert_with(|| node_ids.to_vec());
 }
 
 fn apply_tx_operation(
@@ -1232,7 +1251,7 @@ fn apply_tx_operation(
             edge_meta.retain(|(src, tgt, _), _| *src != *id && *tgt != *id);
         }
         TxOperation::RecordIdempotency { key, node_ids } => {
-            idem_map.insert(key.clone(), node_ids.clone());
+            record_idempotency_if_absent(idem_map, key, node_ids);
         }
     }
 }
@@ -1508,6 +1527,55 @@ mod tests {
 
         assert_eq!(record_count, 1);
         assert_eq!(tx_mutation_count, 4);
+    }
+
+    #[tokio::test]
+    async fn test_persist_ingest_batch_keeps_first_content_hash_mapping() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("ingest_batch_first_writer.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        repo.persist_ingest_batch(
+            vec![Node::new(11, vec![1.0], "first".to_string())],
+            vec![
+                ("content-hash".to_string(), vec![11]),
+                ("request-a".to_string(), vec![11]),
+            ],
+        )
+        .await
+        .unwrap();
+
+        repo.persist_ingest_batch(
+            vec![
+                Node::new(11, vec![1.0], "first".to_string()),
+                Node::new(12, vec![2.0], "second".to_string()),
+            ],
+            vec![
+                ("content-hash".to_string(), vec![11, 12]),
+                ("request-b".to_string(), vec![11, 12]),
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(repo.check_idempotency("content-hash").await, Some(vec![11]));
+        assert_eq!(repo.check_idempotency("request-a").await, Some(vec![11]));
+        assert_eq!(
+            repo.check_idempotency("request-b").await,
+            Some(vec![11, 12])
+        );
+
+        drop(repo);
+
+        let reopened = Repository::open(&wal_path).await.unwrap();
+        assert_eq!(
+            reopened.check_idempotency("content-hash").await,
+            Some(vec![11])
+        );
+        assert_eq!(
+            reopened.check_idempotency("request-b").await,
+            Some(vec![11, 12])
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
