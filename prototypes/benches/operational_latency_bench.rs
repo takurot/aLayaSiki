@@ -14,7 +14,7 @@ use prototypes::bench_eval::{
 };
 use query::{QueryEngine, QueryRequest};
 use serde::Serialize;
-use storage::repo::Repository;
+use storage::repo::{IndexMutation, Repository};
 use storage::wal::{WalFlushPolicy, WalOptions};
 
 const DIMS: usize = 32;
@@ -125,6 +125,21 @@ fn write_latency_scope(policy: WalFlushPolicy) -> &'static str {
     }
 }
 
+fn assert_write_latency_gate(limit: f64, write_p95_ms: f64, wal_flush_policy: WalFlushPolicy) {
+    assert!(
+        matches!(wal_flush_policy, WalFlushPolicy::Always),
+        "ALAYASIKI_BENCH_MAX_WRITE_P95_MS requires durable write latency, but wal_flush_policy={} reports {} writes; use ALAYASIKI_BENCH_WAL_FLUSH_POLICY=always or remove the write gate",
+        format_wal_flush_policy(wal_flush_policy),
+        write_latency_scope(wal_flush_policy),
+    );
+    assert!(
+        write_p95_ms <= limit,
+        "write p95 regression: {:.3} ms > {:.3} ms",
+        write_p95_ms,
+        limit
+    );
+}
+
 fn default_results_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -133,7 +148,20 @@ fn default_results_path() -> PathBuf {
         .join("operational_latency_latest.json")
 }
 
-async fn seed_repo(repo: &Arc<Repository>, node_count: u64) {
+async fn flush_seed_batch(repo: &Arc<Repository>, mutations: &mut Vec<IndexMutation>) {
+    if mutations.is_empty() {
+        return;
+    }
+
+    repo.apply_index_transaction(std::mem::take(mutations))
+        .await
+        .unwrap();
+}
+
+async fn seed_repo(repo: &Arc<Repository>, node_count: u64, batch_size: usize) {
+    let batch_size = batch_size.max(1);
+    let mut node_batch = Vec::with_capacity(batch_size);
+
     for id in 1..=node_count {
         let mut metadata = HashMap::new();
         metadata.insert(
@@ -153,19 +181,37 @@ async fn seed_repo(repo: &Arc<Repository>, node_count: u64) {
         let text = format!("EV benchmark node {id} with battery and market context");
         let mut node = Node::new(id, deterministic_embedding(&text, MODEL_ID, DIMS), text);
         node.metadata = metadata;
-        repo.put_node(node).await.unwrap();
-    }
-
-    for id in 1..node_count {
-        repo.put_edge(Edge::new(id, id + 1, "related_to", 1.0))
-            .await
-            .unwrap();
-        if id + 5 <= node_count {
-            repo.put_edge(Edge::new(id, id + 5, "influences", 0.7))
-                .await
-                .unwrap();
+        node_batch.push(IndexMutation::PutNode(node));
+        if node_batch.len() >= batch_size {
+            flush_seed_batch(repo, &mut node_batch).await;
         }
     }
+    flush_seed_batch(repo, &mut node_batch).await;
+
+    let mut edge_batch = Vec::with_capacity(batch_size);
+    for id in 1..node_count {
+        edge_batch.push(IndexMutation::PutEdge(Edge::new(
+            id,
+            id + 1,
+            "related_to",
+            1.0,
+        )));
+        if edge_batch.len() >= batch_size {
+            flush_seed_batch(repo, &mut edge_batch).await;
+        }
+        if id + 5 <= node_count {
+            edge_batch.push(IndexMutation::PutEdge(Edge::new(
+                id,
+                id + 5,
+                "influences",
+                0.7,
+            )));
+            if edge_batch.len() >= batch_size {
+                flush_seed_batch(repo, &mut edge_batch).await;
+            }
+        }
+    }
+    flush_seed_batch(repo, &mut edge_batch).await;
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -196,8 +242,7 @@ async fn main() {
         .await
         .unwrap(),
     );
-
-    seed_repo(&seed_repo_handle, node_count).await;
+    seed_repo(&seed_repo_handle, node_count, seed_batch_entries).await;
     seed_repo_handle.flush().await.unwrap();
     drop(seed_repo_handle);
 
@@ -386,12 +431,7 @@ async fn main() {
         );
     }
     if let Some(limit) = max_write_p95_ms {
-        assert!(
-            write_p95_ms <= limit,
-            "write p95 regression: {:.3} ms > {:.3} ms",
-            write_p95_ms,
-            limit
-        );
+        assert_write_latency_gate(limit, write_p95_ms, wal_flush_policy);
     }
 
     println!("result_json: {}", results_path.display());

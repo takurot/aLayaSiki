@@ -1578,6 +1578,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_index_transaction_flush_and_reopen_preserves_seeded_graph() {
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("txn_seed_flush_reopen.wal");
+        let repo = Repository::open_with_options(
+            &wal_path,
+            WalOptions {
+                flush_policy: WalFlushPolicy::Batch { max_entries: 8 },
+                ..WalOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        repo.apply_index_transaction(vec![
+            IndexMutation::PutNode(Node::new(1, vec![1.0], "N1".to_string())),
+            IndexMutation::PutNode(Node::new(2, vec![2.0], "N2".to_string())),
+            IndexMutation::PutNode(Node::new(3, vec![3.0], "N3".to_string())),
+        ])
+        .await
+        .unwrap();
+        repo.apply_index_transaction(vec![
+            IndexMutation::PutEdge(Edge::new(1, 2, "links", 1.0)),
+            IndexMutation::PutEdge(Edge::new(1, 3, "links", 0.5)),
+        ])
+        .await
+        .unwrap();
+        repo.flush().await.unwrap();
+
+        drop(repo);
+
+        let reopened = Repository::open(&wal_path).await.unwrap();
+        assert_eq!(reopened.list_node_ids().await, vec![1, 2, 3]);
+
+        let graph = reopened.graph_index().await;
+        assert_eq!(graph.edge_count(), 2);
+        let neighbors = graph.neighbors(1);
+        assert_eq!(neighbors.len(), 2);
+        assert!(neighbors
+            .iter()
+            .any(|(target, relation, _)| { *target == 2 && relation == "links" }));
+        assert!(neighbors
+            .iter()
+            .any(|(target, relation, _)| { *target == 3 && relation == "links" }));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_concurrent_delete_and_put_edge_do_not_leave_dangling_edge() {
         use tokio::sync::Barrier;

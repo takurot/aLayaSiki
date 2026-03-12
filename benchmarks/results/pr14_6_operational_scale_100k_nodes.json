@@ -1,0 +1,41 @@
+{
+  "benchmark": "operational_latency_bench",
+  "generated_at_unix": 1773237651,
+  "config": {
+    "nodes": 100000,
+    "workers": 8,
+    "ops_per_worker": 20,
+    "write_every": 10,
+    "read_to_write_ratio": "9:1",
+    "wal_flush_policy": "batch:32",
+    "seed_wal_flush_policy": "batch:2048",
+    "write_latency_scope": "submit_only"
+  },
+  "totals": {
+    "elapsed_sec": 0.244716291,
+    "total_ops": 160,
+    "read_ops": 144,
+    "write_ops": 16,
+    "throughput_ops_per_sec": 653.8183434628796
+  },
+  "read_latency_ns": {
+    "p50_ns": 18083,
+    "p95_ns": 26573208,
+    "p99_ns": 137373875,
+    "p50_ms": 0.018083,
+    "p95_ms": 26.573208,
+    "p99_ms": 137.373875
+  },
+  "write_latency_ns": {
+    "p50_ns": 18405875,
+    "p95_ns": 138573834,
+    "p99_ns": 161677041,
+    "p50_ms": 18.405875,
+    "p95_ms": 138.573834,
+    "p99_ms": 161.677041
+  },
+  "durability_barrier": {
+    "final_flush_ns": 5016750,
+    "final_flush_ms": 5.01675
+  }
+}

@@ -1,0 +1,212 @@
+{
+  "analysis": "pr14_6_operational_matrix",
+  "generated_at_unix": 1773237728,
+  "scenario_groups": {
+    "flush_policy": [
+      {
+        "slug": "flush_always",
+        "description": "WAL flush policy: always",
+        "nodes": 100000,
+        "workers": 8,
+        "ops_per_worker": 40,
+        "write_every": 10,
+        "read_to_write_ratio": "9:1",
+        "wal_flush_policy": "always",
+        "seed_wal_flush_policy": "batch:2048",
+        "write_latency_scope": "durable",
+        "throughput_ops_per_sec": 126.51687641251867,
+        "read_p95_ms": 148.5595,
+        "write_p95_ms": 252.119542,
+        "read_p99_ms": 221.879792,
+        "write_p99_ms": 361.800666,
+        "final_flush_ms": 4.327083,
+        "write_latency_comparable_to_baseline": true,
+        "delta_vs_baseline": {
+          "throughput_pct": 0.0,
+          "read_p95_ms": 0.0,
+          "write_p95_ms": 0.0,
+          "final_flush_ms": 0.0
+        }
+      },
+      {
+        "slug": "flush_interval_15ms",
+        "description": "WAL flush policy: interval(15ms)",
+        "nodes": 100000,
+        "workers": 8,
+        "ops_per_worker": 40,
+        "write_every": 10,
+        "read_to_write_ratio": "9:1",
+        "wal_flush_policy": "interval:15ms",
+        "seed_wal_flush_policy": "batch:2048",
+        "write_latency_scope": "submit_only",
+        "throughput_ops_per_sec": 140.4502549885352,
+        "read_p95_ms": 128.297083,
+        "write_p95_ms": 290.103375,
+        "read_p99_ms": 170.217042,
+        "write_p99_ms": 476.745542,
+        "final_flush_ms": 5.403333,
+        "write_latency_comparable_to_baseline": false,
+        "delta_vs_baseline": {
+          "throughput_pct": 11.013059262217,
+          "read_p95_ms": -20.262417000000028,
+          "write_p95_ms": null,
+          "final_flush_ms": 1.07625
+        }
+      },
+      {
+        "slug": "flush_batch_32",
+        "description": "WAL flush policy: batch(32)",
+        "nodes": 100000,
+        "workers": 8,
+        "ops_per_worker": 40,
+        "write_every": 10,
+        "read_to_write_ratio": "9:1",
+        "wal_flush_policy": "batch:32",
+        "seed_wal_flush_policy": "batch:2048",
+        "write_latency_scope": "submit_only",
+        "throughput_ops_per_sec": 930.3961888646113,
+        "read_p95_ms": 21.014042,
+        "write_p95_ms": 116.630625,
+        "read_p99_ms": 96.139667,
+        "write_p99_ms": 153.535209,
+        "final_flush_ms": 5.241667,
+        "write_latency_comparable_to_baseline": false,
+        "delta_vs_baseline": {
+          "throughput_pct": 635.3929493413813,
+          "read_p95_ms": -127.54545800000001,
+          "write_p95_ms": null,
+          "final_flush_ms": 0.9145839999999996
+        }
+      }
+    ],
+    "scale": [
+      {
+        "slug": "scale_100k_nodes",
+        "description": "Scale sweep: 100k nodes",
+        "nodes": 100000,
+        "workers": 8,
+        "ops_per_worker": 20,
+        "write_every": 10,
+        "read_to_write_ratio": "9:1",
+        "wal_flush_policy": "batch:32",
+        "seed_wal_flush_policy": "batch:2048",
+        "write_latency_scope": "submit_only",
+        "throughput_ops_per_sec": 653.8183434628796,
+        "read_p95_ms": 26.573208,
+        "write_p95_ms": 138.573834,
+        "read_p99_ms": 137.373875,
+        "write_p99_ms": 161.677041,
+        "final_flush_ms": 5.01675,
+        "write_latency_comparable_to_baseline": true,
+        "delta_vs_baseline": {
+          "throughput_pct": 0.0,
+          "read_p95_ms": 0.0,
+          "write_p95_ms": 0.0,
+          "final_flush_ms": 0.0
+        }
+      },
+      {
+        "slug": "scale_1m_nodes",
+        "description": "Scale sweep: 1M nodes",
+        "nodes": 1000000,
+        "workers": 8,
+        "ops_per_worker": 20,
+        "write_every": 10,
+        "read_to_write_ratio": "9:1",
+        "wal_flush_policy": "batch:32",
+        "seed_wal_flush_policy": "batch:4096",
+        "write_latency_scope": "submit_only",
+        "throughput_ops_per_sec": 45.403841810603055,
+        "read_p95_ms": 304.222709,
+        "write_p95_ms": 2084.98275,
+        "read_p99_ms": 1973.0235,
+        "write_p99_ms": 2270.2925,
+        "final_flush_ms": 9.093833,
+        "write_latency_comparable_to_baseline": true,
+        "delta_vs_baseline": {
+          "throughput_pct": -93.05558764684906,
+          "read_p95_ms": 277.649501,
+          "write_p95_ms": 1946.408916,
+          "final_flush_ms": 4.077083
+        }
+      }
+    ],
+    "workers": [
+      {
+        "slug": "workers_8",
+        "description": "Worker sweep: 8 workers",
+        "nodes": 100000,
+        "workers": 8,
+        "ops_per_worker": 30,
+        "write_every": 10,
+        "read_to_write_ratio": "9:1",
+        "wal_flush_policy": "batch:32",
+        "seed_wal_flush_policy": "batch:2048",
+        "write_latency_scope": "submit_only",
+        "throughput_ops_per_sec": 803.3936687557692,
+        "read_p95_ms": 21.968416,
+        "write_p95_ms": 123.6765,
+        "read_p99_ms": 132.726083,
+        "write_p99_ms": 147.304292,
+        "final_flush_ms": 5.14975,
+        "write_latency_comparable_to_baseline": true,
+        "delta_vs_baseline": {
+          "throughput_pct": 0.0,
+          "read_p95_ms": 0.0,
+          "write_p95_ms": 0.0,
+          "final_flush_ms": 0.0
+        }
+      },
+      {
+        "slug": "workers_32",
+        "description": "Worker sweep: 32 workers",
+        "nodes": 100000,
+        "workers": 32,
+        "ops_per_worker": 30,
+        "write_every": 10,
+        "read_to_write_ratio": "9:1",
+        "wal_flush_policy": "batch:32",
+        "seed_wal_flush_policy": "batch:2048",
+        "write_latency_scope": "submit_only",
+        "throughput_ops_per_sec": 288.9011513049436,
+        "read_p95_ms": 528.048583,
+        "write_p95_ms": 674.855583,
+        "read_p99_ms": 761.910708,
+        "write_p99_ms": 718.18475,
+        "final_flush_ms": 0.019583,
+        "write_latency_comparable_to_baseline": true,
+        "delta_vs_baseline": {
+          "throughput_pct": -64.03990191354505,
+          "read_p95_ms": 506.080167,
+          "write_p95_ms": 551.179083,
+          "final_flush_ms": -5.130167
+        }
+      },
+      {
+        "slug": "workers_128",
+        "description": "Worker sweep: 128 workers",
+        "nodes": 100000,
+        "workers": 128,
+        "ops_per_worker": 30,
+        "write_every": 10,
+        "read_to_write_ratio": "9:1",
+        "wal_flush_policy": "batch:32",
+        "seed_wal_flush_policy": "batch:2048",
+        "write_latency_scope": "submit_only",
+        "throughput_ops_per_sec": 189.46943439241525,
+        "read_p95_ms": 363.142792,
+        "write_p95_ms": 7496.58425,
+        "read_p99_ms": 639.203125,
+        "write_p99_ms": 7743.8355,
+        "final_flush_ms": 3.612709,
+        "write_latency_comparable_to_baseline": true,
+        "delta_vs_baseline": {
+          "throughput_pct": -76.41636450958717,
+          "read_p95_ms": 341.174376,
+          "write_p95_ms": 7372.90775,
+          "final_flush_ms": -1.5370409999999999
+        }
+      }
+    ]
+  }
+}

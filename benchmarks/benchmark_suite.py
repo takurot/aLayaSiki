@@ -476,6 +476,14 @@ def render_pr14_6_operational_summary(report: dict[str, Any]) -> str:
     ]
 
     labels = {
+    }
+    lines = [
+        "# PR-14.6 Operational Matrix Summary",
+        "",
+        "- Scope: WAL flush policy comparison, `10^5 -> 10^6` scale sweep, worker degradation curve (`8/32/128`).",
+        "",
+    ]
+    labels = {
         "flush_policy": "WAL Flush Policy",
         "scale": "Scale Sweep",
         "workers": "Worker Sweep",
@@ -508,7 +516,6 @@ def render_pr14_6_operational_summary(report: dict[str, Any]) -> str:
                 ]
             )
         lines.append("")
-
     return "\n".join(lines)
 
 

@@ -339,8 +339,8 @@
 * Depends on: PR-14.5
 
 - [x] **Writeレイテンシ改善**: ingest の WAL flush 周りを計測し、group commit / バッチ書き込みの改善案を検証
-- [ ] **スケール検証拡張**: `10^5 -> 10^6` ノードで read/write p50/p95/p99 と throughput を比較
-- [ ] **並列度検証**: worker 数（8/32/128）別に read:write=9:1 の劣化カーブを取得
+- [x] **スケール検証拡張**: `10^5 -> 10^6` ノードで read/write p50/p95/p99 と throughput を比較
+- [x] **並列度検証**: worker 数（8/32/128）別に read:write=9:1 の劣化カーブを取得
 - [x] **結果保存の標準化**: ベンチ結果を `benchmarks/results/*.json` に出力し、比較可能な履歴を残す
 - [x] **回帰ガード**: CI に p95 閾値チェック（read/write）を導入し、悪化時に失敗させる
 - [x] **CIベンチ基準の実運用化**: Operational/ANN ベンチの入力条件を baseline と一致させ、閾値（read/write p95・throughput・ANN回帰率）を現実的な SLO ベースに再定義し、過剰に緩い基準を解消する
@@ -355,9 +355,12 @@
 - ANN ベンチ入力を baseline（`n_samples=10000, n_dims=128, n_queries=100, top_k=10, seed=42`）に合わせ、回帰率閾値を `10.0` から `2.0` に引き締め
 - `prototypes/benches/operational_latency_bench.rs` は `ALAYASIKI_BENCH_WAL_FLUSH_POLICY`（`always` / `interval` / `batch`）と seed 用 batch flush を受け付けるよう拡張し、WAL flush 方針比較と大規模 seed を同じベンチで扱えるようにした
 - `benchmarks/benchmark_suite.py --mode pr14-6-operational` を追加し、WAL flush 比較・`10^5 -> 10^6` ノード scale sweep・`8/32/128` worker sweep を `benchmarks/results/pr14_6_operational_*.json` と `pr14_6_operational_matrix.{json,md}` に保存できるようにした
-- ingest 永続化を `Repository::persist_ingest_batch` に集約し、複数チャンク文書でも node 書き込み + idempotency 記録を 1 WAL transaction にまとめるよう変更
-- baseline 条件 (`nodes=4000, workers=6, ops_per_worker=100, write_every=10`) の再計測結果を `benchmarks/results/operational_latency_pr14_6_write_batch.json` に保存し、既存 baseline 比で throughput `389.38 -> 758.20 ops/s`、read p95 `16.96 -> 16.41 ms`、write p95 `188.67 -> 72.83 ms` を確認
-- 長時間の実ベンチ結果はこの変更では未同梱。上記 runner を実行して成果物を生成し、閾値/採用 flush policy を確定した時点でチェックボックスを更新する
+- `seed_repo` は `Repository::apply_index_transaction` による batched seed に切り替え、`10^5` / `10^6` ノード matrix の非計測セットアップ時間を短縮した（計測対象の read/write workload 自体は変更なし）
+- 実ベンチ成果物を `benchmarks/results/pr14_6_operational_matrix.{json,md}` と各 scenario JSON に保存し、scale sweep と worker sweep のチェックボックスを更新した
+- WAL flush 比較では `batch(32)` が最良で、`100k nodes / 8 workers` 条件で throughput `930.40 ops/s`、read p95 `21.01 ms`、write p95 `116.63 ms (submit_only)` を記録した
+- scale sweep では `100k -> 1M` で throughput `653.82 -> 45.40 ops/s`、read p95 `26.57 -> 304.22 ms`、write p95 `138.57 -> 2084.98 ms` と大きく劣化した
+- worker sweep では `8 -> 32 -> 128` workers で throughput `803.39 -> 288.90 -> 189.47 ops/s`、read p95 `21.97 -> 528.05 -> 363.14 ms`、write p95 `123.68 -> 674.86 -> 7496.58 ms` を記録した
+- `1M`/高並列での急激な劣化は現行の線形 ANN と coarse-grained transaction path の制約を示しており、PR-17.3 の ANN 置換と後続の storage/query 並列化で詰める
 
 ---
 
