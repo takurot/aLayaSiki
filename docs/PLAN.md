@@ -355,8 +355,6 @@
 - ANN ベンチ入力を baseline（`n_samples=10000, n_dims=128, n_queries=100, top_k=10, seed=42`）に合わせ、回帰率閾値を `10.0` から `2.0` に引き締め
 - `prototypes/benches/operational_latency_bench.rs` は `ALAYASIKI_BENCH_WAL_FLUSH_POLICY`（`always` / `interval` / `batch`）と seed 用 batch flush を受け付けるよう拡張し、WAL flush 方針比較と大規模 seed を同じベンチで扱えるようにした
 - `benchmarks/benchmark_suite.py --mode pr14-6-operational` を追加し、WAL flush 比較・`10^5 -> 10^6` ノード scale sweep・`8/32/128` worker sweep を `benchmarks/results/pr14_6_operational_*.json` と `pr14_6_operational_matrix.{json,md}` に保存できるようにした
-- ingest 永続化を `Repository::persist_ingest_batch` に集約し、複数チャンク文書でも node 書き込み + idempotency 記録を 1 WAL transaction にまとめるよう変更
-- baseline 条件 (`nodes=4000, workers=6, ops_per_worker=100, write_every=10`) の再計測結果を `benchmarks/results/operational_latency_pr14_6_write_batch.json` に保存し、既存 baseline 比で throughput `389.38 -> 758.20 ops/s`、read p95 `16.96 -> 16.41 ms`、write p95 `188.67 -> 72.83 ms` を確認
 - `seed_repo` は `Repository::apply_index_transaction` による batched seed に切り替え、`10^5` / `10^6` ノード matrix の非計測セットアップ時間を短縮した（計測対象の read/write workload 自体は変更なし）
 - 実ベンチ成果物を `benchmarks/results/pr14_6_operational_matrix.{json,md}` と各 scenario JSON に保存し、scale sweep と worker sweep のチェックボックスを更新した
 - WAL flush 比較では `batch(32)` が最良で、`100k nodes / 8 workers` 条件で throughput `930.40 ops/s`、read p95 `21.01 ms`、write p95 `116.63 ms (submit_only)` を記録した

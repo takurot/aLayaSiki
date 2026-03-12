@@ -125,6 +125,21 @@ fn write_latency_scope(policy: WalFlushPolicy) -> &'static str {
     }
 }
 
+fn assert_write_latency_gate(limit: f64, write_p95_ms: f64, wal_flush_policy: WalFlushPolicy) {
+    assert!(
+        matches!(wal_flush_policy, WalFlushPolicy::Always),
+        "ALAYASIKI_BENCH_MAX_WRITE_P95_MS requires durable write latency, but wal_flush_policy={} reports {} writes; use ALAYASIKI_BENCH_WAL_FLUSH_POLICY=always or remove the write gate",
+        format_wal_flush_policy(wal_flush_policy),
+        write_latency_scope(wal_flush_policy),
+    );
+    assert!(
+        write_p95_ms <= limit,
+        "write p95 regression: {:.3} ms > {:.3} ms",
+        write_p95_ms,
+        limit
+    );
+}
+
 fn default_results_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -416,12 +431,7 @@ async fn main() {
         );
     }
     if let Some(limit) = max_write_p95_ms {
-        assert!(
-            write_p95_ms <= limit,
-            "write p95 regression: {:.3} ms > {:.3} ms",
-            write_p95_ms,
-            limit
-        );
+        assert_write_latency_gate(limit, write_p95_ms, wal_flush_policy);
     }
 
     println!("result_json: {}", results_path.display());
