@@ -1,6 +1,9 @@
 use crate::chunker::{Chunker, ChunkingConfig, SemanticChunker};
 use crate::embedding::{DeterministicEmbedder, Embedder};
-use crate::extract::{detect_content_kind, extract_pdf_text, extract_utf8, ContentKind};
+use crate::extract::{
+    detect_content_kind, extract_audio_text, extract_image_text, extract_pdf_text, extract_utf8,
+    ContentKind,
+};
 use crate::policy::{ContentPolicy, NoOpPolicy, PolicyError};
 use alayasiki_core::audit::{AuditEvent, AuditOperation, AuditOutcome, AuditSink};
 use alayasiki_core::auth::{
@@ -506,7 +509,7 @@ fn extract_request_text(
             ..
         } => {
             let kind = detect_content_kind(&mime_type, Some(&filename));
-            metadata.insert("filename".to_string(), filename);
+            metadata.insert("filename".to_string(), filename.clone());
             metadata.insert("mime_type".to_string(), mime_type.clone());
 
             match kind {
@@ -519,6 +522,24 @@ fn extract_request_text(
                         Ok((text, metadata))
                     } else {
                         Err(IngestionError::ExtractionFailed("pdf".to_string()))
+                    }
+                }
+                ContentKind::Image => {
+                    if let Some(text) = extract_image_text(&metadata) {
+                        Ok((text, metadata))
+                    } else {
+                        Err(IngestionError::ExtractionFailed(format!(
+                            "{filename}: image metadata requires ocr_text, caption, alt_text, or description"
+                        )))
+                    }
+                }
+                ContentKind::Audio => {
+                    if let Some(text) = extract_audio_text(&metadata) {
+                        Ok((text, metadata))
+                    } else {
+                        Err(IngestionError::ExtractionFailed(format!(
+                            "{filename}: audio metadata requires transcript, caption, or description"
+                        )))
                     }
                 }
                 ContentKind::Unsupported => Err(IngestionError::UnsupportedType(mime_type)),

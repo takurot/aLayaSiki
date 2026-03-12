@@ -9,12 +9,17 @@ use alayasiki_core::governance::{
     GovernanceError, InMemoryGovernancePolicyStore, TenantGovernancePolicy,
 };
 use alayasiki_core::ingest::IngestionRequest;
+use ingestion::api::{AudioIngestionPayload, ImageIngestionPayload};
+use ingestion::chunker::SemanticChunker;
+use ingestion::embedding::DeterministicEmbedder;
+use ingestion::policy::BasicPolicy;
 use ingestion::processor::{IngestionError, IngestionPipeline};
 use jobs::queue::ChannelJobQueue;
 use jobs::worker::Worker;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use query::{QueryEngine, QueryError, QueryRequest};
 use slm::ner::MockEntityExtractor;
+use std::path::PathBuf;
 use storage::community::{CommunityEngine, DeterministicSummarizer};
 use storage::repo::Repository;
 use tempfile::tempdir;
@@ -178,6 +183,225 @@ async fn test_e2e_query_is_reproducible_with_fixed_model_and_snapshot() {
     assert_eq!(first.snapshot_id, second.snapshot_id);
     assert_eq!(first.snapshot_id.as_deref(), Some(snapshot_id.as_str()));
     assert_ne!(latest_unpinned.snapshot_id, first.snapshot_id);
+}
+
+#[tokio::test]
+async fn test_e2e_pdf_file_ingest_to_query_uses_extracted_text() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("e2e_pdf_query.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+    let pipeline = IngestionPipeline::new(repo.clone());
+    let engine = QueryEngine::new(repo);
+
+    let pdf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets/dummy.pdf");
+    let pdf_bytes = std::fs::read(pdf_path).unwrap();
+
+    pipeline
+        .ingest(IngestionRequest::File {
+            filename: "dummy.pdf".to_string(),
+            content: pdf_bytes,
+            mime_type: "application/pdf".to_string(),
+            metadata: HashMap::from([("source".to_string(), "tests/assets/dummy.pdf".to_string())]),
+            idempotency_key: Some("e2e-pdf-doc".to_string()),
+            model_id: Some("embedding-default-v1".to_string()),
+        })
+        .await
+        .unwrap();
+
+    let response = engine
+        .execute(
+            QueryRequest::parse_json(
+                r#"{
+                    "query":"Dummy PDF file",
+                    "mode":"evidence",
+                    "search_mode":"local",
+                    "top_k":5,
+                    "model_id":"embedding-default-v1"
+                }"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response
+        .evidence
+        .nodes
+        .iter()
+        .any(|node| node.data.contains("Dummy PDF file")));
+    assert!(response
+        .citations
+        .iter()
+        .any(|citation| citation.source == "tests/assets/dummy.pdf"));
+}
+
+#[tokio::test]
+async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("e2e_multimodal_query.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+    let pipeline = IngestionPipeline::new(repo.clone());
+    let engine = QueryEngine::new(repo);
+
+    let image_request = ImageIngestionPayload {
+        filename: "diagram.png".to_string(),
+        content: vec![0x89, 0x50, 0x4e, 0x47],
+        mime_type: "image/png".to_string(),
+        metadata: HashMap::from([
+            ("source".to_string(), "tests/assets/diagram.png".to_string()),
+            (
+                "caption".to_string(),
+                "Architecture diagram showing WAL replay recovery path.".to_string(),
+            ),
+        ]),
+        idempotency_key: Some("e2e-image-doc".to_string()),
+        model_id: Some("embedding-default-v1".to_string()),
+    }
+    .try_into_request()
+    .unwrap();
+
+    pipeline.ingest(image_request).await.unwrap();
+
+    let image_response = engine
+        .execute(
+            QueryRequest::parse_json(
+                r#"{
+                    "query":"WAL replay recovery path",
+                    "mode":"evidence",
+                    "search_mode":"local",
+                    "top_k":5,
+                    "model_id":"embedding-default-v1"
+                }"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(image_response
+        .evidence
+        .nodes
+        .iter()
+        .any(|node| node.data.contains("Architecture diagram")));
+    assert!(image_response
+        .citations
+        .iter()
+        .any(|citation| citation.source == "tests/assets/diagram.png"));
+
+    let audio_request = AudioIngestionPayload {
+        filename: "briefing.wav".to_string(),
+        content: vec![0x52, 0x49, 0x46, 0x46],
+        mime_type: "audio/wav".to_string(),
+        metadata: HashMap::from([
+            (
+                "source".to_string(),
+                "tests/assets/briefing.wav".to_string(),
+            ),
+            (
+                "transcript".to_string(),
+                "Battery recycling briefing confirms Tokyo pilot launch.".to_string(),
+            ),
+        ]),
+        idempotency_key: Some("e2e-audio-doc".to_string()),
+        model_id: Some("embedding-default-v1".to_string()),
+    }
+    .try_into_request()
+    .unwrap();
+
+    pipeline.ingest(audio_request).await.unwrap();
+
+    let audio_response = engine
+        .execute(
+            QueryRequest::parse_json(
+                r#"{
+                    "query":"Tokyo pilot launch",
+                    "mode":"evidence",
+                    "search_mode":"local",
+                    "top_k":5,
+                    "model_id":"embedding-default-v1"
+                }"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(audio_response
+        .evidence
+        .nodes
+        .iter()
+        .any(|node| node.data.contains("Battery recycling briefing")));
+    assert!(audio_response
+        .citations
+        .iter()
+        .any(|citation| citation.source == "tests/assets/briefing.wav"));
+}
+
+#[tokio::test]
+async fn test_e2e_pii_masking_persists_and_queries_masked_content() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("e2e_pii_masking.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+    let pipeline = IngestionPipeline::with_components(
+        repo.clone(),
+        Box::new(SemanticChunker::default()),
+        Box::new(DeterministicEmbedder::default()),
+        Box::new(BasicPolicy::new(Vec::new(), true)),
+        "embedding-default-v1",
+    );
+    let engine = QueryEngine::new(repo.clone());
+
+    let node_ids = pipeline
+        .ingest(IngestionRequest::Text {
+            content: "Customer contact alice@example.com 09012345678 for billing issue."
+                .to_string(),
+            metadata: HashMap::from([(
+                "source".to_string(),
+                "tests/assets/pii-note.txt".to_string(),
+            )]),
+            idempotency_key: Some("e2e-pii-doc".to_string()),
+            model_id: Some("embedding-default-v1".to_string()),
+        })
+        .await
+        .unwrap();
+
+    let stored = repo.get_node(node_ids[0]).await.unwrap();
+    assert!(stored.data.contains("[EMAIL]"));
+    assert!(stored.data.contains("[PHONE]"));
+    assert!(!stored.data.contains("alice@example.com"));
+    assert!(!stored.data.contains("09012345678"));
+
+    let response = engine
+        .execute(
+            QueryRequest::parse_json(
+                r#"{
+                    "query":"billing issue",
+                    "mode":"evidence",
+                    "search_mode":"local",
+                    "top_k":5,
+                    "model_id":"embedding-default-v1"
+                }"#,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response
+        .evidence
+        .nodes
+        .iter()
+        .any(|node| node.data.contains("[EMAIL]") && node.data.contains("[PHONE]")));
+    assert!(response
+        .evidence
+        .nodes
+        .iter()
+        .all(|node| !node.data.contains("alice@example.com")));
+    assert!(response
+        .evidence
+        .nodes
+        .iter()
+        .all(|node| !node.data.contains("09012345678")));
 }
 
 #[tokio::test]

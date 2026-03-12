@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6,6 +7,8 @@ pub enum ContentKind {
     Markdown,
     Json,
     Pdf,
+    Image,
+    Audio,
     Unsupported,
 }
 
@@ -16,6 +19,12 @@ pub fn detect_content_kind(mime_type: &str, filename: Option<&str>) -> ContentKi
         .unwrap_or("")
         .trim()
         .to_lowercase();
+    if mime.starts_with("image/") {
+        return ContentKind::Image;
+    }
+    if mime.starts_with("audio/") {
+        return ContentKind::Audio;
+    }
     match mime.as_str() {
         "text/plain" => ContentKind::Text,
         "text/markdown" => ContentKind::Markdown,
@@ -33,6 +42,8 @@ pub fn detect_content_kind(mime_type: &str, filename: Option<&str>) -> ContentKi
                     "md" | "markdown" => ContentKind::Markdown,
                     "json" => ContentKind::Json,
                     "pdf" => ContentKind::Pdf,
+                    "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" => ContentKind::Image,
+                    "wav" | "mp3" | "mpeg" | "m4a" | "ogg" | "flac" => ContentKind::Audio,
                     _ => ContentKind::Unsupported,
                 }
             } else {
@@ -61,4 +72,25 @@ pub fn extract_pdf_text(bytes: &[u8]) -> Option<String> {
         }
         Err(_) => None,
     }
+}
+
+pub fn extract_image_text(metadata: &HashMap<String, String>) -> Option<String> {
+    extract_metadata_text(
+        metadata,
+        &["ocr_text", "caption", "alt_text", "description"],
+    )
+}
+
+pub fn extract_audio_text(metadata: &HashMap<String, String>) -> Option<String> {
+    extract_metadata_text(metadata, &["transcript", "caption", "description"])
+}
+
+fn extract_metadata_text(metadata: &HashMap<String, String>, fields: &[&str]) -> Option<String> {
+    fields.iter().find_map(|field| {
+        metadata
+            .get(*field)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
 }
