@@ -86,11 +86,66 @@ pub fn extract_audio_text(metadata: &HashMap<String, String>) -> Option<String> 
 }
 
 fn extract_metadata_text(metadata: &HashMap<String, String>, fields: &[&str]) -> Option<String> {
-    fields.iter().find_map(|field| {
-        metadata
+    let mut values = Vec::new();
+
+    for field in fields {
+        let Some(value) = metadata
             .get(*field)
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    })
+        else {
+            continue;
+        };
+
+        if !values.iter().any(|existing| existing == value) {
+            values.push(value.to_string());
+        }
+    }
+
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.join("\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_audio_text, extract_image_text};
+    use std::collections::HashMap;
+
+    #[test]
+    fn image_text_combines_all_non_empty_metadata_fields_in_priority_order() {
+        let metadata = HashMap::from([
+            ("caption".to_string(), "Architecture diagram".to_string()),
+            (
+                "ocr_text".to_string(),
+                "OCR mentions WAL replay".to_string(),
+            ),
+            (
+                "description".to_string(),
+                "Storage recovery flow".to_string(),
+            ),
+        ]);
+
+        let text = extract_image_text(&metadata).unwrap();
+
+        assert_eq!(
+            text,
+            "OCR mentions WAL replay\nArchitecture diagram\nStorage recovery flow"
+        );
+    }
+
+    #[test]
+    fn audio_text_skips_blank_fields_and_deduplicates_repeated_values() {
+        let metadata = HashMap::from([
+            ("transcript".to_string(), "Tokyo pilot launch".to_string()),
+            ("caption".to_string(), "  ".to_string()),
+            ("description".to_string(), "Tokyo pilot launch".to_string()),
+        ]);
+
+        let text = extract_audio_text(&metadata).unwrap();
+
+        assert_eq!(text, "Tokyo pilot launch");
+    }
 }

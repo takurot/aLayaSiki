@@ -241,7 +241,7 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
     let wal_path = dir.path().join("e2e_multimodal_query.wal");
     let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
     let pipeline = IngestionPipeline::new(repo.clone());
-    let engine = QueryEngine::new(repo);
+    let engine = QueryEngine::new(repo.clone());
 
     let image_request = ImageIngestionPayload {
         filename: "diagram.png".to_string(),
@@ -250,8 +250,16 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
         metadata: HashMap::from([
             ("source".to_string(), "tests/assets/diagram.png".to_string()),
             (
+                "ocr_text".to_string(),
+                "OCR heading: storage recovery".to_string(),
+            ),
+            (
                 "caption".to_string(),
                 "Architecture diagram showing WAL replay recovery path.".to_string(),
+            ),
+            (
+                "description".to_string(),
+                "Operational flow for replaying persisted WAL segments.".to_string(),
             ),
         ]),
         idempotency_key: Some("e2e-image-doc".to_string()),
@@ -260,13 +268,34 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
     .try_into_request()
     .unwrap();
 
-    pipeline.ingest(image_request).await.unwrap();
+    let image_node_ids = pipeline.ingest(image_request).await.unwrap();
+    let image_node = repo.get_node(image_node_ids[0]).await.unwrap();
+    assert!(image_node.data.contains("OCR heading: storage recovery"));
+    assert!(image_node
+        .data
+        .contains("Architecture diagram showing WAL replay recovery path."));
+    assert!(image_node
+        .data
+        .contains("Operational flow for replaying persisted WAL segments."));
+
+    pipeline
+        .ingest(IngestionRequest::Text {
+            content: "WAL replay checklist for unrelated maintenance work.".to_string(),
+            metadata: HashMap::from([(
+                "source".to_string(),
+                "tests/assets/wal-maintenance-note.txt".to_string(),
+            )]),
+            idempotency_key: Some("e2e-image-distractor".to_string()),
+            model_id: Some("embedding-default-v1".to_string()),
+        })
+        .await
+        .unwrap();
 
     let image_response = engine
         .execute(
             QueryRequest::parse_json(
                 r#"{
-                    "query":"WAL replay recovery path",
+                    "query":"OCR heading storage recovery architecture diagram WAL replay recovery path operational flow replaying persisted WAL segments",
                     "mode":"evidence",
                     "search_mode":"local",
                     "top_k":5,
@@ -278,6 +307,13 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
         .await
         .unwrap();
 
+    assert_eq!(
+        image_response
+            .citations
+            .first()
+            .map(|citation| citation.source.as_str()),
+        Some("tests/assets/diagram.png")
+    );
     assert!(image_response
         .evidence
         .nodes
@@ -301,6 +337,10 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
                 "transcript".to_string(),
                 "Battery recycling briefing confirms Tokyo pilot launch.".to_string(),
             ),
+            (
+                "description".to_string(),
+                "Audio summary covering launch readiness and follow-up actions.".to_string(),
+            ),
         ]),
         idempotency_key: Some("e2e-audio-doc".to_string()),
         model_id: Some("embedding-default-v1".to_string()),
@@ -308,13 +348,33 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
     .try_into_request()
     .unwrap();
 
-    pipeline.ingest(audio_request).await.unwrap();
+    let audio_node_ids = pipeline.ingest(audio_request).await.unwrap();
+    let audio_node = repo.get_node(audio_node_ids[0]).await.unwrap();
+    assert!(audio_node
+        .data
+        .contains("Battery recycling briefing confirms Tokyo pilot launch."));
+    assert!(audio_node
+        .data
+        .contains("Audio summary covering launch readiness and follow-up actions."));
+
+    pipeline
+        .ingest(IngestionRequest::Text {
+            content: "Tokyo pilot logistics memo for warehouse staffing.".to_string(),
+            metadata: HashMap::from([(
+                "source".to_string(),
+                "tests/assets/tokyo-logistics-memo.txt".to_string(),
+            )]),
+            idempotency_key: Some("e2e-audio-distractor".to_string()),
+            model_id: Some("embedding-default-v1".to_string()),
+        })
+        .await
+        .unwrap();
 
     let audio_response = engine
         .execute(
             QueryRequest::parse_json(
                 r#"{
-                    "query":"Tokyo pilot launch",
+                    "query":"battery recycling briefing confirms tokyo pilot launch audio summary covering launch readiness follow up actions",
                     "mode":"evidence",
                     "search_mode":"local",
                     "top_k":5,
@@ -326,6 +386,13 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
         .await
         .unwrap();
 
+    assert_eq!(
+        audio_response
+            .citations
+            .first()
+            .map(|citation| citation.source.as_str()),
+        Some("tests/assets/briefing.wav")
+    );
     assert!(audio_response
         .evidence
         .nodes
