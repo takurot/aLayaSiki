@@ -368,15 +368,15 @@
 
 * Depends on: PR-10, PR-14.5
 
-- [ ] **マルチモーダルE2Eの完結**:
-    - [ ] テスト用バイナリPDFアセットの導入と `pdf-extract` 正常系テストの有効化
-    - [ ] 画像/音声データのメタデータ抽出・インデックス・検索の一気通貫テスト
-- [ ] **セキュリティ・マルチテナンシーE2E**:
+- [x] **マルチモーダルE2Eの完結**:
+    - [x] テスト用バイナリPDFアセットの導入と `pdf-extract` 正常系テストの有効化
+    - [x] 画像/音声データのメタデータ抽出・インデックス・検索の一気通貫テスト
+- [x] **セキュリティ・マルチテナンシーE2E**:
     - [x] 認証・認可の統合テスト: JWT発行 -> 認可済みIngest -> 認可済みQuery のフロー検証
     - [x] テナント分離の厳格な検証: 他テナントのデータが検索結果に混入しないことの確認
     - [x] RBAC/ABAC 動的権限変更時の挙動検証
-- [ ] **ガバナンス・ポリシーE2E**:
-    - [ ] PIIマスキングの実効性検証: 個人情報を含むデータの投入 -> 検索結果でのマスキング確認
+- [x] **ガバナンス・ポリシーE2E**:
+    - [x] PIIマスキングの実効性検証: 個人情報を含むデータの投入 -> 検索結果でのマスキング確認
     - [x] データレジデンシの強制検証: 指定リージョン外からの要求拒否フロー
     - [x] 保持期限（Retention）の動的検証: 期限切れデータが検索対象から自動除外されることの確認
 
@@ -388,6 +388,9 @@
 - 動的権限変更E2E (`test_e2e_dynamic_rbac_abac_permission_transition`) を追加し、RBAC更新前後の拒否理由遷移（`PermissionDenied` -> `InsufficientClearance`）とABAC更新後の許可を検証
 - 保持期限E2E (`test_e2e_retention_dynamic_excludes_expired_nodes`) を追加し、ガバナンスポリシー更新後に期限切れデータが `retention_expired` として検索結果から除外されることを検証
 - データレジデンシE2E (`test_e2e_data_residency_enforces_region_boundary`) を追加し、越境リージョン取り込みの `ResidencyViolation` 拒否と同一リージョン取り込み後の検索成功を検証
+- `ingestion/tests/assets/dummy.pdf` を `test_ingestion_pdf_extract` と `test_e2e_pdf_file_ingest_to_query_uses_extracted_text` で使用し、`pdf-extract` の正常系を常時検証するようにした
+- `ingestion::extract` / `ingestion::processor` に画像 (`ocr_text` / `caption` / `alt_text` / `description`) と音声 (`transcript` / `caption` / `description`) の metadata ベース抽出経路を追加し、API payload -> ingest -> query の E2E (`test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio`) を通した
+- `test_e2e_pii_masking_persists_and_queries_masked_content` を追加し、PII が保存前に `[EMAIL]` / `[PHONE]` へ置換され、検索結果にも原文が露出しないことを確認した
 
 ---
 

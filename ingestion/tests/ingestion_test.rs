@@ -4,6 +4,7 @@ use ingestion::embedding::DeterministicEmbedder;
 use ingestion::policy::BasicPolicy;
 use ingestion::processor::IngestionPipeline;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use storage::repo::Repository;
 use storage::wal::{Wal, WalFlushPolicy, WalOptions};
@@ -182,27 +183,27 @@ async fn test_ingestion_policy_forbidden_word() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: Requires valid PDF binary for pdf-extract (mock is too simple)
 async fn test_ingestion_pdf_extract() {
     let dir = tempdir().unwrap();
     let wal_path = dir.path().join("pdf.wal");
     let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
     let pipeline = IngestionPipeline::new(repo.clone());
 
-    let pdf_bytes = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n2 0 obj\n<< /Length 44 >>\nstream\nBT\n/F1 12 Tf\n(Hello PDF) Tj\nET\nendstream\nendobj\nxref\n0 3\n0000000000 65535 f \ntrailer\n<<>>\nstartxref\n0\n%%EOF".to_vec();
+    let pdf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets/dummy.pdf");
+    let pdf_bytes = std::fs::read(pdf_path).unwrap();
 
     let request = IngestionRequest::File {
-        filename: "sample.pdf".to_string(),
+        filename: "dummy.pdf".to_string(),
         content: pdf_bytes,
         mime_type: "application/pdf".to_string(),
-        metadata: HashMap::new(),
+        metadata: HashMap::from([("source".to_string(), "tests/assets/dummy.pdf".to_string())]),
         idempotency_key: None,
         model_id: None,
     };
 
     let node_ids = pipeline.ingest(request).await.unwrap();
     let node = repo.get_node(node_ids[0]).await.unwrap();
-    assert!(node.data.contains("Hello PDF"));
+    assert!(node.data.contains("Dummy PDF file"));
 }
 
 #[tokio::test]
