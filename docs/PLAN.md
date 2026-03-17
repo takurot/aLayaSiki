@@ -444,14 +444,20 @@
 
 * Depends on: PR-11, PR-17.1
 
-- [ ] `snapshot_id` 優先を維持しつつ、`time_travel(YYYY-MM-DD/RFC3339)` を UTC as-of として `snapshot_id` に解決
-- [ ] スナップショット台帳（`snapshot_id`, `lsn`, `created_at_unix`）を保存し、日時→LSN解決を O(log N) で実行
-- [ ] コミュニティ要約のスナップショット版管理（最低限 `snapshot_lsn_range`）を導入し、`search_mode=global` で時点混線を防止
-- [ ] エラー規約を統一（該当時点なし: `NOT_FOUND`、形式不正: `INVALID_ARGUMENT`）
+- [x] `snapshot_id` 優先を維持しつつ、`time_travel(YYYY-MM-DD/RFC3339)` を UTC as-of として `snapshot_id` に解決
+- [x] スナップショット台帳（`snapshot_id`, `lsn`, `created_at_unix`）を保存し、日時→LSN解決を O(log N) で実行
+- [x] コミュニティ要約のスナップショット版管理（最低限 `snapshot_lsn_range`）を導入し、`search_mode=global` で時点混線を防止
+- [x] エラー規約を統一（該当時点なし: `NOT_FOUND`、形式不正: `INVALID_ARGUMENT`）
 
 **Done Criteria:**
-- [ ] 同一データに対する `snapshot_id` と `time_travel` 解決結果が再現可能
-- [ ] `search_mode=global` + `time_travel` の回帰テストで要約混線が発生しない
+- [x] 同一データに対する `snapshot_id` と `time_travel` 解決結果が再現可能
+- [x] `search_mode=global` + `time_travel` の回帰テストで要約混線が発生しない
+
+**Notes:**
+- `storage::snapshot::SnapshotCatalog` を追加し、`wal-lsn-*` の durable 進行を `created_at_unix_ms` 付きで永続化する台帳を導入
+- `Repository::resolve_snapshot_id_at_or_before` で日時→`snapshot_id` を二分探索で解決し、`QueryEngine` は `snapshot_id > time_travel > latest` の優先順で固定
+- `time_travel` は `YYYY-MM-DD` を UTC 終日 as-of、RFC3339 を UTC instant として解決し、存在しない時点は `NOT_FOUND`、形式不正は `INVALID_ARGUMENT` へ正規化
+- `CommunitySummary.snapshot_lsn_range` と version-aware filtering を導入し、`search_mode=global` でも時点に合う要約だけを使うようにした
 
 ---
 

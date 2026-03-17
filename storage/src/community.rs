@@ -19,6 +19,20 @@ pub struct CommunitySummary {
     pub community_id: usize,
     pub top_nodes: Vec<u64>,
     pub summary: String,
+    pub snapshot_lsn_range: Option<(u64, u64)>,
+}
+
+impl CommunitySummary {
+    pub fn is_visible_at_lsn(&self, lsn: u64) -> bool {
+        self.snapshot_lsn_range
+            .map(|(start, end)| start <= lsn && lsn <= end)
+            .unwrap_or(true)
+    }
+
+    pub fn with_snapshot_lsn_range(mut self, start_lsn: u64, end_lsn: u64) -> Self {
+        self.snapshot_lsn_range = Some((start_lsn, end_lsn));
+        self
+    }
 }
 
 pub trait CommunitySummarizer: Send + Sync {
@@ -198,6 +212,14 @@ impl CommunityEngine {
     pub fn summaries(&self) -> &[CommunitySummary] {
         &self.summaries
     }
+
+    pub fn summaries_for_snapshot(&self, snapshot_lsn: u64) -> Vec<CommunitySummary> {
+        self.summaries
+            .iter()
+            .cloned()
+            .map(|summary| summary.with_snapshot_lsn_range(snapshot_lsn, snapshot_lsn))
+            .collect()
+    }
 }
 
 fn build_summaries(
@@ -232,6 +254,7 @@ fn build_summaries(
                 community_id: community.id,
                 top_nodes: community_top,
                 summary,
+                snapshot_lsn_range: None,
             });
         }
     }

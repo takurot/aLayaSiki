@@ -2,7 +2,7 @@ use crate::crypto::{AtRestCipher, NoOpCipher};
 use crate::hyper_index::HyperIndex;
 use crate::index::AdjacencyGraph;
 use crate::session::{SessionGraph, SessionManager, SessionOwner};
-use crate::snapshot::{SnapshotError, SnapshotManager};
+use crate::snapshot::{SnapshotCatalog, SnapshotCatalogEntry, SnapshotError, SnapshotManager};
 use crate::wal::{Wal, WalError, WalOptions};
 use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use alayasiki_core::model::{Edge, Node};
@@ -253,6 +253,7 @@ pub struct Repository {
     idempotency_index: Arc<RwLock<HashMap<String, Vec<u64>>>>,
     edge_metadata: Arc<RwLock<HashMap<EdgeMetaKey, HashMap<String, String>>>>,
     snapshot_manager: Option<SnapshotManager>,
+    snapshot_catalog: Arc<Mutex<SnapshotCatalog>>,
     pub session_manager: Arc<SessionManager>,
 }
 
@@ -269,6 +270,7 @@ impl Repository {
             idempotency_index: Arc::new(RwLock::new(HashMap::new())),
             edge_metadata: Arc::new(RwLock::new(HashMap::new())),
             snapshot_manager: None,
+            snapshot_catalog: Arc::new(Mutex::new(SnapshotCatalog::new_in_memory())),
             session_manager: Arc::new(SessionManager::new(DEFAULT_SESSION_TTL)),
         }
     }
@@ -390,6 +392,16 @@ impl Repository {
             }
         }
 
+        let mut snapshot_catalog = SnapshotCatalog::open(snapshot_catalog_path(&wal_path)).await?;
+        let durable_lsn = {
+            let wal_lock = wal.lock().await;
+            wal_lock.durable_lsn()
+        };
+        snapshot_catalog.truncate_after_lsn(durable_lsn).await?;
+        snapshot_catalog
+            .record_snapshot(durable_lsn, current_unix_timestamp_ms())
+            .await?;
+
         Ok(Self {
             wal,
             tx_lock,
@@ -398,6 +410,7 @@ impl Repository {
             idempotency_index: Arc::new(RwLock::new(materialized.idempotency_index)),
             edge_metadata: Arc::new(RwLock::new(materialized.edge_metadata)),
             snapshot_manager,
+            snapshot_catalog: Arc::new(Mutex::new(snapshot_catalog)),
             session_manager: Arc::new(SessionManager::new(DEFAULT_SESSION_TTL)),
         })
     }
@@ -663,10 +676,12 @@ impl Repository {
 
         // Append the full transaction before applying the in-memory mutation set.
         // Call Repository::flush() before shutdown when using buffered WAL policies.
-        {
+        let durable_lsn = {
             let mut wal = self.wal.lock().await;
             wal.append(&tx_bytes).await?;
-        }
+            wal.durable_lsn()
+        };
+        self.record_durable_snapshot(durable_lsn).await?;
 
         // Apply in-memory updates under write locks so readers don't observe partial state.
         let mut nodes = self.nodes.write().await;
@@ -743,10 +758,12 @@ impl Repository {
         let tx_entry = WalEntry::Transaction(tx_operations.clone());
         let tx_bytes = serialize_wal_entry(&tx_entry)?;
 
-        {
+        let durable_lsn = {
             let mut wal = self.wal.lock().await;
             wal.append(&tx_bytes).await?;
-        }
+            wal.durable_lsn()
+        };
+        self.record_durable_snapshot(durable_lsn).await?;
 
         let mut nodes = self.nodes.write().await;
         let mut index = self.hyper_index.write().await;
@@ -775,8 +792,12 @@ impl Repository {
     /// Call this before graceful shutdown when using buffered flush policies.
     pub async fn flush(&self) -> Result<(), RepoError> {
         let _tx_guard = self.tx_lock.lock().await;
-        let mut wal = self.wal.lock().await;
-        wal.flush().await?;
+        let durable_lsn = {
+            let mut wal = self.wal.lock().await;
+            wal.flush().await?;
+            wal.durable_lsn()
+        };
+        self.record_durable_snapshot(durable_lsn).await?;
         Ok(())
     }
 
@@ -812,6 +833,30 @@ impl Repository {
         format!("wal-lsn-{}", wal.durable_lsn())
     }
 
+    pub async fn resolve_snapshot_id_at_or_before(
+        &self,
+        as_of_unix_ms: i64,
+    ) -> Result<String, RepoError> {
+        let catalog = self.snapshot_catalog.lock().await;
+        catalog
+            .resolve_as_of(as_of_unix_ms)
+            .map(|entry| entry.snapshot_id.clone())
+            .ok_or_else(|| RepoError::SnapshotNotFound(format!("as-of-{as_of_unix_ms}")))
+    }
+
+    pub async fn snapshot_catalog_entries(&self) -> Vec<SnapshotCatalogEntry> {
+        let catalog = self.snapshot_catalog.lock().await;
+        catalog.entries().to_vec()
+    }
+
+    async fn record_durable_snapshot(&self, durable_lsn: u64) -> Result<(), RepoError> {
+        let mut catalog = self.snapshot_catalog.lock().await;
+        catalog
+            .record_snapshot(durable_lsn, current_unix_timestamp_ms())
+            .await?;
+        Ok(())
+    }
+
     /// Create a durable backup snapshot file at the current WAL LSN.
     pub async fn create_backup_snapshot(&self) -> Result<String, RepoError> {
         let snapshot_manager = self
@@ -827,6 +872,7 @@ impl Repository {
                 wal.flush().await?;
                 wal.durable_lsn()
             };
+            self.record_durable_snapshot(lsn).await?;
 
             let mut nodes: Vec<Node> = self.nodes.read().await.values().cloned().collect();
             nodes.sort_by_key(|node| node.id);
@@ -1006,10 +1052,12 @@ impl Repository {
                 .map_err(|_| RepoError::Serialization)?;
             let bytes = serializer.into_serializer().into_inner();
 
-            {
+            let durable_lsn = {
                 let mut wal = self.wal.lock().await;
                 wal.append(&bytes).await?;
-            }
+                wal.durable_lsn()
+            };
+            self.record_durable_snapshot(durable_lsn).await?;
 
             index.insert(key.to_string(), node_ids);
         }
@@ -1256,7 +1304,18 @@ fn apply_tx_operation(
     }
 }
 
-fn parse_wal_snapshot_lsn(snapshot_id: &str) -> Option<u64> {
+fn snapshot_catalog_path(wal_path: &Path) -> PathBuf {
+    wal_path.with_extension("snapshot_catalog.rkyv")
+}
+
+fn current_unix_timestamp_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
+pub fn parse_wal_snapshot_lsn(snapshot_id: &str) -> Option<u64> {
     snapshot_id.strip_prefix("wal-lsn-")?.parse::<u64>().ok()
 }
 
@@ -1264,6 +1323,8 @@ fn parse_wal_snapshot_lsn(snapshot_id: &str) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::wal::WalFlushPolicy;
+    use std::thread;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -1745,6 +1806,38 @@ mod tests {
 
         let reopened = Repository::open(&wal_path).await.unwrap();
         assert_eq!(reopened.list_node_ids().await, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_snapshot_id_at_or_before_uses_persisted_catalog() {
+        let before_repo = current_unix_timestamp_ms() - 1;
+        let dir = tempdir().unwrap();
+        let wal_path = dir.path().join("snapshot_catalog_resolution.wal");
+        let repo = Repository::open(&wal_path).await.unwrap();
+
+        repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+            .await
+            .unwrap();
+        let first_snapshot = repo.current_snapshot_id().await;
+        let after_first = current_unix_timestamp_ms();
+
+        thread::sleep(Duration::from_millis(5));
+
+        repo.put_node(Node::new(2, vec![2.0], "N2".to_string()))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            repo.resolve_snapshot_id_at_or_before(before_repo).await,
+            Err(RepoError::SnapshotNotFound(_))
+        ));
+        assert_eq!(
+            repo.resolve_snapshot_id_at_or_before(after_first)
+                .await
+                .unwrap(),
+            first_snapshot
+        );
+        assert_eq!(repo.snapshot_catalog_entries().await.len(), 3);
     }
 
     #[tokio::test]
