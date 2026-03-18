@@ -491,31 +491,29 @@ async fn test_snapshot_id_takes_priority_over_time_travel() {
 async fn test_time_travel_reflected_in_response_when_no_snapshot_id() {
     let (_dir, repo, _summaries) = provenance_repo().await;
     let engine = QueryEngine::new(repo);
+    let today_utc = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
-    let request = QueryRequest::parse_json(
-        r#"{
+    let request = QueryRequest::parse_json(&format!(
+        r#"{{
             "query": "EV production",
             "mode": "evidence",
             "search_mode": "local",
             "top_k": 5,
-            "time_travel": "2024-06-01"
-        }"#,
-    )
+            "time_travel": "{}"
+        }}"#,
+        today_utc
+    ))
     .unwrap();
 
     let response = engine.execute(request).await.unwrap();
 
-    // When time_travel is provided without snapshot_id, the resolved snapshot_id
-    // should be included in the response (current snapshot since we don't have
-    // actual time-travel yet, but the field should be populated)
     assert!(
         response.snapshot_id.is_some(),
         "snapshot_id should be resolved when time_travel is provided"
     );
-    // time_travel should be reflected in the response
     assert_eq!(
         response.time_travel.as_deref(),
-        Some("2024-06-01"),
+        Some(today_utc.as_str()),
         "time_travel should be reflected in response"
     );
 }

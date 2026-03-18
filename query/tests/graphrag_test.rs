@@ -518,6 +518,7 @@ async fn test_global_search_disables_summary_when_snapshot_is_pinned() {
         community_id: 0,
         top_nodes: vec![2],
         summary: "Global synthesis: leaked future summary".to_string(),
+        snapshot_lsn_range: None,
     }];
     let engine = QueryEngine::new(repo).with_community_summaries(summaries);
 

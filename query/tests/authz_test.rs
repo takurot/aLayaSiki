@@ -162,6 +162,7 @@ async fn execute_authorized_global_avoids_cross_tenant_summary_synthesis() {
         community_id: 1,
         top_nodes: vec![10, 11],
         summary: "Cross-tenant summary mentions beta confidential program".to_string(),
+        snapshot_lsn_range: None,
     }];
     let engine = QueryEngine::new(repo).with_community_summaries(summaries);
 

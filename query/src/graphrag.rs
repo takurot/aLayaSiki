@@ -214,6 +214,7 @@ mod tests {
             community_id: 0,
             top_nodes: vec![1],
             summary: "EV production and battery technology advances".to_string(),
+            snapshot_lsn_range: None,
         };
         let score = score_community_summary("EV production", &summary);
         assert!(score > 0.0, "matching terms should produce positive score");
@@ -227,12 +228,14 @@ mod tests {
                 community_id: 0,
                 top_nodes: vec![1, 2],
                 summary: "EV production and competition among automakers".to_string(),
+                snapshot_lsn_range: None,
             },
             CommunitySummary {
                 level: 0,
                 community_id: 1,
                 top_nodes: vec![3, 4],
                 summary: "Government regulation and emission standards".to_string(),
+                snapshot_lsn_range: None,
             },
         ];
 

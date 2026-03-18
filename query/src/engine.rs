@@ -13,14 +13,14 @@ use alayasiki_core::embedding::deterministic_embedding;
 use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use alayasiki_core::metrics::{MetricsCollector, MetricsSnapshot};
 use alayasiki_core::model::Node;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use storage::community::CommunitySummary;
-use storage::repo::{RepoError, Repository, SnapshotView};
+use storage::repo::{parse_wal_snapshot_lsn, RepoError, Repository, SnapshotView};
 use storage::session::{SessionGraph, SessionOwner};
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -215,6 +215,15 @@ pub struct ExecutionState {
     pub exclusions: Vec<ExclusionReason>,
     pub nodes: Vec<RankedNode>,
     pub edges: Vec<InternalEdge>,
+}
+
+#[derive(Clone)]
+struct ResolvedSnapshot {
+    snapshot_id: String,
+    snapshot_lsn: u64,
+    snapshot_view: Option<Arc<SnapshotView>>,
+    time_travel: Option<String>,
+    requires_versioned_summaries: bool,
 }
 
 impl QueryEngine {
@@ -421,7 +430,7 @@ impl QueryEngine {
             .clone()
             .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string());
         let mut plan = QueryPlanner::plan(&request);
-        let (resolved_snapshot_id, snapshot_view) = self.resolve_snapshot_view(&request).await?;
+        let resolved_snapshot = self.resolve_snapshot(&request).await?;
         let tenant_scoped = tenant_scope.is_some();
         let cache_eligible = !tenant_scoped && request.session_id.is_none();
 
@@ -435,7 +444,7 @@ impl QueryEngine {
         let cache_key = SemanticCacheKey::from_request(
             &request,
             &effective_model_id,
-            &resolved_snapshot_id,
+            &resolved_snapshot.snapshot_id,
             plan.effective_search_mode,
         );
 
@@ -469,7 +478,7 @@ impl QueryEngine {
                     &request,
                     &mut plan,
                     &effective_model_id,
-                    snapshot_view.as_deref(),
+                    &resolved_snapshot,
                     tenant_scope.as_deref(),
                     session_graph.as_ref(),
                 )
@@ -481,7 +490,7 @@ impl QueryEngine {
                         &request,
                         &mut plan,
                         &effective_model_id,
-                        snapshot_view.as_deref(),
+                        resolved_snapshot.snapshot_view.as_deref(),
                         tenant_scope.as_deref(),
                         session_graph.as_ref(),
                     )
@@ -494,7 +503,7 @@ impl QueryEngine {
                         &request,
                         plan,
                         &effective_model_id,
-                        snapshot_view.as_deref(),
+                        resolved_snapshot.snapshot_view.as_deref(),
                         tenant_scope.as_deref(),
                         session_graph.as_ref(),
                     )
@@ -573,13 +582,6 @@ impl QueryEngine {
             }
         };
 
-        // Reflect time_travel in response when provided (without snapshot_id override)
-        let time_travel = if request.snapshot_id.is_none() {
-            request.time_travel.clone()
-        } else {
-            None
-        };
-
         let latency_ms = start.elapsed().as_millis() as u64;
 
         let response = QueryResponse {
@@ -598,8 +600,8 @@ impl QueryEngine {
                 exclusions: state.exclusions,
             },
             model_id: Some(effective_model_id),
-            snapshot_id: Some(resolved_snapshot_id),
-            time_travel,
+            snapshot_id: Some(resolved_snapshot.snapshot_id.clone()),
+            time_travel: resolved_snapshot.time_travel.clone(),
             latency_ms,
             error_code: None,
         };
@@ -646,16 +648,69 @@ impl QueryEngine {
         cache.insert(key, query, response);
     }
 
-    async fn resolve_snapshot_view(
+    async fn resolve_snapshot(
         &self,
         request: &QueryRequest,
-    ) -> Result<(String, Option<Arc<SnapshotView>>), QueryError> {
-        let Some(snapshot_id) = request.snapshot_id.clone() else {
-            return Ok((self.repo.current_snapshot_id().await, None));
-        };
+    ) -> Result<ResolvedSnapshot, QueryError> {
+        if let Some(snapshot_id) = request.snapshot_id.clone() {
+            let snapshot_lsn = parse_wal_snapshot_lsn(&snapshot_id).ok_or_else(|| {
+                QueryError::InvalidQuery(format!(
+                    "snapshot_id must be wal-lsn-<lsn>: {snapshot_id}"
+                ))
+            })?;
+            let snapshot_view = self.load_snapshot_view(&snapshot_id).await?;
+            return Ok(ResolvedSnapshot {
+                snapshot_id,
+                snapshot_lsn,
+                snapshot_view: Some(snapshot_view),
+                time_travel: None,
+                requires_versioned_summaries: true,
+            });
+        }
 
-        match self.repo.load_snapshot_view(&snapshot_id).await {
-            Ok(view) => Ok((snapshot_id, Some(Arc::new(view)))),
+        if let Some(time_travel) = request.time_travel.as_deref() {
+            let as_of_unix_ms = parse_time_travel_as_of_unix_ms(time_travel)?;
+            let snapshot_id = self
+                .repo
+                .resolve_snapshot_id_at_or_before(as_of_unix_ms)
+                .await
+                .map_err(|err| match err {
+                    RepoError::SnapshotNotFound(_) => {
+                        QueryError::NotFound(format!("time_travel `{time_travel}`"))
+                    }
+                    other => QueryError::Repository(other),
+                })?;
+            let snapshot_lsn = parse_wal_snapshot_lsn(&snapshot_id).ok_or_else(|| {
+                QueryError::InvalidQuery(format!(
+                    "snapshot_id must be wal-lsn-<lsn>: {snapshot_id}"
+                ))
+            })?;
+            let snapshot_view = self.load_snapshot_view(&snapshot_id).await?;
+            return Ok(ResolvedSnapshot {
+                snapshot_id,
+                snapshot_lsn,
+                snapshot_view: Some(snapshot_view),
+                time_travel: Some(time_travel.to_string()),
+                requires_versioned_summaries: true,
+            });
+        }
+
+        let snapshot_id = self.repo.current_snapshot_id().await;
+        let snapshot_lsn = parse_wal_snapshot_lsn(&snapshot_id).ok_or_else(|| {
+            QueryError::InvalidQuery(format!("snapshot_id must be wal-lsn-<lsn>: {snapshot_id}"))
+        })?;
+        Ok(ResolvedSnapshot {
+            snapshot_id,
+            snapshot_lsn,
+            snapshot_view: None,
+            time_travel: None,
+            requires_versioned_summaries: false,
+        })
+    }
+
+    async fn load_snapshot_view(&self, snapshot_id: &str) -> Result<Arc<SnapshotView>, QueryError> {
+        match self.repo.load_snapshot_view(snapshot_id).await {
+            Ok(view) => Ok(Arc::new(view)),
             Err(RepoError::SnapshotNotFound(_)) => {
                 Err(QueryError::NotFound(format!("snapshot_id `{snapshot_id}`")))
             }
@@ -791,10 +846,11 @@ impl QueryEngine {
         request: &QueryRequest,
         plan: &mut QueryPlan,
         embedding_model_id: &str,
-        snapshot_view: Option<&SnapshotView>,
+        resolved_snapshot: &ResolvedSnapshot,
         tenant_scope: Option<&str>,
         session: Option<&SessionGraph>,
     ) -> Result<(ExecutionState, QueryPlan, Option<String>), QueryError> {
+        let snapshot_view = resolved_snapshot.snapshot_view.as_deref();
         if tenant_scope.is_some() {
             // Community summaries are currently shared across tenants.
             // Disable summary synthesis under tenant-scoped authorization to avoid leakage.
@@ -817,32 +873,6 @@ impl QueryEngine {
             state.exclusions.push(ExclusionReason {
                 node_id: None,
                 reason: "global_summary_disabled_by_tenant_scope".to_string(),
-            });
-            return Ok((state, plan.clone(), None));
-        }
-
-        if snapshot_view.is_some() {
-            // Community summaries are not versioned by snapshot yet.
-            // To keep snapshot queries reproducible, skip global synthesis.
-            plan.steps = vec![
-                "vector_search",
-                "graph_expansion",
-                "context_pruning",
-                "global_fallback_snapshot_pinned",
-            ];
-            let mut state = self
-                .execute_with_plan(
-                    request,
-                    plan,
-                    embedding_model_id,
-                    snapshot_view,
-                    tenant_scope,
-                    session,
-                )
-                .await?;
-            state.exclusions.push(ExclusionReason {
-                node_id: None,
-                reason: "global_summary_disabled_by_snapshot_pin".to_string(),
             });
             return Ok((state, plan.clone(), None));
         }
@@ -872,6 +902,40 @@ impl QueryEngine {
             return Ok((state, plan.clone(), None));
         }
 
+        let summary_candidates: Vec<CommunitySummary> = self
+            .community_summaries
+            .iter()
+            .filter(|summary| {
+                summary.is_visible_at_lsn(resolved_snapshot.snapshot_lsn)
+                    && (!resolved_snapshot.requires_versioned_summaries
+                        || summary.snapshot_lsn_range.is_some())
+            })
+            .cloned()
+            .collect();
+        if summary_candidates.is_empty() && resolved_snapshot.requires_versioned_summaries {
+            plan.steps = vec![
+                "vector_search",
+                "graph_expansion",
+                "context_pruning",
+                "global_fallback_snapshot_pinned",
+            ];
+            let mut state = self
+                .execute_with_plan(
+                    request,
+                    plan,
+                    embedding_model_id,
+                    snapshot_view,
+                    tenant_scope,
+                    session,
+                )
+                .await?;
+            state.exclusions.push(ExclusionReason {
+                node_id: None,
+                reason: "global_summary_disabled_by_snapshot_pin".to_string(),
+            });
+            return Ok((state, plan.clone(), None));
+        }
+
         // Always build filtered evidence first so global synthesis can respect request filters.
         let mut state = self
             .execute_with_plan(
@@ -885,7 +949,7 @@ impl QueryEngine {
             .await?;
 
         // MAP: Score community summaries.
-        let ranked = map_community_summaries(&request.query, &self.community_summaries);
+        let ranked = map_community_summaries(&request.query, &summary_candidates);
         let relation_filter = collect_relation_filter(request);
         let time_range = parse_time_range(request)?;
         let retention_cutoff = retention_cutoff_unix(request);
@@ -1566,6 +1630,25 @@ fn parse_time_range(request: &QueryRequest) -> Result<Option<(NaiveDate, NaiveDa
     Ok(Some((from, to)))
 }
 
+fn parse_time_travel_as_of_unix_ms(input: &str) -> Result<i64, QueryError> {
+    if let Ok(date) = NaiveDate::parse_from_str(input, "%Y-%m-%d") {
+        return date
+            .and_hms_milli_opt(23, 59, 59, 999)
+            .map(|datetime| datetime.and_utc().timestamp_millis())
+            .ok_or_else(|| {
+                QueryError::InvalidQuery(
+                    "time_travel must be YYYY-MM-DD or RFC3339 format".to_string(),
+                )
+            });
+    }
+
+    DateTime::parse_from_rfc3339(input)
+        .map(|datetime| datetime.with_timezone(&Utc).timestamp_millis())
+        .map_err(|_| {
+            QueryError::InvalidQuery("time_travel must be YYYY-MM-DD or RFC3339 format".to_string())
+        })
+}
+
 fn node_filter_exclusion_reason(
     node: &Node,
     entity_filter: &HashSet<&str>,
@@ -1641,7 +1724,7 @@ fn current_unix_timestamp() -> u64 {
 }
 
 fn retention_cutoff_unix(request: &QueryRequest) -> Option<u64> {
-    if request.snapshot_id.is_some() {
+    if request.snapshot_id.is_some() || request.time_travel.is_some() {
         None
     } else {
         Some(current_unix_timestamp())
