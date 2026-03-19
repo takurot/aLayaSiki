@@ -40,6 +40,17 @@ jobs:
       - name: Run ingestion E2E integration tests
         run: cargo test -p ingestion --test e2e_pipeline_test -- --nocapture
 
+  ann-recall-gate:
+    name: ANN Recall@k Gate (HNSW vs Linear ground-truth)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run HNSW recall@k and correctness tests
+        run: cargo test -p storage --test ann_hnsw_test -- --nocapture
+
   bench-smoke:
     name: Benchmark Gate (operational latency)
     runs-on: ubuntu-latest
