@@ -1,9 +1,19 @@
-use crate::index::{AdjacencyGraph, LinearAnnIndex};
+#[cfg(feature = "hnsw")]
+use crate::index::HnswIndex;
+#[cfg(not(feature = "hnsw"))]
+use crate::index::LinearAnnIndex;
+use crate::index::{AdjacencyGraph, VectorIndex};
+
 use std::collections::HashMap;
 
-/// HyperIndex combines Vector and Graph indexes with ID mapping
+/// HyperIndex combines Vector and Graph indexes with ID mapping.
+///
+/// The vector component is abstracted behind [`VectorIndex`] so that the
+/// HNSW-backed [`HnswIndex`] (feature `hnsw`, enabled by default) and the
+/// linear-scan [`LinearAnnIndex`] (fallback / test ground-truth) can be
+/// swapped without changing any call-site code.
 pub struct HyperIndex {
-    pub vector_index: LinearAnnIndex,
+    pub vector_index: Box<dyn VectorIndex>,
     pub graph_index: AdjacencyGraph,
     // ID mapping for cross-referencing (e.g., entity resolution)
     id_aliases: HashMap<String, u64>,
@@ -11,15 +21,29 @@ pub struct HyperIndex {
 
 impl HyperIndex {
     pub fn new() -> Self {
+        #[cfg(feature = "hnsw")]
+        let vector_index: Box<dyn VectorIndex> = Box::new(HnswIndex::new());
+        #[cfg(not(feature = "hnsw"))]
+        let vector_index: Box<dyn VectorIndex> = Box::new(LinearAnnIndex::new());
+
         Self {
-            vector_index: LinearAnnIndex::new(),
+            vector_index,
+            graph_index: AdjacencyGraph::new(),
+            id_aliases: HashMap::new(),
+        }
+    }
+
+    /// Create a HyperIndex with a custom VectorIndex (useful in tests).
+    pub fn with_vector_index(vector_index: Box<dyn VectorIndex>) -> Self {
+        Self {
+            vector_index,
             graph_index: AdjacencyGraph::new(),
             id_aliases: HashMap::new(),
         }
     }
 
     pub fn insert_node(&mut self, id: u64, embedding: Vec<f32>) {
-        self.vector_index.insert(id, embedding);
+        self.vector_index.insert(id, &embedding);
     }
 
     pub fn insert_edge(
@@ -97,10 +121,28 @@ mod tests {
     #[test]
     fn test_hyper_index_alias() {
         let mut index = HyperIndex::new();
-        index.insert_node(1, vec![1.0]);
+        index.insert_node(1, vec![1.0, 0.0]);
         index.register_alias("Alice", 1);
 
         assert_eq!(index.resolve_alias("Alice"), Some(1));
         assert_eq!(index.resolve_alias("Bob"), None);
+    }
+
+    #[test]
+    fn test_hyper_index_remove_node() {
+        let mut index = HyperIndex::new();
+        index.insert_node(1, vec![1.0, 0.0]);
+        index.insert_node(2, vec![0.0, 1.0]);
+        index.insert_edge(1, 2, "rel", 1.0);
+        index.register_alias("Alice", 1);
+
+        index.remove_node(1);
+
+        // Vector search must not return deleted node
+        let results = index.search_vector(&[1.0, 0.0], 5);
+        assert!(results.iter().all(|(id, _)| *id != 1));
+
+        // Alias must be cleaned up
+        assert_eq!(index.resolve_alias("Alice"), None);
     }
 }
