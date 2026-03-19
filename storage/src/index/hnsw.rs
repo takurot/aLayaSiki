@@ -57,6 +57,13 @@ impl HnswIndex {
         }
     }
 
+    fn reset_if_empty(&mut self) {
+        if self.count == 0 {
+            self.inner = None;
+            self.dim = None;
+        }
+    }
+
     /// Initialise the inner index for the given dimension if not already done.
     /// Returns `false` if the dimension conflicts with an already-initialised index.
     fn ensure_index(&mut self, dim: usize) -> bool {
@@ -96,6 +103,25 @@ impl HnswIndex {
             }
         }
     }
+
+    fn remove_existing(&mut self, id: u64) -> bool {
+        let Some(idx) = &self.inner else { return false };
+        if !idx.contains(id) {
+            return false;
+        }
+        match idx.remove(id) {
+            Ok(removed) if removed > 0 => {
+                self.count = self.count.saturating_sub(removed);
+                self.reset_if_empty();
+                true
+            }
+            Ok(_) => false,
+            Err(e) => {
+                tracing::error!("HnswIndex::delete id={id}: {e}");
+                false
+            }
+        }
+    }
 }
 
 impl Default for HnswIndex {
@@ -107,8 +133,10 @@ impl Default for HnswIndex {
 impl VectorIndex for HnswIndex {
     fn insert(&mut self, id: u64, embedding: &[f32]) {
         if embedding.is_empty() {
+            self.remove_existing(id);
             return;
         }
+        self.remove_existing(id);
         if !self.ensure_index(embedding.len()) {
             tracing::warn!(
                 "HnswIndex::insert: dimension mismatch (expected {:?}, got {}), skipping id={}",
@@ -120,11 +148,6 @@ impl VectorIndex for HnswIndex {
         }
         self.maybe_reserve(self.count + 1);
         let Some(idx) = &self.inner else { return };
-        // usearch returns an error if the key already exists; treat as upsert.
-        if idx.contains(id) {
-            let _ = idx.remove(id);
-            self.count = self.count.saturating_sub(1);
-        }
         match idx.add(id, embedding) {
             Ok(()) => self.count += 1,
             Err(e) => tracing::error!("HnswIndex::insert id={id}: {e}"),
@@ -132,20 +155,7 @@ impl VectorIndex for HnswIndex {
     }
 
     fn delete(&mut self, id: u64) -> bool {
-        let Some(idx) = &self.inner else { return false };
-        if !idx.contains(id) {
-            return false;
-        }
-        match idx.remove(id) {
-            Ok(_) => {
-                self.count = self.count.saturating_sub(1);
-                true
-            }
-            Err(e) => {
-                tracing::error!("HnswIndex::delete id={id}: {e}");
-                false
-            }
-        }
+        self.remove_existing(id)
     }
 
     fn search(&self, query: &[f32], k: usize) -> Vec<(u64, f32)> {
@@ -190,7 +200,11 @@ impl VectorIndex for HnswIndex {
     }
 
     fn dim(&self) -> Option<usize> {
-        self.dim
+        if self.count == 0 {
+            None
+        } else {
+            self.dim
+        }
     }
 }
 
@@ -257,5 +271,34 @@ mod tests {
         assert_eq!(index.dim(), None);
         index.insert(1, &[1.0_f32, 0.0, 0.0]);
         assert_eq!(index.dim(), Some(3));
+    }
+
+    #[test]
+    fn test_hnsw_empty_upsert_removes_existing_vector() {
+        let mut index = HnswIndex::new();
+        index.insert(1, &[1.0_f32, 0.0]);
+        index.insert(2, &[0.0, 1.0]);
+
+        index.insert(1, &[]);
+
+        assert_eq!(index.len(), 1);
+        let results = index.search(&[1.0, 0.0], 5);
+        assert!(results.iter().all(|(id, _)| *id != 1));
+    }
+
+    #[test]
+    fn test_hnsw_reset_after_last_delete_allows_new_dimension() {
+        let mut index = HnswIndex::new();
+        index.insert(1, &[1.0_f32, 0.0]);
+        assert!(index.delete(1));
+        assert_eq!(index.len(), 0);
+        assert_eq!(index.dim(), None);
+
+        index.insert(2, &[1.0_f32, 0.0, 0.0]);
+
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.dim(), Some(3));
+        let results = index.search(&[1.0, 0.0, 0.0], 1);
+        assert_eq!(results[0].0, 2);
     }
 }
