@@ -398,13 +398,19 @@
 
 * Depends on: PR-14.7
 
-- [ ] **macOS (Mシリーズ) ビルド失敗の解消**: `usearch`/`cxx` 依存による arm64 クロスコンパイル失敗を修正 (Issue #47)
+- [x] **macOS (Mシリーズ) ビルド失敗の解消**: `usearch`/`cxx` 依存による arm64 クロスコンパイル失敗を修正 (Issue #47)
 - [ ] **マルチプラットフォームCIの安定化**: macOS (arm64) / Linux (x86_64) の両環境でテストが通過することをCIで保証
-- [ ] **開発サイクルの正常化**: ローカル開発環境での `cargo build` / `cargo test --workspace` が追加設定なしで完了すること
+- [x] **開発サイクルの正常化**: ローカル開発環境での `cargo build` / `cargo test --workspace` が追加設定なしで完了すること
 
 **Done Criteria:**
 - [ ] `cargo test --workspace` が macOS (Apple Silicon) と Linux で追加設定なし通過
 - [ ] CI の `build` / `test` ジョブが両プラットフォームでグリーン
+
+**Notes:**
+- `storage` の `usearch` 依存を `cfg(not(target_os = "macos"))` へ移し、macOS では `HnswIndex` API を保ったまま `LinearAnnIndex` ベースのフォールバックを使うことで `cxx` / Apple SDK ヘッダ欠落によるビルド失敗を回避する方針に切り替えた
+- `.github/workflows/ci.yml` に `rust-build` と macOS 行列の `rust-quality` / `rust-tests` を追加し、Linux と macOS の両方で build/test を常時検証できるようにした
+- 前回観測していた `alayasiki-core` の「停止」はハングではなく初回 `test` コンパイルの長時間化だった。途中中断で壊れた `target/debug/incremental` を `cargo clean` で再生成した後、ローカル Apple Silicon で `cargo test --workspace -j 1` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` の通過を確認した
+- macOS フォールバックは `usearch` 実装と同じ契約になるよう調整し、空 embedding の upsert を delete として扱うこと、次元不一致 insert をスキップすること、最後の削除後に `dim` をリセットすることを `storage` のユニットテストで確認した
 
 ---
 

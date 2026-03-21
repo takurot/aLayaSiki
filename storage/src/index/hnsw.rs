@@ -1,22 +1,28 @@
+use super::ann::{LinearAnnIndex, VectorIndex};
+
+#[cfg(not(target_os = "macos"))]
+use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
+
+#[cfg(not(target_os = "macos"))]
 /// HNSW-based ANN index backed by the `usearch` C++ library.
 ///
 /// # Lazy initialisation
 /// The underlying `usearch::Index` requires the vector dimension at creation
-/// time.  `HnswIndex` delays creation until the first `insert` call so that
+/// time. `HnswIndex` delays creation until the first `insert` call so that
 /// callers do not need to know the dimension up-front (matching the
-/// `LinearAnnIndex` interface).  Any subsequent `insert` with a mismatched
+/// `LinearAnnIndex` interface). Any subsequent `insert` with a mismatched
 /// dimension is silently ignored (same behaviour as `cosine_similarity`).
 ///
 /// # Thread safety
 /// `usearch::Index` wraps a C++ object via a raw pointer and therefore does
-/// not derive `Send`/`Sync` automatically.  The underlying USearch library is
+/// not derive `Send`/`Sync` automatically. The underlying USearch library is
 /// documented as thread-safe for concurrent reads; exclusive write access is
-/// enforced at the `HyperIndex` level by an `RwLock`.  The `unsafe` impls
+/// enforced at the `HyperIndex` level by an `RwLock`. The `unsafe` impls
 /// below are therefore sound.
 ///
 /// # ANN Sidecar Snapshot Format (future work)
 /// To support fast cold-start without a full WAL replay, the HNSW graph can be
-/// serialised alongside a regular storage snapshot.  Planned format:
+/// serialised alongside a regular storage snapshot. Planned format:
 ///
 /// ```text
 /// <snapshot_dir>/ann_sidecar.usearch   – native usearch binary dump
@@ -27,13 +33,9 @@
 /// ```
 ///
 /// On startup the engine checks whether the sidecar's `lsn` matches the
-/// snapshot LSN.  If so, the index is loaded directly; otherwise the index is
-/// rebuilt from the WAL replay as today.  This is tracked as a follow-up task
+/// snapshot LSN. If so, the index is loaded directly; otherwise the index is
+/// rebuilt from the WAL replay as today. This is tracked as a follow-up task
 /// in `docs/PLAN.md`.
-use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
-
-use super::ann::VectorIndex;
-
 pub struct HnswIndex {
     /// Lazily-initialised inner index (None until first insert).
     inner: Option<Index>,
@@ -43,11 +45,22 @@ pub struct HnswIndex {
     count: usize,
 }
 
+#[cfg(target_os = "macos")]
+/// macOS fallback that preserves the HNSW API while avoiding the `usearch`
+/// C++ toolchain dependency on Apple Silicon developer machines.
+pub struct HnswIndex {
+    inner: LinearAnnIndex,
+    dim: Option<usize>,
+}
+
+#[cfg(not(target_os = "macos"))]
 // SAFETY: USearch C++ implementation is thread-safe for concurrent reads.
 // Mutable operations are serialised by the RwLock on HyperIndex.
 unsafe impl Send for HnswIndex {}
+#[cfg(not(target_os = "macos"))]
 unsafe impl Sync for HnswIndex {}
 
+#[cfg(not(target_os = "macos"))]
 impl HnswIndex {
     pub fn new() -> Self {
         Self {
@@ -124,12 +137,23 @@ impl HnswIndex {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl HnswIndex {
+    pub fn new() -> Self {
+        Self {
+            inner: LinearAnnIndex::new(),
+            dim: None,
+        }
+    }
+}
+
 impl Default for HnswIndex {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 impl VectorIndex for HnswIndex {
     fn insert(&mut self, id: u64, embedding: &[f32]) {
         if embedding.is_empty() {
@@ -176,9 +200,6 @@ impl VectorIndex for HnswIndex {
         }
         match idx.search(query, count) {
             Ok(matches) => {
-                // usearch cosine metric returns angular distance = 1 - cosine_similarity.
-                // Convert back to similarity score (higher = more similar) and
-                // sort descending for a stable top-k.
                 let mut results: Vec<(u64, f32)> = matches
                     .keys
                     .into_iter()
@@ -205,6 +226,52 @@ impl VectorIndex for HnswIndex {
         } else {
             self.dim
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl VectorIndex for HnswIndex {
+    fn insert(&mut self, id: u64, embedding: &[f32]) {
+        if embedding.is_empty() {
+            self.delete(id);
+            return;
+        }
+
+        if let Some(expected_dim) = self.dim {
+            if expected_dim != embedding.len() {
+                tracing::warn!(
+                    "HnswIndex::insert: dimension mismatch (expected {:?}, got {}), skipping id={}",
+                    self.dim,
+                    embedding.len(),
+                    id
+                );
+                return;
+            }
+        } else {
+            self.dim = Some(embedding.len());
+        }
+
+        self.inner.insert(id, embedding);
+    }
+
+    fn delete(&mut self, id: u64) -> bool {
+        let deleted = self.inner.delete(id);
+        if self.inner.is_empty() {
+            self.dim = None;
+        }
+        deleted
+    }
+
+    fn search(&self, query: &[f32], k: usize) -> Vec<(u64, f32)> {
+        self.inner.search(query, k)
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn dim(&self) -> Option<usize> {
+        self.dim
     }
 }
 
