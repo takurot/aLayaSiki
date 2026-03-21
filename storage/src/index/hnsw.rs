@@ -1,5 +1,7 @@
-use super::ann::{LinearAnnIndex, VectorIndex};
+use super::ann::VectorIndex;
 
+#[cfg(target_os = "macos")]
+use super::ann::LinearAnnIndex;
 #[cfg(not(target_os = "macos"))]
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
@@ -145,6 +147,14 @@ impl HnswIndex {
             dim: None,
         }
     }
+
+    fn remove_existing(&mut self, id: u64) -> bool {
+        let deleted = self.inner.delete(id);
+        if self.inner.is_empty() {
+            self.dim = None;
+        }
+        deleted
+    }
 }
 
 impl Default for HnswIndex {
@@ -233,9 +243,11 @@ impl VectorIndex for HnswIndex {
 impl VectorIndex for HnswIndex {
     fn insert(&mut self, id: u64, embedding: &[f32]) {
         if embedding.is_empty() {
-            self.delete(id);
+            self.remove_existing(id);
             return;
         }
+
+        self.remove_existing(id);
 
         if let Some(expected_dim) = self.dim {
             if expected_dim != embedding.len() {
@@ -255,11 +267,7 @@ impl VectorIndex for HnswIndex {
     }
 
     fn delete(&mut self, id: u64) -> bool {
-        let deleted = self.inner.delete(id);
-        if self.inner.is_empty() {
-            self.dim = None;
-        }
-        deleted
+        self.remove_existing(id)
     }
 
     fn search(&self, query: &[f32], k: usize) -> Vec<(u64, f32)> {
@@ -351,6 +359,34 @@ mod tests {
         assert_eq!(index.len(), 1);
         let results = index.search(&[1.0, 0.0], 5);
         assert!(results.iter().all(|(id, _)| *id != 1));
+    }
+
+    #[test]
+    fn test_hnsw_dim_mismatch_upsert_drops_existing_vector_when_index_stays_non_empty() {
+        let mut index = HnswIndex::new();
+        index.insert(1, &[1.0_f32, 0.0]);
+        index.insert(2, &[0.0, 1.0]);
+
+        index.insert(1, &[1.0_f32, 0.0, 0.0]);
+
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.dim(), Some(2));
+        let results = index.search(&[1.0, 0.0], 5);
+        assert!(results.iter().all(|(id, _)| *id != 1));
+        assert!(results.iter().any(|(id, _)| *id == 2));
+    }
+
+    #[test]
+    fn test_hnsw_dim_mismatch_upsert_replaces_last_vector_with_new_dimension() {
+        let mut index = HnswIndex::new();
+        index.insert(1, &[1.0_f32, 0.0]);
+
+        index.insert(1, &[1.0_f32, 0.0, 0.0]);
+
+        assert_eq!(index.len(), 1);
+        assert_eq!(index.dim(), Some(3));
+        let results = index.search(&[1.0, 0.0, 0.0], 1);
+        assert_eq!(results[0].0, 1);
     }
 
     #[test]
