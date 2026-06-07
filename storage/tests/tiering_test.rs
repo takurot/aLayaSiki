@@ -61,3 +61,33 @@ async fn repository_open_with_profile_preserves_effective_capabilities() {
     assert_eq!(capabilities.zero_copy_strategy, ZeroCopyStrategy::Disabled);
     assert!(!capabilities.gpu_resident);
 }
+
+#[tokio::test]
+async fn repository_reopen_and_snapshot_view_preserves_profile() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("tiering_repo_reopen.wal");
+    let profile = StorageProfile::gpu_first(4 * 1024 * 1024 * 1024).with_gpu_runtime(GpuRuntime::Mock);
+
+    // 1. Open and verify initial capabilities
+    {
+        let repo = Repository::open_with_profile(&wal_path, profile.clone())
+            .await
+            .unwrap();
+        assert_eq!(repo.storage_capabilities().hot_tier, StorageTier::GpuVram);
+        assert_eq!(repo.hyper_index.read().await.storage_capabilities().hot_tier, StorageTier::GpuVram);
+
+        // Perform load snapshot view
+        let snapshot_id = "wal-lsn-0";
+        let snapshot_view = repo.load_snapshot_view(snapshot_id).await.unwrap();
+        assert_eq!(snapshot_view.storage_capabilities().hot_tier, StorageTier::GpuVram);
+    }
+
+    // 2. Re-open and verify replayed/recovered capabilities
+    {
+        let repo = Repository::open_with_profile(&wal_path, profile)
+            .await
+            .unwrap();
+        assert_eq!(repo.storage_capabilities().hot_tier, StorageTier::GpuVram);
+        assert_eq!(repo.hyper_index.read().await.storage_capabilities().hot_tier, StorageTier::GpuVram);
+    }
+}

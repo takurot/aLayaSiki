@@ -130,16 +130,7 @@ struct MaterializedState {
     edge_metadata: HashMap<EdgeMetaKey, HashMap<String, String>>,
 }
 
-impl MaterializedState {
-    fn empty() -> Self {
-        Self {
-            nodes: HashMap::new(),
-            hyper_index: HyperIndex::new(),
-            idempotency_index: HashMap::new(),
-            edge_metadata: HashMap::new(),
-        }
-    }
-}
+
 
 pub struct SnapshotView {
     snapshot_id: String,
@@ -151,6 +142,10 @@ pub struct SnapshotView {
 impl SnapshotView {
     pub fn snapshot_id(&self) -> &str {
         &self.snapshot_id
+    }
+
+    pub fn storage_capabilities(&self) -> &StorageCapabilities {
+        self.hyper_index.storage_capabilities()
     }
 
     pub fn list_node_ids(&self) -> Vec<u64> {
@@ -411,16 +406,12 @@ impl Repository {
         let wal = Arc::new(Mutex::new(wal_instance));
         let tx_lock = Arc::new(Mutex::new(()));
         let (mut materialized, base_lsn) =
-            load_materialized_state_from_backup(snapshot_manager.as_ref(), None).await?;
-        let existing_edges = collect_backup_edges(&materialized.hyper_index);
-        let mut rebuilt_hyper_index = HyperIndex::with_storage_profile(storage_profile.clone());
-        for node in materialized.nodes.values() {
-            rebuilt_hyper_index.insert_node(node.id, node.embedding.clone());
-        }
-        for edge in existing_edges {
-            rebuilt_hyper_index.upsert_edge(edge.source, edge.target, &edge.relation, edge.weight);
-        }
-        materialized.hyper_index = rebuilt_hyper_index;
+            load_materialized_state_from_backup(
+                snapshot_manager.as_ref(),
+                None,
+                storage_profile.clone(),
+            )
+            .await?;
 
         // Replay WAL entries newer than the snapshot baseline.
         {
@@ -1015,8 +1006,12 @@ impl Repository {
         };
 
         let (mut materialized, base_lsn) =
-            load_materialized_state_from_backup(self.snapshot_manager.as_ref(), Some(target_lsn))
-                .await?;
+            load_materialized_state_from_backup(
+                self.snapshot_manager.as_ref(),
+                Some(target_lsn),
+                self.storage_profile.clone(),
+            )
+            .await?;
 
         {
             let mut wal = self.wal.lock().await;
@@ -1063,8 +1058,12 @@ impl Repository {
         }
 
         let (mut materialized, base_lsn) =
-            load_materialized_state_from_backup(self.snapshot_manager.as_ref(), Some(target_lsn))
-                .await?;
+            load_materialized_state_from_backup(
+                self.snapshot_manager.as_ref(),
+                Some(target_lsn),
+                self.storage_profile.clone(),
+            )
+            .await?;
 
         let mut wal = self.wal.lock().await;
         wal.replay(|lsn, data| {
@@ -1214,9 +1213,17 @@ async fn deserialize_backup_snapshot(path: &Path) -> Result<RepositoryBackupSnap
 async fn load_materialized_state_from_backup(
     snapshot_manager: Option<&SnapshotManager>,
     target_lsn: Option<u64>,
+    storage_profile: StorageProfile,
 ) -> Result<(MaterializedState, u64), RepoError> {
+    let empty_state = || MaterializedState {
+        nodes: HashMap::new(),
+        hyper_index: HyperIndex::with_storage_profile(storage_profile.clone()),
+        idempotency_index: HashMap::new(),
+        edge_metadata: HashMap::new(),
+    };
+
     let Some(manager) = snapshot_manager else {
-        return Ok((MaterializedState::empty(), 0));
+        return Ok((empty_state(), 0));
     };
 
     let selected = match target_lsn {
@@ -1225,7 +1232,7 @@ async fn load_materialized_state_from_backup(
     };
 
     let Some((snapshot_lsn, path)) = selected else {
-        return Ok((MaterializedState::empty(), 0));
+        return Ok((empty_state(), 0));
     };
 
     let snapshot = deserialize_backup_snapshot(&path).await?;
@@ -1234,7 +1241,7 @@ async fn load_materialized_state_from_backup(
     }
 
     let mut nodes = HashMap::new();
-    let mut hyper_index = HyperIndex::new();
+    let mut hyper_index = HyperIndex::with_storage_profile(storage_profile);
     for node in snapshot.nodes {
         let id = node.id;
         hyper_index.insert_node(id, node.embedding.clone());
