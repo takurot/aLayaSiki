@@ -534,13 +534,13 @@
 
 * Depends on: PR-10, PR-08, PR-17.4
 
-- [ ] **AEAD暗号への置換**: `KmsHookCipher` の XOR プレースホルダを本番用 AEAD 暗号（AES-256-GCM 等）に置換し、保存時暗号化を実装完成させる (Issue #49)
+- [x] **AEAD暗号への置換**: `KmsHookCipher` の XOR プレースホルダを本番用 AEAD 暗号（AES-256-GCM 等）に置換し、保存時暗号化を実装完成させる (Issue #49)
 - [ ] **LLMによる回答合成**: `generate_answer` を単純な文字列結合から LLM による論理的合成へアップグレードし、回答の一貫性・根拠付けを改善する (Issue #50)
-- [ ] **暗号化回帰テスト**: WAL/スナップショットの暗号化・復号経路を網羅する回帰テストを追加
+- [x] **暗号化回帰テスト**: WAL/スナップショットの暗号化・復号経路を網羅する回帰テストを追加
 - [ ] **回答品質評価**: LLM合成後の `groundedness` スコアと `evidence_attachment_rate` が PR-14.6 ベースライン以上を維持することをCIで検証
 
 **Done Criteria:**
-- [ ] XOR プレースホルダが本番コードパスから排除され、AEAD実装に置換される
+- [x] XOR プレースホルダが本番コードパスから排除され、AEAD実装に置換される
 - [ ] `generate_answer` がLLM呼び出しを経由した回答を返却し、既存のgroundednessテストが通過する
 
 ---
