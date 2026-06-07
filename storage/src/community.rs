@@ -554,7 +554,7 @@ fn compute_pagerank(graph: &AdjacencyGraph, iterations: usize, damping: f64) -> 
 
     let mut is_dangling = vec![false; n];
     for (idx, edges) in out_neighbors.iter_mut().enumerate() {
-        edges.sort_by(|a, b| a.0.cmp(&b.0));
+        edges.sort_by_key(|a| a.0);
         let out_sum: f64 = edges.iter().map(|(_, w)| *w).sum();
 
         if out_sum <= f64::EPSILON {
