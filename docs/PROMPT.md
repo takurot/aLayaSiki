@@ -38,6 +38,10 @@ Use this file as the default execution rules for implementing tasks/PRs in this 
 - PII masking and policy hooks run **before** data is stored.
 - Keep diffs focused; avoid unrelated refactors during feature work.
 
+### 6) Storage Tiering & CPU Fallback
+- When GPU-First (`StorageTier::GpuVram`) is requested but the GPU runtime is unavailable or disabled, the engine **MUST** automatically fall back to CPU memory (`StorageTier::CpuMemory`) and disable zero-copy access.
+- Always query and respect effective capabilities resolved from `StorageProfile` (i.e. `StorageCapabilities`) rather than assuming requested configurations are active.
+
 ---
 
 ## Standard Implementation Workflow

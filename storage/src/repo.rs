@@ -3,6 +3,7 @@ use crate::hyper_index::HyperIndex;
 use crate::index::AdjacencyGraph;
 use crate::session::{SessionGraph, SessionManager, SessionOwner};
 use crate::snapshot::{SnapshotCatalog, SnapshotCatalogEntry, SnapshotError, SnapshotManager};
+use crate::tiering::{StorageCapabilities, StorageProfile};
 use crate::wal::{Wal, WalError, WalOptions};
 use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use alayasiki_core::model::{Edge, Node};
@@ -129,17 +130,6 @@ struct MaterializedState {
     edge_metadata: HashMap<EdgeMetaKey, HashMap<String, String>>,
 }
 
-impl MaterializedState {
-    fn empty() -> Self {
-        Self {
-            nodes: HashMap::new(),
-            hyper_index: HyperIndex::new(),
-            idempotency_index: HashMap::new(),
-            edge_metadata: HashMap::new(),
-        }
-    }
-}
-
 pub struct SnapshotView {
     snapshot_id: String,
     nodes: HashMap<u64, Node>,
@@ -150,6 +140,10 @@ pub struct SnapshotView {
 impl SnapshotView {
     pub fn snapshot_id(&self) -> &str {
         &self.snapshot_id
+    }
+
+    pub fn storage_capabilities(&self) -> &StorageCapabilities {
+        self.hyper_index.storage_capabilities()
     }
 
     pub fn list_node_ids(&self) -> Vec<u64> {
@@ -255,6 +249,8 @@ pub struct Repository {
     snapshot_manager: Option<SnapshotManager>,
     snapshot_catalog: Arc<Mutex<SnapshotCatalog>>,
     pub session_manager: Arc<SessionManager>,
+    storage_profile: StorageProfile,
+    storage_capabilities: StorageCapabilities,
 }
 
 const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
@@ -262,22 +258,37 @@ const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 impl Repository {
     /// Create a new empty Repository (no replay)
     pub fn new(wal: Arc<Mutex<Wal>>) -> Self {
+        Self::new_with_profile(wal, StorageProfile::default())
+    }
+
+    pub fn new_with_profile(wal: Arc<Mutex<Wal>>, storage_profile: StorageProfile) -> Self {
+        let storage_capabilities = storage_profile.resolve_capabilities();
+
         Self {
             wal,
             tx_lock: Arc::new(Mutex::new(())),
             nodes: Arc::new(RwLock::new(HashMap::new())),
-            hyper_index: Arc::new(RwLock::new(HyperIndex::new())),
+            hyper_index: Arc::new(RwLock::new(HyperIndex::with_storage_profile(
+                storage_profile.clone(),
+            ))),
             idempotency_index: Arc::new(RwLock::new(HashMap::new())),
             edge_metadata: Arc::new(RwLock::new(HashMap::new())),
             snapshot_manager: None,
             snapshot_catalog: Arc::new(Mutex::new(SnapshotCatalog::new_in_memory())),
             session_manager: Arc::new(SessionManager::new(DEFAULT_SESSION_TTL)),
+            storage_profile,
+            storage_capabilities,
         }
     }
 
     /// Open a Repository with WAL replay to restore previous state
     pub async fn open(wal_path: impl AsRef<Path>) -> Result<Self, RepoError> {
-        Self::open_with_options(wal_path, WalOptions::default()).await
+        Self::open_with_profile_and_options(
+            wal_path,
+            StorageProfile::default(),
+            WalOptions::default(),
+        )
+        .await
     }
 
     /// Open a repository with custom WAL recovery and flush options.
@@ -285,7 +296,29 @@ impl Repository {
         wal_path: impl AsRef<Path>,
         wal_options: WalOptions,
     ) -> Result<Self, RepoError> {
-        Self::open_with_cipher_and_options(wal_path, Arc::new(NoOpCipher), wal_options).await
+        Self::open_with_profile_and_options(wal_path, StorageProfile::default(), wal_options).await
+    }
+
+    pub async fn open_with_profile(
+        wal_path: impl AsRef<Path>,
+        storage_profile: StorageProfile,
+    ) -> Result<Self, RepoError> {
+        Self::open_with_profile_and_options(wal_path, storage_profile, WalOptions::default()).await
+    }
+
+    pub async fn open_with_profile_and_options(
+        wal_path: impl AsRef<Path>,
+        storage_profile: StorageProfile,
+        wal_options: WalOptions,
+    ) -> Result<Self, RepoError> {
+        Self::open_internal(
+            wal_path.as_ref().to_path_buf(),
+            Arc::new(NoOpCipher),
+            None,
+            wal_options,
+            storage_profile,
+        )
+        .await
     }
 
     /// Open a repository with a custom at-rest cipher for WAL replay and writes.
@@ -302,7 +335,14 @@ impl Repository {
         cipher: Arc<dyn AtRestCipher>,
         wal_options: WalOptions,
     ) -> Result<Self, RepoError> {
-        Self::open_internal(wal_path.as_ref().to_path_buf(), cipher, None, wal_options).await
+        Self::open_internal(
+            wal_path.as_ref().to_path_buf(),
+            cipher,
+            None,
+            wal_options,
+            StorageProfile::default(),
+        )
+        .await
     }
 
     /// Open a repository and restore state from backup snapshots first, then WAL deltas.
@@ -347,6 +387,7 @@ impl Repository {
             cipher,
             Some(snapshot_manager),
             wal_options,
+            StorageProfile::default(),
         )
         .await
     }
@@ -356,13 +397,18 @@ impl Repository {
         cipher: Arc<dyn AtRestCipher>,
         snapshot_manager: Option<SnapshotManager>,
         wal_options: WalOptions,
+        storage_profile: StorageProfile,
     ) -> Result<Self, RepoError> {
         let wal_instance =
             Wal::open_with_cipher_and_options(&wal_path, cipher, wal_options).await?;
         let wal = Arc::new(Mutex::new(wal_instance));
         let tx_lock = Arc::new(Mutex::new(()));
-        let (mut materialized, base_lsn) =
-            load_materialized_state_from_backup(snapshot_manager.as_ref(), None).await?;
+        let (mut materialized, base_lsn) = load_materialized_state_from_backup(
+            snapshot_manager.as_ref(),
+            None,
+            storage_profile.clone(),
+        )
+        .await?;
 
         // Replay WAL entries newer than the snapshot baseline.
         {
@@ -402,6 +448,8 @@ impl Repository {
             .record_snapshot(durable_lsn, current_unix_timestamp_ms())
             .await?;
 
+        let storage_capabilities = storage_profile.resolve_capabilities();
+
         Ok(Self {
             wal,
             tx_lock,
@@ -412,7 +460,17 @@ impl Repository {
             snapshot_manager,
             snapshot_catalog: Arc::new(Mutex::new(snapshot_catalog)),
             session_manager: Arc::new(SessionManager::new(DEFAULT_SESSION_TTL)),
+            storage_profile,
+            storage_capabilities,
         })
+    }
+
+    pub fn storage_profile(&self) -> &StorageProfile {
+        &self.storage_profile
+    }
+
+    pub fn storage_capabilities(&self) -> &StorageCapabilities {
+        &self.storage_capabilities
     }
 
     pub async fn put_node(&self, node: Node) -> Result<(), RepoError> {
@@ -944,9 +1002,12 @@ impl Repository {
             wal.current_lsn()
         };
 
-        let (mut materialized, base_lsn) =
-            load_materialized_state_from_backup(self.snapshot_manager.as_ref(), Some(target_lsn))
-                .await?;
+        let (mut materialized, base_lsn) = load_materialized_state_from_backup(
+            self.snapshot_manager.as_ref(),
+            Some(target_lsn),
+            self.storage_profile.clone(),
+        )
+        .await?;
 
         {
             let mut wal = self.wal.lock().await;
@@ -992,9 +1053,12 @@ impl Repository {
             return Err(RepoError::SnapshotNotFound(snapshot_id.to_string()));
         }
 
-        let (mut materialized, base_lsn) =
-            load_materialized_state_from_backup(self.snapshot_manager.as_ref(), Some(target_lsn))
-                .await?;
+        let (mut materialized, base_lsn) = load_materialized_state_from_backup(
+            self.snapshot_manager.as_ref(),
+            Some(target_lsn),
+            self.storage_profile.clone(),
+        )
+        .await?;
 
         let mut wal = self.wal.lock().await;
         wal.replay(|lsn, data| {
@@ -1144,9 +1208,17 @@ async fn deserialize_backup_snapshot(path: &Path) -> Result<RepositoryBackupSnap
 async fn load_materialized_state_from_backup(
     snapshot_manager: Option<&SnapshotManager>,
     target_lsn: Option<u64>,
+    storage_profile: StorageProfile,
 ) -> Result<(MaterializedState, u64), RepoError> {
+    let empty_state = || MaterializedState {
+        nodes: HashMap::new(),
+        hyper_index: HyperIndex::with_storage_profile(storage_profile.clone()),
+        idempotency_index: HashMap::new(),
+        edge_metadata: HashMap::new(),
+    };
+
     let Some(manager) = snapshot_manager else {
-        return Ok((MaterializedState::empty(), 0));
+        return Ok((empty_state(), 0));
     };
 
     let selected = match target_lsn {
@@ -1155,7 +1227,7 @@ async fn load_materialized_state_from_backup(
     };
 
     let Some((snapshot_lsn, path)) = selected else {
-        return Ok((MaterializedState::empty(), 0));
+        return Ok((empty_state(), 0));
     };
 
     let snapshot = deserialize_backup_snapshot(&path).await?;
@@ -1164,7 +1236,7 @@ async fn load_materialized_state_from_backup(
     }
 
     let mut nodes = HashMap::new();
-    let mut hyper_index = HyperIndex::new();
+    let mut hyper_index = HyperIndex::with_storage_profile(storage_profile);
     for node in snapshot.nodes {
         let id = node.id;
         hyper_index.insert_node(id, node.embedding.clone());

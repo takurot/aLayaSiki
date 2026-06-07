@@ -3,6 +3,7 @@ use crate::index::HnswIndex;
 #[cfg(not(feature = "hnsw"))]
 use crate::index::LinearAnnIndex;
 use crate::index::{AdjacencyGraph, VectorIndex};
+use crate::tiering::{StorageCapabilities, StorageProfile};
 
 use std::collections::HashMap;
 
@@ -15,31 +16,52 @@ use std::collections::HashMap;
 pub struct HyperIndex {
     pub vector_index: Box<dyn VectorIndex>,
     pub graph_index: AdjacencyGraph,
+    storage_profile: StorageProfile,
+    storage_capabilities: StorageCapabilities,
     // ID mapping for cross-referencing (e.g., entity resolution)
     id_aliases: HashMap<String, u64>,
 }
 
 impl HyperIndex {
     pub fn new() -> Self {
+        Self::with_storage_profile(StorageProfile::default())
+    }
+
+    pub fn with_storage_profile(storage_profile: StorageProfile) -> Self {
         #[cfg(feature = "hnsw")]
         let vector_index: Box<dyn VectorIndex> = Box::new(HnswIndex::new());
         #[cfg(not(feature = "hnsw"))]
         let vector_index: Box<dyn VectorIndex> = Box::new(LinearAnnIndex::new());
 
+        Self::with_vector_index_and_storage_profile(vector_index, storage_profile)
+    }
+
+    pub fn with_vector_index_and_storage_profile(
+        vector_index: Box<dyn VectorIndex>,
+        storage_profile: StorageProfile,
+    ) -> Self {
+        let storage_capabilities = storage_profile.resolve_capabilities();
+
         Self {
             vector_index,
             graph_index: AdjacencyGraph::new(),
+            storage_profile,
+            storage_capabilities,
             id_aliases: HashMap::new(),
         }
     }
 
     /// Create a HyperIndex with a custom VectorIndex (useful in tests).
     pub fn with_vector_index(vector_index: Box<dyn VectorIndex>) -> Self {
-        Self {
-            vector_index,
-            graph_index: AdjacencyGraph::new(),
-            id_aliases: HashMap::new(),
-        }
+        Self::with_vector_index_and_storage_profile(vector_index, StorageProfile::default())
+    }
+
+    pub fn storage_profile(&self) -> &StorageProfile {
+        &self.storage_profile
+    }
+
+    pub fn storage_capabilities(&self) -> &StorageCapabilities {
+        &self.storage_capabilities
     }
 
     pub fn insert_node(&mut self, id: u64, embedding: Vec<f32>) {

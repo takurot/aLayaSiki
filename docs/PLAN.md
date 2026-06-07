@@ -330,7 +330,11 @@
 
 - [ ] 運用ガイド（バックアップ/復元/監査ログ）
 - [ ] APIリファレンス（JSON DSL スキーマ/レスポンス）
-- [ ] 実運用の制約（GPUメモリ逼迫時の挙動）を明文化
+- [x] 実運用の制約（GPUメモリ逼迫時の挙動）を明文化
+
+**Notes:**
+- Issue #51 対応として `storage::tiering` に GPU-first / CPU fallback の実行時プロファイルを追加し、GPU runtime 未設定時は `GpuDirect` 要求を自動的に CPU memory + zero-copy disabled へ解決するようにした。
+- README には現状の CPU ベース実装と、GPU-first Persistence / Zero-Copy Access が段階導入中であることを追記した。
 
 ---
 
