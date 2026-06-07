@@ -2,11 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{AeadCore, AeadInPlace, KeyInit, OsRng},
     Aes256Gcm, Nonce,
 };
-use sha2::{Digest, Sha256};
+use hkdf::Hkdf;
+use sha2::Sha256;
 use thiserror::Error;
+
+const NONCE_SIZE: usize = 12; // 96-bit nonce for AES-GCM
 
 #[derive(Debug, Error)]
 pub enum CryptoError {
@@ -76,11 +79,23 @@ impl KmsKeyProvider for InMemoryKmsKeyProvider {
     }
 }
 
+// Private helper to derive a cryptographically strong 256-bit symmetric key from an arbitrary length KMS key
+fn derive_key(key: &[u8]) -> Result<aes_gcm::Key<Aes256Gcm>, CryptoError> {
+    if key.is_empty() {
+        return Err(CryptoError::EmptyKey);
+    }
+    let hk = Hkdf::<Sha256>::new(None, key);
+    let mut derived_key = aes_gcm::Key::<Aes256Gcm>::default();
+    hk.expand(&[], &mut derived_key)
+        .map_err(|_| CryptoError::Encryption("KDF expansion failed".to_string()))?;
+    Ok(derived_key)
+}
+
 /// KMS hook cipher for at-rest encryption extension points.
 ///
 /// Uses authenticated encryption (AES-256-GCM) with a unique cryptographically
 /// secure random nonce per operation. Data keys of arbitrary size are derived
-/// into a 256-bit key using SHA-256.
+/// into a 256-bit key using HKDF-SHA256.
 pub struct KmsHookCipher {
     key_id: String,
     key_provider: Arc<dyn KmsKeyProvider>,
@@ -98,57 +113,50 @@ impl KmsHookCipher {
 impl AtRestCipher for KmsHookCipher {
     fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let key = self.key_provider.resolve_data_key(&self.key_id)?;
-        if key.is_empty() {
-            return Err(CryptoError::EmptyKey);
-        }
+        let derived_key = derive_key(&key)?;
 
-        // Derive 256-bit key from input key of arbitrary length
-        let mut hasher = Sha256::new();
-        hasher.update(&key);
-        let hashed_key = hasher.finalize();
-
-        let cipher = Aes256Gcm::new(&hashed_key);
+        let cipher = Aes256Gcm::new(&derived_key);
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
-        let ciphertext = cipher
-            .encrypt(&nonce, plaintext)
-            .map_err(|e| CryptoError::Encryption(format!("{:?}", e)))?;
-
-        // Prepend 12-byte nonce to the ciphertext
-        let mut result = Vec::with_capacity(nonce.len() + ciphertext.len());
+        // Pre-allocate a single buffer for: Nonce + Plaintext + 16-byte Tag
+        let mut result = Vec::with_capacity(NONCE_SIZE + plaintext.len() + 16);
         result.extend_from_slice(&nonce);
-        result.extend_from_slice(&ciphertext);
+        result.extend_from_slice(plaintext);
 
+        // Encrypt the plaintext payload part in-place
+        let payload_mut = &mut result[NONCE_SIZE..];
+        let tag = cipher
+            .encrypt_in_place_detached(&nonce, &[], payload_mut)
+            .map_err(|_| CryptoError::Encryption("AEAD encryption failed".to_string()))?;
+
+        result.extend_from_slice(&tag);
         Ok(result)
     }
 
     fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let key = self.key_provider.resolve_data_key(&self.key_id)?;
-        if key.is_empty() {
-            return Err(CryptoError::EmptyKey);
-        }
+        let derived_key = derive_key(&key).map_err(|_| {
+            CryptoError::Decryption("Failed to derive key for decryption".to_string())
+        })?;
 
-        if ciphertext.len() < 12 {
+        if ciphertext.len() < NONCE_SIZE {
             return Err(CryptoError::Decryption(
-                "ciphertext too short (must be at least 12 bytes to contain nonce)".to_string(),
+                "ciphertext too short (must contain nonce)".to_string(),
             ));
         }
 
-        // Derive 256-bit key from input key of arbitrary length
-        let mut hasher = Sha256::new();
-        hasher.update(&key);
-        let hashed_key = hasher.finalize();
+        let cipher = Aes256Gcm::new(&derived_key);
 
-        let cipher = Aes256Gcm::new(&hashed_key);
-
-        let (nonce_bytes, encrypted_data) = ciphertext.split_at(12);
+        let (nonce_bytes, encrypted_payload) = ciphertext.split_at(NONCE_SIZE);
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        let plaintext = cipher
-            .decrypt(nonce, encrypted_data)
-            .map_err(|e| CryptoError::Decryption(format!("{:?}", e)))?;
+        // Copy encrypted payload (ciphertext + tag) to a mutable vector and decrypt in-place
+        let mut buffer = encrypted_payload.to_vec();
+        cipher
+            .decrypt_in_place(nonce, &[], &mut buffer)
+            .map_err(|_| CryptoError::Decryption("AEAD decryption failed".to_string()))?;
 
-        Ok(plaintext)
+        Ok(buffer)
     }
 
     fn key_id(&self) -> Option<&str> {
@@ -173,7 +181,7 @@ mod tests {
         assert_ne!(encrypted, payload);
 
         // AEAD prepends a 12-byte nonce, so ciphertext length must be at least 12 + plaintext.len()
-        assert!(encrypted.len() >= 12 + payload.len());
+        assert!(encrypted.len() >= NONCE_SIZE + payload.len());
 
         let decrypted = cipher.decrypt(&encrypted).unwrap();
         assert_eq!(decrypted, payload);
