@@ -130,8 +130,6 @@ struct MaterializedState {
     edge_metadata: HashMap<EdgeMetaKey, HashMap<String, String>>,
 }
 
-
-
 pub struct SnapshotView {
     snapshot_id: String,
     nodes: HashMap<u64, Node>,
@@ -405,13 +403,12 @@ impl Repository {
             Wal::open_with_cipher_and_options(&wal_path, cipher, wal_options).await?;
         let wal = Arc::new(Mutex::new(wal_instance));
         let tx_lock = Arc::new(Mutex::new(()));
-        let (mut materialized, base_lsn) =
-            load_materialized_state_from_backup(
-                snapshot_manager.as_ref(),
-                None,
-                storage_profile.clone(),
-            )
-            .await?;
+        let (mut materialized, base_lsn) = load_materialized_state_from_backup(
+            snapshot_manager.as_ref(),
+            None,
+            storage_profile.clone(),
+        )
+        .await?;
 
         // Replay WAL entries newer than the snapshot baseline.
         {
@@ -1005,13 +1002,12 @@ impl Repository {
             wal.current_lsn()
         };
 
-        let (mut materialized, base_lsn) =
-            load_materialized_state_from_backup(
-                self.snapshot_manager.as_ref(),
-                Some(target_lsn),
-                self.storage_profile.clone(),
-            )
-            .await?;
+        let (mut materialized, base_lsn) = load_materialized_state_from_backup(
+            self.snapshot_manager.as_ref(),
+            Some(target_lsn),
+            self.storage_profile.clone(),
+        )
+        .await?;
 
         {
             let mut wal = self.wal.lock().await;
@@ -1057,13 +1053,12 @@ impl Repository {
             return Err(RepoError::SnapshotNotFound(snapshot_id.to_string()));
         }
 
-        let (mut materialized, base_lsn) =
-            load_materialized_state_from_backup(
-                self.snapshot_manager.as_ref(),
-                Some(target_lsn),
-                self.storage_profile.clone(),
-            )
-            .await?;
+        let (mut materialized, base_lsn) = load_materialized_state_from_backup(
+            self.snapshot_manager.as_ref(),
+            Some(target_lsn),
+            self.storage_profile.clone(),
+        )
+        .await?;
 
         let mut wal = self.wal.lock().await;
         wal.replay(|lsn, data| {
