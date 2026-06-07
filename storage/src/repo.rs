@@ -3,6 +3,7 @@ use crate::hyper_index::HyperIndex;
 use crate::index::AdjacencyGraph;
 use crate::session::{SessionGraph, SessionManager, SessionOwner};
 use crate::snapshot::{SnapshotCatalog, SnapshotCatalogEntry, SnapshotError, SnapshotManager};
+use crate::tiering::{StorageCapabilities, StorageProfile};
 use crate::wal::{Wal, WalError, WalOptions};
 use alayasiki_core::error::{AlayasikiError, ErrorCode};
 use alayasiki_core::model::{Edge, Node};
@@ -255,6 +256,8 @@ pub struct Repository {
     snapshot_manager: Option<SnapshotManager>,
     snapshot_catalog: Arc<Mutex<SnapshotCatalog>>,
     pub session_manager: Arc<SessionManager>,
+    storage_profile: StorageProfile,
+    storage_capabilities: StorageCapabilities,
 }
 
 const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
@@ -262,22 +265,37 @@ const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 impl Repository {
     /// Create a new empty Repository (no replay)
     pub fn new(wal: Arc<Mutex<Wal>>) -> Self {
+        Self::new_with_profile(wal, StorageProfile::default())
+    }
+
+    pub fn new_with_profile(wal: Arc<Mutex<Wal>>, storage_profile: StorageProfile) -> Self {
+        let storage_capabilities = storage_profile.resolve_capabilities();
+
         Self {
             wal,
             tx_lock: Arc::new(Mutex::new(())),
             nodes: Arc::new(RwLock::new(HashMap::new())),
-            hyper_index: Arc::new(RwLock::new(HyperIndex::new())),
+            hyper_index: Arc::new(RwLock::new(HyperIndex::with_storage_profile(
+                storage_profile.clone(),
+            ))),
             idempotency_index: Arc::new(RwLock::new(HashMap::new())),
             edge_metadata: Arc::new(RwLock::new(HashMap::new())),
             snapshot_manager: None,
             snapshot_catalog: Arc::new(Mutex::new(SnapshotCatalog::new_in_memory())),
             session_manager: Arc::new(SessionManager::new(DEFAULT_SESSION_TTL)),
+            storage_profile,
+            storage_capabilities,
         }
     }
 
     /// Open a Repository with WAL replay to restore previous state
     pub async fn open(wal_path: impl AsRef<Path>) -> Result<Self, RepoError> {
-        Self::open_with_options(wal_path, WalOptions::default()).await
+        Self::open_with_profile_and_options(
+            wal_path,
+            StorageProfile::default(),
+            WalOptions::default(),
+        )
+        .await
     }
 
     /// Open a repository with custom WAL recovery and flush options.
@@ -285,7 +303,29 @@ impl Repository {
         wal_path: impl AsRef<Path>,
         wal_options: WalOptions,
     ) -> Result<Self, RepoError> {
-        Self::open_with_cipher_and_options(wal_path, Arc::new(NoOpCipher), wal_options).await
+        Self::open_with_profile_and_options(wal_path, StorageProfile::default(), wal_options).await
+    }
+
+    pub async fn open_with_profile(
+        wal_path: impl AsRef<Path>,
+        storage_profile: StorageProfile,
+    ) -> Result<Self, RepoError> {
+        Self::open_with_profile_and_options(wal_path, storage_profile, WalOptions::default()).await
+    }
+
+    pub async fn open_with_profile_and_options(
+        wal_path: impl AsRef<Path>,
+        storage_profile: StorageProfile,
+        wal_options: WalOptions,
+    ) -> Result<Self, RepoError> {
+        Self::open_internal(
+            wal_path.as_ref().to_path_buf(),
+            Arc::new(NoOpCipher),
+            None,
+            wal_options,
+            storage_profile,
+        )
+        .await
     }
 
     /// Open a repository with a custom at-rest cipher for WAL replay and writes.
@@ -302,7 +342,14 @@ impl Repository {
         cipher: Arc<dyn AtRestCipher>,
         wal_options: WalOptions,
     ) -> Result<Self, RepoError> {
-        Self::open_internal(wal_path.as_ref().to_path_buf(), cipher, None, wal_options).await
+        Self::open_internal(
+            wal_path.as_ref().to_path_buf(),
+            cipher,
+            None,
+            wal_options,
+            StorageProfile::default(),
+        )
+        .await
     }
 
     /// Open a repository and restore state from backup snapshots first, then WAL deltas.
@@ -347,6 +394,7 @@ impl Repository {
             cipher,
             Some(snapshot_manager),
             wal_options,
+            StorageProfile::default(),
         )
         .await
     }
@@ -356,6 +404,7 @@ impl Repository {
         cipher: Arc<dyn AtRestCipher>,
         snapshot_manager: Option<SnapshotManager>,
         wal_options: WalOptions,
+        storage_profile: StorageProfile,
     ) -> Result<Self, RepoError> {
         let wal_instance =
             Wal::open_with_cipher_and_options(&wal_path, cipher, wal_options).await?;
@@ -363,6 +412,15 @@ impl Repository {
         let tx_lock = Arc::new(Mutex::new(()));
         let (mut materialized, base_lsn) =
             load_materialized_state_from_backup(snapshot_manager.as_ref(), None).await?;
+        let existing_edges = collect_backup_edges(&materialized.hyper_index);
+        let mut rebuilt_hyper_index = HyperIndex::with_storage_profile(storage_profile.clone());
+        for node in materialized.nodes.values() {
+            rebuilt_hyper_index.insert_node(node.id, node.embedding.clone());
+        }
+        for edge in existing_edges {
+            rebuilt_hyper_index.upsert_edge(edge.source, edge.target, &edge.relation, edge.weight);
+        }
+        materialized.hyper_index = rebuilt_hyper_index;
 
         // Replay WAL entries newer than the snapshot baseline.
         {
@@ -402,6 +460,8 @@ impl Repository {
             .record_snapshot(durable_lsn, current_unix_timestamp_ms())
             .await?;
 
+        let storage_capabilities = storage_profile.resolve_capabilities();
+
         Ok(Self {
             wal,
             tx_lock,
@@ -412,7 +472,17 @@ impl Repository {
             snapshot_manager,
             snapshot_catalog: Arc::new(Mutex::new(snapshot_catalog)),
             session_manager: Arc::new(SessionManager::new(DEFAULT_SESSION_TTL)),
+            storage_profile,
+            storage_capabilities,
         })
+    }
+
+    pub fn storage_profile(&self) -> &StorageProfile {
+        &self.storage_profile
+    }
+
+    pub fn storage_capabilities(&self) -> &StorageCapabilities {
+        &self.storage_capabilities
     }
 
     pub async fn put_node(&self, node: Node) -> Result<(), RepoError> {

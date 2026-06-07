@@ -14,7 +14,7 @@ Developers simply ingest raw files. The database handles:
 
 ## Key Features
 
-*   **Neural-Storage Engine**: Compute and storage integration with GPU-first persistence for zero-copy access.
+*   **Neural-Storage Engine**: Compute and storage integration with a GPU-first storage profile and explicit CPU fallback path.
 *   **Vector-Graph Hybrid Model**: Co-located ANN index and graph adjacency for O(1) cross-reference.
 *   **Embedded SLM**: Lightweight models resident on shards for autonomous data processing.
 *   **Feasibility & Scalability**: Designed for 100M+ nodes with sub-second retrieval latency.
@@ -26,8 +26,8 @@ Developers simply ingest raw files. The database handles:
 
 ## Status
 
-**Pre-Alpha / Feasibility Spike Phase**
-Currently validating core architectural components (PR-00).
+**Pre-Alpha / CPU-first foundation with GPU-first roadmap**
+Current runtime paths are CPU-based. The repository now exposes a GPU-first storage profile abstraction, but GPUDirect Storage and VRAM-resident persistence remain staged follow-up work tracked from Issue #51.
 
 ## License
 

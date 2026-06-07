@@ -5,4 +5,5 @@ pub mod index;
 pub mod repo;
 pub mod session;
 pub mod snapshot;
+pub mod tiering;
 pub mod wal;
