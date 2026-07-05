@@ -4,7 +4,8 @@ Use this file as the default execution rules for implementing tasks/PRs in this 
 
 ## Inputs (What you are given)
 - A **PR identifier** (e.g., **PR-01**), an **Issue number** (e.g., `#157`), or a request to implement a subset of tasks.
-- The agent MUST autonomously complete the full loop (investigate → implement → test → review → CI → merge) for whatever input it receives.
+- For PR‑driven work the agent implements, tests, opens a PR, and waits for human approval before merging (default safety posture).
+- For **Issue‑driven** work the agent autonomously runs the full loop (investigate → implement → test → review → CI → merge) per the "Issue‑Driven Autonomous Execution" section below.
 
 ## Primary References (Always read these first)
 - **Specification**: `docs/SPEC.md`
@@ -89,7 +90,6 @@ pip install -r benchmarks/requirements.txt
   - `rust-testing` — Rust TDD with coverage (`cargo-llvm-cov`).
   - `rust-patterns` — idiomatic ownership/error/trait patterns.
   - `ai-regression-testing` — sandbox/API regression without DB deps.
-  - `plan` — decompose complex implementations before writing code.
 - **Red**: Write a failing test first (Rust unit/integration test).
 - **Green**: Implement the minimum code to pass.
 - **Refactor**: Clean up; maintain zero-copy and consistency rules.
@@ -149,7 +149,7 @@ ruff format benchmarks/
 GitHub CLI:
 ```bash
 git push -u origin <branch>
-gh pr create --title "<PR-ID or Issue #N>: <Title>" \
+gh pr create --title "<type>(<scope>): <description> (Issue #<number>)" \
   --body "Closes #<number>
 
 ## Summary
@@ -183,7 +183,7 @@ gh pr checks
   ```bash
   gh pr merge <PR-number> --squash --delete-branch
   ```
-- If verification fails, loop back to step 3 (implement → test → review) until correct.
+- If verification fails, loop back to step 3 and repeat (implement → test → review → CI) until correct.
 
 ---
 
@@ -212,7 +212,7 @@ Use `rkyv` derives with `#[archive(check_bytes)]` for safe zero-copy access.
 
 ---
 
-## Checklist (Before you call a PR "done")
+## Checklist (Before you call a PR "ready for merge")
 - [ ] **Issue requirements & acceptance criteria captured** (if Issue‑driven) via `gh issue view`.
 - [ ] Implemented the requested tasks with minimal diffs.
 - [ ] Added/updated Rust tests with deterministic assertions (unit + integration + E2E).
@@ -227,7 +227,9 @@ Use `rkyv` derives with `#[archive(check_bytes)]` for safe zero-copy access.
 - [ ] Sub‑agent code review performed and findings addressed.
 - [ ] CI is fully green (`gh pr checks`).
 - [ ] **Issue acceptance criteria verified** with evidence in the PR body.
-- [ ] PR merged.
+
+After merge (Issue‑driven autonomous flow only):
+- [ ] PR merged via `gh pr merge --squash --delete-branch` and branch cleaned up.
 
 ---
 
@@ -253,7 +255,7 @@ Implement Issue #<number> following docs/PROMPT.md.
 ### Autonomous loop
 1. **Investigate** — `gh issue view <number>`; read `docs/SPEC.md`, `docs/PLAN.md`, `docs/adr/`; search related code/tests.
 2. **Branch** — `feature/issue-<number>-<short-description>` from `main`.
-3. **Plan & skill‑up** — pick skills (`tdd-workflow`, `rust-testing`, `rust-patterns`, `ai-regression-testing`, `plan`) as needed; write a checklist mapped to Issue acceptance criteria.
+3. **Plan & skill‑up** — pick skills (`tdd-workflow`, `rust-testing`, `rust-patterns`, `ai-regression-testing`) as needed; write a checklist mapped to Issue acceptance criteria.
 4. **TDD** — Red → Green → Refactor (unit + integration + E2E).
 5. **Quality gate** — `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`; benchmarks if perf‑sensitive.
 6. **Commit & PR** — `Closes #<number>` in the PR body; conventional commits.
