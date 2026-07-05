@@ -6,6 +6,8 @@ on:
       - main
       - feature/**
   pull_request:
+  schedule:
+    - cron: '0 6 * * 1'
 
 jobs:
   rust-quality:
@@ -23,6 +25,17 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  cargo-audit:
+    name: Cargo Audit (security advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Run cargo audit
+        run: cargo audit
 
   rust-build:
     name: Rust Build (workspace, ${{ matrix.os }})

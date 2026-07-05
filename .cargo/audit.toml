@@ -1,0 +1,5 @@
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0187", # lopdf 0.34.0 via pdf-extract — stack overflow in deeply nested PDF (pre-existing, tracked separately)
+    "RUSTSEC-2026-0190", # anyhow 1.0.100 — unsoundness in downcast_mut (pre-existing, tracked separately)
+]
