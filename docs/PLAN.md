@@ -423,9 +423,9 @@
 * Depends on: PR-14.5
 
 - [x] **カバレッジジョブ追加**: `cargo-llvm-cov` でワークスペース全体のカバレッジをCIで生成 (Issue #65)
-- [x] **成果物アップロード**: HTML / LCOV レポートを CI artifact として保存し PR 毎に比較可能にする
+- [x] **成果物アップロード**: HTML / LCOV レポートを CI artifact として保存 (PR 毎にダウンロード可能)
 - [x] **ローカル手順の文書化**: README に `cargo-llvm-cov` のインストールとレポート生成手順を追記
-- [ ] **閾値ゲートの有効化**: ベースライン計測後に `--fail-under-lines` で 80% 目標を強制
+- [ ] **閾値ゲートの有効化**: ベースライン計測後に `--fail-under-lines` で 80% 目標を強制 (フォローアップ Issue で追跡)
 
 **Done Criteria:**
 - [x] カバレッジが PR 毎に CI で見える

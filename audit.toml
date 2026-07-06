@@ -1,0 +1,15 @@
+# cargo-audit policy
+# See https://github.com/rustsec/rustsec/tree/main/cargo-audit/audit.toml.example
+#
+# advisories that are currently allowed to emit warnings without failing
+# `cargo audit` must be explicitly listed here so the waiver is visible and
+# owned. Each entry must include the date we last reviewed it and a short
+# rationale linking to any tracking issue.
+
+[advisories]
+# RUSTSEC-2026-0202 - `let_cxx_string!` uses uninitialized value due to
+# exception safety violations in cxx. Patched in cxx >=1.0.195, which has
+# not been picked up by the `usearch` crate we depend on (storage -> usearch
+# -> cxx 1.0.194). Tracked for upstream follow-up; information-level only.
+# Reviewed: 2026-07-07 (PR #76).
+informational = ["RUSTSEC-2026-0202"]
