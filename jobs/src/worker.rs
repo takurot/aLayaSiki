@@ -1,14 +1,16 @@
+use crate::durable::{DurableJobQueue, JobEnvelope};
 use crate::queue::Job;
 use sha2::{Digest, Sha256};
 use slm::ner::EntityExtractor;
 use slm::registry::ModelRegistry;
 use std::sync::Arc;
+use std::time::Instant;
 use storage::repo::Repository;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 pub struct Worker {
-    receiver: mpsc::Receiver<Job>,
+    receiver: Option<mpsc::Receiver<Job>>,
     repo: Arc<Repository>,
     registry: Arc<ModelRegistry>,
     default_model_ref: String,
@@ -29,7 +31,27 @@ impl Worker {
             .expect("legacy extractor activation must succeed");
 
         Self {
-            receiver,
+            receiver: Some(receiver),
+            repo,
+            registry: Arc::new(registry),
+            default_model_ref: "legacy-default".to_string(),
+        }
+    }
+
+    /// Construct a worker for the durable queue path. No `mpsc::Receiver<Job>` is
+    /// required because [`Worker::run_durable`] consumes a `Receiver<JobEnvelope>`
+    /// from the [`DurableJobQueue`] instead.
+    pub fn new_durable(repo: Arc<Repository>, extractor: Arc<dyn EntityExtractor>) -> Self {
+        let mut registry = ModelRegistry::new();
+        registry
+            .register("legacy-default", "1.0.0", extractor)
+            .expect("legacy extractor registration must succeed");
+        registry
+            .activate("legacy-default", "1.0.0")
+            .expect("legacy extractor activation must succeed");
+
+        Self {
+            receiver: None,
             repo,
             registry: Arc::new(registry),
             default_model_ref: "legacy-default".to_string(),
@@ -43,7 +65,7 @@ impl Worker {
         default_model_ref: impl Into<String>,
     ) -> Self {
         Self {
-            receiver,
+            receiver: Some(receiver),
             repo,
             registry,
             default_model_ref: default_model_ref.into(),
@@ -52,7 +74,11 @@ impl Worker {
 
     pub async fn run(mut self) {
         info!("Worker started");
-        while let Some(job) = self.receiver.recv().await {
+        let Some(mut receiver) = self.receiver.take() else {
+            error!("Worker::run called without a receiver; use run_durable for the durable queue");
+            return;
+        };
+        while let Some(job) = receiver.recv().await {
             match job {
                 Job::ExtractEntities {
                     node_id,
@@ -71,6 +97,56 @@ impl Worker {
             }
         }
         info!("Worker stopped");
+    }
+
+    /// Drive extraction from a [`DurableJobQueue`], acknowledging completion (after
+    /// flushing the graph WAL so extracted nodes/edges are durable before the job is
+    /// retired) or reporting failures for bounded retry / dead-lettering.
+    pub async fn run_durable(
+        self,
+        queue: Arc<DurableJobQueue>,
+        mut rx: mpsc::Receiver<JobEnvelope>,
+    ) {
+        info!("Durable worker started");
+        while let Some(envelope) = rx.recv().await {
+            let id = envelope.id;
+            let started = Instant::now();
+            match envelope.job {
+                Job::ExtractEntities {
+                    node_id,
+                    content,
+                    model_id,
+                    snapshot_id,
+                } => {
+                    match self
+                        .process_extraction(node_id, &content, &model_id, &snapshot_id)
+                        .await
+                    {
+                        Ok(()) => {
+                            if let Err(e) = self.repo.flush().await {
+                                error!(
+                                    "repo flush before completing job {} failed: {}; retrying",
+                                    id, e
+                                );
+                                if let Err(fe) = queue.fail(id, format!("repo flush: {e}")).await {
+                                    error!("fail({}) error: {}", id, fe);
+                                }
+                            } else if let Err(e) = queue.complete(id).await {
+                                error!("complete({}) error: {}", id, e);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("extraction for job {} failed: {}", id, e);
+                            if let Err(fe) = queue.fail(id, e.to_string()).await {
+                                error!("fail({}) error: {}", id, fe);
+                            }
+                        }
+                    }
+                }
+            }
+            debug!("job {} processed in {:?}", id, started.elapsed());
+        }
+        info!("Durable worker stopped");
     }
 
     async fn process_extraction(
