@@ -29,6 +29,28 @@ Developers simply ingest raw files. The database handles:
 **Pre-Alpha / CPU-first foundation with GPU-first roadmap**
 Current runtime paths are CPU-based. The repository now exposes a GPU-first storage profile abstraction, but GPUDirect Storage and VRAM-resident persistence remain staged follow-up work tracked from Issue #51.
 
+## Test Coverage
+
+CI reports per-PR workspace coverage using [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (report-only at this stage; an enforcement threshold will follow once the baseline is triaged — see Issue #65). HTML and LCOV artifacts are attached to every CI run.
+
+To generate the same coverage report locally:
+
+```sh
+cargo install cargo-llvm-cov   # one-time install
+# Run tests once, then emit both report formats from the same profile data:
+cargo llvm-cov --workspace --no-report
+cargo llvm-cov report --lcov --output-path lcov.info
+cargo llvm-cov report --html --output-dir coverage
+open coverage/html/index.html   # macOS; use xdg-open on Linux
+```
+
+The summary table can be printed without writing files:
+
+```sh
+cargo llvm-cov --workspace --no-report
+cargo llvm-cov report          # prints the per-file coverage table
+```
+
 ## License
 
 [TBD]
