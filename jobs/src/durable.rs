@@ -72,6 +72,14 @@ pub struct DurableQueueConfig {
     /// Maximum number of dead-letter entries retained in memory (FIFO eviction).
     pub max_dead_letters: usize,
     /// WAL recovery mode on reopen. Defaults to fail-safe truncation.
+    ///
+    /// Note: this governs CRC-level corruption (torn writes / byte flips). A record
+    /// that is CRC-valid but semantically undecodable (or written by a future,
+    /// incompatible schema) still aborts `open_with_config` regardless of mode,
+    /// because the underlying WAL only honors `recovery_mode` for CRC mismatches.
+    /// `RecoverToLastGoodOffset` (the default) can therefore drop
+    /// acknowledged-but-unprocessed jobs at the corrupt tail to keep the queue
+    /// operational; choose `FailFast` if operators should be alerted instead.
     pub recovery_mode: WalRecoveryMode,
 }
 
@@ -222,18 +230,10 @@ impl DurableJobQueue {
         let next_id = max_id + 1;
 
         let (sender, receiver) = mpsc::channel(config.channel_capacity.max(1));
-        // Re-announce pending jobs. The receiver is not being drained yet (the worker
-        // is spawned by the caller after this returns), so messages buffer in the
-        // channel up to its capacity; overflow is logged and the job remains pending
-        // for the next recovery cycle.
-        for envelope in state.pending.values() {
-            if let Err(err) = sender.try_send(envelope.clone()) {
-                tracing::warn!(
-                    job_id = envelope.id,
-                    "pending job could not be buffered for re-announce on recovery: {err}"
-                );
-            }
-        }
+
+        // Snapshot pending envelopes (in ascending id order) before moving `state`
+        // into the queue so they can be re-announced after construction.
+        let pending_snapshot: Vec<JobEnvelope> = state.pending.values().cloned().collect();
 
         let queue = Self {
             wal: Arc::new(Mutex::new(wal)),
@@ -242,6 +242,13 @@ impl DurableJobQueue {
             next_id: AtomicU64::new(next_id),
             config,
         };
+
+        // Re-announce pending jobs. The worker is spawned by the caller after this
+        // returns, so these buffer in the channel; any overflow self-heals via
+        // `announce` once the worker starts draining.
+        for envelope in pending_snapshot {
+            queue.announce(envelope);
+        }
 
         Ok((queue, receiver))
     }
@@ -290,11 +297,14 @@ impl DurableJobQueue {
         let mut resend: Option<JobEnvelope> = None;
         {
             let mut state = self.state.lock().await;
-            let Some(envelope) = state.pending.get(&id).cloned() else {
+            let Some(mut envelope) = state.pending.get(&id).cloned() else {
                 tracing::trace!(job_id = id, "fail: job not pending, no-op");
                 return Ok(());
             };
             let new_attempt = envelope.attempt + 1;
+            // Persist the bumped attempt so the replayed dead-letter entry and the
+            // in-memory entry agree on how many attempts actually occurred.
+            envelope.attempt = new_attempt;
 
             if new_attempt >= self.config.max_attempts {
                 let record = JobWalRecord {
@@ -305,7 +315,7 @@ impl DurableJobQueue {
                         envelope: envelope.clone(),
                     },
                 };
-                self.append_locked(&mut state, &record).await?;
+                self.append_locked(&record).await?;
                 state.pending.remove(&id);
                 push_dead_letter(
                     &mut state,
@@ -321,16 +331,14 @@ impl DurableJobQueue {
                 state.stats.dead_lettered += 1;
                 state.stats.pending_depth = state.pending.len();
             } else {
-                let mut retried = envelope.clone();
-                retried.attempt = new_attempt;
                 let record = JobWalRecord {
                     v: JOB_WAL_SCHEMA_VERSION,
-                    op: JobWalOp::Enqueue(retried.clone()),
+                    op: JobWalOp::Enqueue(envelope.clone()),
                 };
-                self.append_locked(&mut state, &record).await?;
-                state.pending.insert(id, retried.clone());
+                self.append_locked(&record).await?;
+                state.pending.insert(id, envelope.clone());
                 state.stats.retried += 1;
-                resend = Some(retried);
+                resend = Some(envelope);
             }
         }
 
@@ -380,25 +388,51 @@ impl DurableJobQueue {
         Ok(())
     }
 
-    /// Append a WAL record while already holding the state lock. Lock order is
-    /// `state -> wal`; no other path acquires `wal` first, so this cannot deadlock.
-    async fn append_locked(
-        &self,
-        _state: &mut QueueState,
-        record: &JobWalRecord,
-    ) -> Result<(), JobQueueError> {
+    /// Append a WAL record while already holding the state lock.
+    ///
+    /// The state mutex is held across the WAL append (which `fsync`s under the
+    /// `Always` flush policy). This serializes queue mutations behind disk I/O,
+    /// which is the safe ordering: `fail()` must read the current attempt under the
+    /// state lock before deciding retry-vs-dead-letter, so it cannot release the
+    /// lock mid-operation. The cost is acceptable because job operations are
+    /// per-ingest-chunk, not per-vector, and correctness is prioritized over peak
+    /// throughput in the fail-safe path. Lock acquisition is deadlock-free because
+    /// the only other WAL acquirers (`complete`, `apply_enqueue`) release the WAL
+    /// lock before touching state.
+    async fn append_locked(&self, record: &JobWalRecord) -> Result<(), JobQueueError> {
         let bytes = serde_json::to_vec(record)?;
         let mut wal = self.wal.lock().await;
         wal.append(&bytes).await?;
         Ok(())
     }
 
+    /// Best-effort, non-blocking announcement. On a momentarily full channel the
+    /// delivery is deferred to a task that awaits capacity (so a burst of enqueues
+    /// self-heals as soon as the worker drains, without blocking the caller); if the
+    /// channel is closed the job remains pending and is recovered on the next reopen.
     fn announce(&self, envelope: JobEnvelope) {
-        if let Err(err) = self.sender.try_send(envelope.clone()) {
-            tracing::warn!(
-                job_id = envelope.id,
-                "job persisted but not delivered immediately (buffered or recovery will redeliver): {err}"
-            );
+        match self.sender.try_send(envelope.clone()) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    job_id = envelope.id,
+                    "announcement channel full; deferring delivery until the worker drains"
+                );
+                let sender = self.sender.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = sender.send(envelope).await {
+                        tracing::warn!(
+                            "deferred job could not be delivered (worker gone); it remains pending and will be recovered on reopen: {err}"
+                        );
+                    }
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!(
+                    job_id = envelope.id,
+                    "announcement channel closed (no worker); job remains pending and will be recovered on reopen"
+                );
+            }
         }
     }
 
@@ -412,10 +446,11 @@ impl DurableJobQueue {
             if !backoff.is_zero() {
                 tokio::time::sleep(backoff).await;
             }
-            if let Err(err) = sender.try_send(envelope.clone()) {
+            // Awaiting capacity (rather than try_send) ensures the retry is not
+            // silently dropped under a burst; the job also remains pending in the WAL.
+            if let Err(err) = sender.send(envelope).await {
                 tracing::warn!(
-                    job_id = envelope.id,
-                    "retry resend could not be delivered: {err}"
+                    "retry resend could not be delivered (worker gone); the job remains pending and will be recovered on reopen: {err}"
                 );
             }
         });

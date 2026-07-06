@@ -180,6 +180,118 @@ async fn fail_after_complete_is_noop() {
 }
 
 #[tokio::test]
+async fn dead_letter_attempts_persist_across_restart() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("jobs.wal");
+    let max_attempts = 2;
+
+    {
+        let (queue, mut rx) = DurableJobQueue::open_with_config(&path, zero_backoff())
+            .await
+            .unwrap();
+        let id = queue.enqueue_tracked(sample_job(1)).await.unwrap();
+        rx.recv().await.unwrap();
+        queue.fail(id, "first".to_string()).await.unwrap();
+        rx.recv().await.unwrap();
+        queue.fail(id, "second".to_string()).await.unwrap(); // -> dead-letter
+        let dead_letters = queue.dead_letters().await;
+        assert_eq!(dead_letters[0].attempts, max_attempts);
+    }
+
+    // The replayed DLQ entry must retain the bumped attempt count.
+    let (queue, _rx) = DurableJobQueue::open_with_config(&path, zero_backoff())
+        .await
+        .unwrap();
+    let dead_letters = queue.dead_letters().await;
+    assert_eq!(dead_letters.len(), 1);
+    assert_eq!(
+        dead_letters[0].attempts, max_attempts,
+        "persisted DLQ attempt count must survive restart"
+    );
+}
+
+#[tokio::test]
+async fn dead_letter_table_evicts_oldest_when_capped() {
+    let config = DurableQueueConfig {
+        max_dead_letters: 1,
+        base_backoff: Duration::ZERO,
+        ..zero_backoff()
+    };
+    let dir = tempdir().unwrap();
+    let (queue, mut rx) = DurableJobQueue::open_with_config(dir.path().join("jobs.wal"), config)
+        .await
+        .unwrap();
+
+    let a = queue.enqueue_tracked(sample_job(1)).await.unwrap();
+    rx.recv().await.unwrap();
+    queue.fail(a, "e".to_string()).await.unwrap();
+    rx.recv().await.unwrap();
+    queue.fail(a, "e".to_string()).await.unwrap(); // dead-letter a
+
+    let b = queue.enqueue_tracked(sample_job(2)).await.unwrap();
+    rx.recv().await.unwrap();
+    queue.fail(b, "e".to_string()).await.unwrap();
+    rx.recv().await.unwrap();
+    queue.fail(b, "e".to_string()).await.unwrap(); // dead-letter b, evicts a
+
+    let dead_letters = queue.dead_letters().await;
+    assert_eq!(
+        dead_letters.len(),
+        1,
+        "max_dead_letters=1 should evict the oldest"
+    );
+    assert_eq!(dead_letters[0].id, b);
+}
+
+#[tokio::test]
+async fn full_channel_keeps_jobs_durable_and_eventually_delivers() {
+    let config = DurableQueueConfig {
+        channel_capacity: 1,
+        base_backoff: Duration::ZERO,
+        ..DurableQueueConfig::default()
+    };
+    let dir = tempdir().unwrap();
+    let (queue, mut rx) = DurableJobQueue::open_with_config(dir.path().join("jobs.wal"), config)
+        .await
+        .unwrap();
+
+    let _id1 = queue.enqueue_tracked(sample_job(1)).await.unwrap();
+    let _id2 = queue.enqueue_tracked(sample_job(2)).await.unwrap();
+
+    // Both jobs are durable in the WAL + pending even though the channel holds one.
+    assert_eq!(queue.stats().await.pending_depth, 2);
+
+    // Draining frees capacity; the deferred announcement of the second job then
+    // completes and is received.
+    let e1 = rx.recv().await.unwrap();
+    let e2 = rx.recv().await.unwrap();
+    assert_ne!(e1.id, e2.id);
+}
+
+#[tokio::test]
+async fn unsupported_schema_version_aborts_open() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("jobs.wal");
+
+    // Append a record with an incompatible schema version directly to the WAL.
+    let payload = serde_json::to_vec(&serde_json::json!({"v": 2u32, "op": {"Enqueue": {"id": 1u64, "attempt": 0u32, "enqueued_at_ms": 0i64, "job": {"ExtractEntities": {"node_id": 1u64, "content": "x", "model_id": "m", "snapshot_id": "s"}}}}})).unwrap();
+    {
+        let mut wal = storage::wal::Wal::open(&path).await.unwrap();
+        wal.append(&payload).await.unwrap();
+        wal.flush().await.unwrap();
+    }
+
+    let result = DurableJobQueue::open_with_config(&path, zero_backoff()).await;
+    let Err(err) = result else {
+        panic!("expected schema-version error on reopen");
+    };
+    assert!(
+        format!("{err}").contains("schema version"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn stats_counters_rebuild_after_reopen() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("jobs.wal");
