@@ -6,3 +6,5 @@ __pycache__/
 .env
 .agent/
 test_failure.log
+/coverage/
+/lcov.info

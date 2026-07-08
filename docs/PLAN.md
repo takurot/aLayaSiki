@@ -418,6 +418,26 @@
 
 ---
 
+## PR-14.9: テストカバレッジ計測とゲート (NEW)
+
+* Depends on: PR-14.5
+
+- [x] **カバレッジジョブ追加**: `cargo-llvm-cov` でワークスペース全体のカバレッジをCIで生成 (Issue #65)
+- [x] **成果物アップロード**: HTML / LCOV レポートを CI artifact として保存 (PR 毎にダウンロード可能)
+- [x] **ローカル手順の文書化**: README に `cargo-llvm-cov` のインストールとレポート生成手順を追記
+- [ ] **閾値ゲートの有効化**: ベースライン計測後に `--fail-under-lines` で 80% 目標を強制 (フォローアップ Issue で追跡)
+
+**Done Criteria:**
+- [x] カバレッジが PR 毎に CI で見える
+- [ ] ベースライン トリアージ後に閾値ゲートを有効化
+
+**Notes:**
+- 現段階では Issue #65 の指針どおり report-only で導入し、`--fail-under-lines` の強制はベースライン確定後のフォローアップに切り出した
+- `cargo llvm-cov --workspace --lib` で取得した現在のベースラインは lib 限定で約 52% lines（統合テスト/E2Eを含めるとさらに変動）。最初の数回の CI 実行結果を見て現実的な閾値（最終的に SPEC §P7 の 80% 目標）を段階的に引き上げる想定
+- 既存の `cargo-audit` ジョブと揃えるため `taiki-e/install-action@v2` 経由で `cargo-llvm-cov` をインストールし、`dtolnay/rust-toolchain@stable` には `llvm-tools-preview` コンポーネントを追加した
+
+---
+
 ## PR-16: レプリケーション / HA（商用化向け）
 
 * Depends on: PR-02, PR-03, PR-07, PR-17.1
