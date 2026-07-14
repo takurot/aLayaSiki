@@ -1,0 +1,27 @@
+{
+  "profile": "baseline",
+  "generated_at_unix": 1772854842,
+  "design_target": {
+    "nodes": 100000000,
+    "edges": 300000000
+  },
+  "operational": {
+    "throughput_ops_per_sec": 389.3786799659872,
+    "read_p95_ms": 16.964958,
+    "write_p95_ms": 188.665708
+  },
+  "graph_rag": {
+    "throughput_ops_per_sec": 221.73404802528506,
+    "read_p95_ms": 32.891584,
+    "write_p95_ms": 141.742209,
+    "avg_groundedness": 0.5931951818642793,
+    "evidence_attachment_rate": 1.0,
+    "answer_with_evidence_rate": 1.0
+  },
+  "ann": {
+    "search_sec": {
+      "usearch": 0.0034668445587158203,
+      "faiss_flat": 0.030553102493286133
+    }
+  }
+}
