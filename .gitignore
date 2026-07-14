@@ -3,8 +3,12 @@ target/
 **/*.pyc
 __pycache__/
 .venv/
+.venv-benchmarks/
 .env
 .agent/
+.claude/
+.serena/
+temp/
 test_failure.log
 /coverage/
 /lcov.info

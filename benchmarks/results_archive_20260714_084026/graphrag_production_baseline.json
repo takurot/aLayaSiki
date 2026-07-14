@@ -1,6 +1,6 @@
 {
   "benchmark": "graphrag_production_bench",
-  "generated_at_unix": 1783986153,
+  "generated_at_unix": 1772854831,
   "config": {
     "seed_nodes": 4000,
     "workers": 6,
@@ -12,38 +12,38 @@
     "traversal_depth": 2
   },
   "totals": {
-    "elapsed_sec": 0.882345125,
+    "elapsed_sec": 2.705944375,
     "total_ops": 600,
     "read_ops": 540,
     "write_ops": 60,
-    "throughput_ops_per_sec": 680.0060237200269
+    "throughput_ops_per_sec": 221.73404802528506
   },
   "read_latency_ns": {
-    "p50_ns": 2321958,
-    "p95_ns": 23248541,
-    "p99_ns": 27736916,
-    "p50_ms": 2.321958,
-    "p95_ms": 23.248541,
-    "p99_ms": 27.736916
+    "p50_ns": 9820541,
+    "p95_ns": 32891584,
+    "p99_ns": 40518959,
+    "p50_ms": 9.820541,
+    "p95_ms": 32.891584,
+    "p99_ms": 40.518959
   },
   "write_latency_ns": {
-    "p50_ns": 9128167,
-    "p95_ns": 33584042,
-    "p99_ns": 39664375,
-    "p50_ms": 9.128167,
-    "p95_ms": 33.584042,
-    "p99_ms": 39.664375
+    "p50_ns": 71703083,
+    "p95_ns": 141742209,
+    "p99_ns": 176429667,
+    "p50_ms": 71.703083,
+    "p95_ms": 141.742209,
+    "p99_ms": 176.429667
   },
   "read_quality": {
     "read_ops": 540,
     "answer_reads": 220,
-    "avg_groundedness": 0.6032085054450564,
-    "avg_answer_groundedness": 0.6146579739722339,
+    "avg_groundedness": 0.5931951818642793,
+    "avg_answer_groundedness": 0.5958025227893483,
     "avg_evidence_nodes": 24.0,
     "evidence_attachment_rate": 1.0,
     "answer_with_evidence_rate": 1.0,
     "answer_with_citations_rate": 1.0,
-    "semantic_cache_hit_rate": 0.6351851851851852
+    "semantic_cache_hit_rate": 0.31666666666666665
   },
   "mode_mix": {
     "local": 270,
@@ -53,10 +53,10 @@
   },
   "query_engine_metrics": {
     "total_queries": 648,
-    "hit_rate": 0.6234568,
-    "p50": 2162,
-    "p95": 23233,
-    "p99": 27533,
+    "hit_rate": 0.3101852,
+    "p50": 9925,
+    "p95": 32803,
+    "p99": 40490,
     "history_count": 648,
     "avg_extraction_confidence": 0.0,
     "gpu_vram_usage_mb": 0

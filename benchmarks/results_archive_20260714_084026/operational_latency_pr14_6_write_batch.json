@@ -1,6 +1,6 @@
 {
   "benchmark": "operational_latency_bench",
-  "generated_at_unix": 1783986059,
+  "generated_at_unix": 1773235991,
   "config": {
     "nodes": 4000,
     "workers": 6,
@@ -12,30 +12,30 @@
     "write_latency_scope": "durable"
   },
   "totals": {
-    "elapsed_sec": 0.538492042,
+    "elapsed_sec": 0.791351792,
     "total_ops": 600,
     "read_ops": 540,
     "write_ops": 60,
-    "throughput_ops_per_sec": 1114.2225942124508
+    "throughput_ops_per_sec": 758.1962991245744
   },
   "read_latency_ns": {
-    "p50_ns": 3831167,
-    "p95_ns": 10181750,
-    "p99_ns": 12182083,
-    "p50_ms": 3.831167,
-    "p95_ms": 10.18175,
-    "p99_ms": 12.182083
+    "p50_ns": 5748750,
+    "p95_ns": 16409917,
+    "p99_ns": 24585792,
+    "p50_ms": 5.74875,
+    "p95_ms": 16.409917,
+    "p99_ms": 24.585792
   },
   "write_latency_ns": {
-    "p50_ns": 10803750,
-    "p95_ns": 40690542,
-    "p99_ns": 52735625,
-    "p50_ms": 10.80375,
-    "p95_ms": 40.690542,
-    "p99_ms": 52.735625
+    "p50_ns": 10055000,
+    "p95_ns": 72831125,
+    "p99_ns": 86021541,
+    "p50_ms": 10.055,
+    "p95_ms": 72.831125,
+    "p99_ms": 86.021541
   },
   "durability_barrier": {
-    "final_flush_ns": 4198750,
-    "final_flush_ms": 4.19875
+    "final_flush_ns": 20875,
+    "final_flush_ms": 0.020875
   }
 }

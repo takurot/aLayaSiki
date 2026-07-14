@@ -4,30 +4,30 @@
 
 ## WAL Flush Policy
 - WAL flush policy: always
-  nodes=100000, workers=8, wal=always, throughput=126.52 ops/s, read p95=148.56 ms, write p95=252.12 ms (durable), final flush=4.33 ms
+  nodes=100000, workers=8, wal=always, throughput=91.92 ops/s, read p95=176.66 ms, write p95=469.56 ms (durable), final flush=5.12 ms
   vs baseline: throughput=+0.00%, read p95=+0.00 ms, write p95=+0.00 ms, final flush=+0.00 ms
 - WAL flush policy: interval(15ms)
-  nodes=100000, workers=8, wal=interval:15ms, throughput=140.45 ops/s, read p95=128.30 ms, write p95=290.10 ms (submit_only), final flush=5.40 ms
-  vs baseline: throughput=+11.01%, read p95=-20.26 ms, write p95=n/a (scope mismatch), final flush=+1.08 ms
+  nodes=100000, workers=8, wal=interval:15ms, throughput=88.20 ops/s, read p95=121.05 ms, write p95=627.34 ms (submit_only), final flush=5.13 ms
+  vs baseline: throughput=-4.04%, read p95=-55.61 ms, write p95=n/a (scope mismatch), final flush=+0.00 ms
 - WAL flush policy: batch(32)
-  nodes=100000, workers=8, wal=batch:32, throughput=930.40 ops/s, read p95=21.01 ms, write p95=116.63 ms (submit_only), final flush=5.24 ms
-  vs baseline: throughput=+635.39%, read p95=-127.55 ms, write p95=n/a (scope mismatch), final flush=+0.91 ms
+  nodes=100000, workers=8, wal=batch:32, throughput=684.92 ops/s, read p95=24.41 ms, write p95=137.20 ms (submit_only), final flush=3.53 ms
+  vs baseline: throughput=+645.17%, read p95=-152.25 ms, write p95=n/a (scope mismatch), final flush=-1.59 ms
 
 ## Scale Sweep
 - Scale sweep: 100k nodes
-  nodes=100000, workers=8, wal=batch:32, throughput=653.82 ops/s, read p95=26.57 ms, write p95=138.57 ms (submit_only), final flush=5.02 ms
+  nodes=100000, workers=8, wal=batch:32, throughput=517.44 ops/s, read p95=36.63 ms, write p95=157.19 ms (submit_only), final flush=6.11 ms
   vs baseline: throughput=+0.00%, read p95=+0.00 ms, write p95=+0.00 ms, final flush=+0.00 ms
 - Scale sweep: 1M nodes
-  nodes=1000000, workers=8, wal=batch:32, throughput=45.40 ops/s, read p95=304.22 ms, write p95=2084.98 ms (submit_only), final flush=9.09 ms
-  vs baseline: throughput=-93.06%, read p95=+277.65 ms, write p95=+1946.41 ms, final flush=+4.08 ms
+  nodes=1000000, workers=8, wal=batch:32, throughput=53.94 ops/s, read p95=255.78 ms, write p95=1560.09 ms (submit_only), final flush=7.21 ms
+  vs baseline: throughput=-89.58%, read p95=+219.15 ms, write p95=+1402.91 ms, final flush=+1.10 ms
 
 ## Worker Sweep
 - Worker sweep: 8 workers
-  nodes=100000, workers=8, wal=batch:32, throughput=803.39 ops/s, read p95=21.97 ms, write p95=123.68 ms (submit_only), final flush=5.15 ms
+  nodes=100000, workers=8, wal=batch:32, throughput=828.37 ops/s, read p95=33.29 ms, write p95=125.30 ms (submit_only), final flush=5.86 ms
   vs baseline: throughput=+0.00%, read p95=+0.00 ms, write p95=+0.00 ms, final flush=+0.00 ms
 - Worker sweep: 32 workers
-  nodes=100000, workers=32, wal=batch:32, throughput=288.90 ops/s, read p95=528.05 ms, write p95=674.86 ms (submit_only), final flush=0.02 ms
-  vs baseline: throughput=-64.04%, read p95=+506.08 ms, write p95=+551.18 ms, final flush=-5.13 ms
+  nodes=100000, workers=32, wal=batch:32, throughput=433.18 ops/s, read p95=350.21 ms, write p95=475.68 ms (submit_only), final flush=4.21 ms
+  vs baseline: throughput=-47.71%, read p95=+316.92 ms, write p95=+350.38 ms, final flush=-1.65 ms
 - Worker sweep: 128 workers
-  nodes=100000, workers=128, wal=batch:32, throughput=189.47 ops/s, read p95=363.14 ms, write p95=7496.58 ms (submit_only), final flush=3.61 ms
-  vs baseline: throughput=-76.42%, read p95=+341.17 ms, write p95=+7372.91 ms, final flush=-1.54 ms
+  nodes=100000, workers=128, wal=batch:32, throughput=243.24 ops/s, read p95=230.63 ms, write p95=5786.22 ms (submit_only), final flush=4.38 ms
+  vs baseline: throughput=-70.64%, read p95=+197.34 ms, write p95=+5660.92 ms, final flush=-1.48 ms
