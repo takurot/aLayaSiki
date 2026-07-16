@@ -66,7 +66,7 @@ jobs:
         run: cargo test --workspace
 
   coverage:
-    name: Coverage (cargo-llvm-cov, report-only)
+    name: Coverage (cargo-llvm-cov, 80% line gate)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -101,6 +101,11 @@ jobs:
           name: coverage-lcov
           path: lcov.info
           if-no-files-found: error
+      # Enforce the SPEC §P7 line-coverage target. Runs after artifact upload
+      # so reports remain available for debugging even when the gate fails.
+      # Baseline observed on this job: ~88% lines (see docs/PLAN.md PR-14.9).
+      - name: Enforce line-coverage gate (fail-under-lines 80)
+        run: cargo llvm-cov report --summary-only --fail-under-lines 80
 
   e2e-tests:
     name: E2E Tests (ingest -> query)

@@ -425,15 +425,15 @@
 - [x] **カバレッジジョブ追加**: `cargo-llvm-cov` でワークスペース全体のカバレッジをCIで生成 (Issue #65)
 - [x] **成果物アップロード**: HTML / LCOV レポートを CI artifact として保存 (PR 毎にダウンロード可能)
 - [x] **ローカル手順の文書化**: README に `cargo-llvm-cov` のインストールとレポート生成手順を追記
-- [ ] **閾値ゲートの有効化**: ベースライン計測後に `--fail-under-lines` で 80% 目標を強制 (フォローアップ Issue で追跡)
+- [x] **閾値ゲートの有効化**: CI カバレッジジョブで `cargo llvm-cov report --summary-only --fail-under-lines 80` を実行し SPEC §P7 の 80% 目標を強制 (Issue #77)
 
 **Done Criteria:**
 - [x] カバレッジが PR 毎に CI で見える
-- [ ] ベースライン トリアージ後に閾値ゲートを有効化
+- [x] ベースライン トリアージ後に閾値ゲートを有効化
 
 **Notes:**
 - 現段階では Issue #65 の指針どおり report-only で導入し、`--fail-under-lines` の強制はベースライン確定後のフォローアップに切り出した
-- `cargo llvm-cov --workspace --lib` で取得した現在のベースラインは lib 限定で約 52% lines（統合テスト/E2Eを含めるとさらに変動）。最初の数回の CI 実行結果を見て現実的な閾値（最終的に SPEC §P7 の 80% 目標）を段階的に引き上げる想定
+- **ベースライン実測と閾値決定 (Issue #77):** ワークスペース全体(lib+統合+E2E)の CI 実測値は **87.94% lines** (TOTAL 7719 中 931 missed、ubuntu-latest)。Issue 想定の ~52% は lib 限定時代の旧値。80% 目標を約 8pt の余裕でクリアしているため、SPEC §P7 の 80% をそのまま `--fail-under-lines 80` で強制する（破滅的低下のスモークゲート兼目標履行）。成果物DXのためゲートステップは LCOV/HTML アップロード後に配置し、失敗時にもレポートがダウンロード可能。カバレッジ向上に合わせて 80 → 85 → 88% へ段階的に引き上げる想定
 - 既存の `cargo-audit` ジョブと揃えるため `taiki-e/install-action@v2` 経由で `cargo-llvm-cov` をインストールし、`dtolnay/rust-toolchain@stable` には `llvm-tools-preview` コンポーネントを追加した
 
 ---
