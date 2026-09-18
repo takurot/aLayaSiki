@@ -1,0 +1,18 @@
+# Default configuration for AppConfig::load() (core/src/config.rs).
+#
+# Precedence (lowest to highest):
+#   1. This file (config/default.toml)
+#   2. config/<RUN_MODE>.toml, where RUN_MODE defaults to "development" (optional, not required to exist)
+#   3. Environment variables prefixed with ALAYASIKI_, using "__" as the nested-key separator
+#      e.g. ALAYASIKI_SERVER__PORT=9090 overrides server.port
+#           ALAYASIKI_STORAGE__DATA_DIR=/var/lib/alayasiki overrides storage.data_dir
+#
+# These are safe, non-secret defaults suitable for local development. Do not add secrets here.
+
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[storage]
+data_dir = "./data"
+wal_flush_interval_ms = 100
