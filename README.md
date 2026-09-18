@@ -56,6 +56,31 @@ dashboard.
 | `ui/` | TypeScript | React + Vite dashboard. |
 | `docs/` | Markdown | Product spec (`SPEC.md`), plan (`PLAN.md`), research, evaluation, and ADRs. |
 
+## Configuration
+
+Runtime configuration is loaded by `AppConfig::load()` (`core/src/config.rs`)
+using the [`config`](https://docs.rs/config) crate. On a clean checkout it
+loads successfully with no setup required, using the checked-in defaults at
+[`config/default.toml`](config/default.toml).
+
+Precedence (lowest to highest):
+
+1. `config/default.toml` — checked-in, safe, non-secret defaults (required).
+2. `config/<RUN_MODE>.toml` — optional per-environment overrides; `RUN_MODE`
+   defaults to `development` and the file is not required to exist.
+3. Environment variables prefixed with `ALAYASIKI_`, using `__` as the
+   nested-key separator, e.g. `ALAYASIKI_SERVER__PORT=9090` overrides
+   `server.port` and `ALAYASIKI_STORAGE__DATA_DIR=/var/lib/alayasiki`
+   overrides `storage.data_dir`.
+
+The config directory itself defaults to `config` (relative to the process's
+working directory) and can be overridden with `ALAYASIKI_CONFIG_DIR`, e.g. to
+point at an absolute path when the process isn't started from the repository
+root.
+
+Do not add secrets to checked-in config files; use environment variables for
+secrets instead.
+
 ## Build, Test & Benchmarks
 
 Rust formatting and linting are enforced in CI:
@@ -130,8 +155,8 @@ CI (`.github/workflows/ci.yml`) runs on every PR across Ubuntu and macOS:
 - **Rust quality** — `cargo fmt --check` + `cargo clippy -D warnings`.
 - **Cargo audit** — security advisory scanning.
 - **Build & tests** — `cargo build --workspace` / `cargo test --workspace`.
-- **Coverage** — per-PR workspace coverage via `cargo-llvm-cov` (report-only;
-  enforcement threshold to follow — Issue #65).
+- **Coverage** — per-PR workspace coverage via `cargo-llvm-cov`, enforcing an
+  80% line-coverage gate.
 - **E2E** — ingest → query pipeline test.
 - **ANN recall gate** — HNSW recall@k vs. linear ground-truth.
 - **Benchmark gates** — operational latency + GraphRAG p95 thresholds.
@@ -141,9 +166,10 @@ CI (`.github/workflows/ci.yml`) runs on every PR across Ubuntu and macOS:
 ## Test Coverage
 
 CI reports per-PR workspace coverage using
-[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (report-only at
-this stage; an enforcement threshold will follow once the baseline is triaged —
-see Issue #65). HTML and LCOV artifacts are attached to every CI run.
+[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) and enforces an
+80% line-coverage gate (`cargo llvm-cov report --summary-only
+--fail-under-lines 80`); a PR fails CI if workspace line coverage drops below
+80%. HTML and LCOV artifacts are attached to every CI run.
 
 To generate the same coverage report locally:
 
@@ -156,11 +182,11 @@ cargo llvm-cov report --html --output-dir coverage
 open coverage/html/index.html   # macOS; use xdg-open on Linux
 ```
 
-The summary table can be printed without writing files:
+To check the same gate CI enforces:
 
 ```sh
 cargo llvm-cov --workspace --no-report
-cargo llvm-cov report          # prints the per-file coverage table
+cargo llvm-cov report --summary-only --fail-under-lines 80
 ```
 
 ## Documentation
