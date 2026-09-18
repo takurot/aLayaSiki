@@ -189,7 +189,7 @@ impl Repository {
 }
 
 fn serialize_backup_snapshot(snapshot: &RepositoryBackupSnapshot) -> Result<Vec<u8>, RepoError> {
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(snapshot)
-        .map_err(|_| RepoError::Serialization)?;
+    let bytes =
+        rkyv::to_bytes::<rkyv::rancor::Error>(snapshot).map_err(|_| RepoError::Serialization)?;
     Ok(bytes.to_vec())
 }
