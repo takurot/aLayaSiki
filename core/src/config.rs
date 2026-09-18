@@ -38,7 +38,12 @@ impl AppConfig {
         let builder = Config::builder()
             .add_source(File::with_name(&format!("{config_dir}/default")))
             .add_source(File::with_name(&format!("{config_dir}/{run_mode}")).required(false))
-            .add_source(Environment::with_prefix("ALAYASIKI").separator("__"));
+            .add_source(
+                Environment::with_prefix("ALAYASIKI")
+                    .prefix_separator("_")
+                    .separator("__")
+                    .try_parsing(true),
+            );
 
         builder.build()?.try_deserialize()
     }
