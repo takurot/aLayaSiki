@@ -1,7 +1,5 @@
 use super::replay::{apply_tx_operation, mutations_to_tx_operations, serialize_wal_entry};
 use super::{IndexMutation, RepoError, Repository, TxOperation, WalEntry};
-use rkyv::ser::serializers::AllocSerializer;
-use rkyv::ser::Serializer;
 use std::collections::HashSet;
 
 impl Repository {
@@ -135,15 +133,12 @@ impl Repository {
                 key: key.to_string(),
                 node_ids: node_ids.clone(),
             };
-            let mut serializer = AllocSerializer::<4096>::default();
-            serializer
-                .serialize_value(&entry)
+            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
                 .map_err(|_| RepoError::Serialization)?;
-            let bytes = serializer.into_serializer().into_inner();
 
             let durable_lsn = {
                 let mut wal = self.wal.lock().await;
-                wal.append(&bytes).await?;
+                wal.append(&bytes[..]).await?;
                 wal.durable_lsn()
             };
             self.record_durable_snapshot(durable_lsn).await?;

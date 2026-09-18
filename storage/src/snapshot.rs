@@ -1,5 +1,4 @@
 use alayasiki_core::error::{AlayasikiError, ErrorCode};
-use rkyv::ser::{serializers::AllocSerializer, Serializer};
 use rkyv::{Archive, Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -96,15 +95,20 @@ fn parse_snapshot_lsn(file_name: &str) -> Option<u64> {
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
-#[archive(check_bytes)]
 pub struct SnapshotCatalogEntry {
     pub snapshot_id: String,
     pub lsn: u64,
     pub created_at_unix_ms: i64,
 }
 
+/// On-disk snapshot catalog archive, encoded with `rkyv`. This format is not
+/// guaranteed to be byte-compatible across `rkyv` releases that change the
+/// derive/bytecheck layout (e.g. the `0.7` -> `0.8` upgrade for
+/// RUSTSEC-2026-0235); no migration tooling is provided, so upgrading past a
+/// format-breaking `rkyv` release requires starting from an empty snapshot
+/// directory rather than reusing an existing catalog file. See "Persistence
+/// Format Compatibility" in the repository README.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[archive(check_bytes)]
 struct SnapshotCatalogFile {
     entries: Vec<SnapshotCatalogEntry>,
 }
@@ -132,11 +136,9 @@ impl SnapshotCatalog {
         }
 
         let bytes = fs::read(&path).await?;
-        let archived = rkyv::check_archived_root::<SnapshotCatalogFile>(&bytes[..])
-            .map_err(|_| SnapshotError::Deserialization)?;
-        let file: SnapshotCatalogFile = archived
-            .deserialize(&mut rkyv::Infallible)
-            .map_err(|_| SnapshotError::Deserialization)?;
+        let file: SnapshotCatalogFile =
+            rkyv::from_bytes::<SnapshotCatalogFile, rkyv::rancor::Error>(&bytes[..])
+                .map_err(|_| SnapshotError::Deserialization)?;
 
         Ok(Self {
             path: Some(path),
@@ -200,14 +202,11 @@ impl SnapshotCatalog {
         let file = SnapshotCatalogFile {
             entries: self.entries.clone(),
         };
-        let mut serializer = AllocSerializer::<1024>::default();
-        serializer
-            .serialize_value(&file)
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&file)
             .map_err(|_| SnapshotError::Serialization)?;
-        let bytes = serializer.into_serializer().into_inner();
 
         let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, bytes).await?;
+        fs::write(&tmp_path, &bytes[..]).await?;
         fs::rename(&tmp_path, path).await?;
         Ok(())
     }
@@ -292,6 +291,21 @@ mod tests {
                 .resolve_as_of(999)
                 .map(|entry| entry.snapshot_id.as_str()),
             Some("wal-lsn-3")
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_catalog_rejects_corrupt_file_without_panic() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("catalog-corrupt.rkyv");
+
+        // Write a truncated/malformed archive in place of a real catalog file.
+        fs::write(&path, b"not a valid rkyv archive").await.unwrap();
+
+        let result = SnapshotCatalog::open(&path).await;
+        assert!(
+            matches!(result, Err(SnapshotError::Deserialization)),
+            "corrupt catalog file must be rejected safely, not panic or read out-of-bounds"
         );
     }
 }
