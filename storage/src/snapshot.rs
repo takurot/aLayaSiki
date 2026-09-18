@@ -101,6 +101,13 @@ pub struct SnapshotCatalogEntry {
     pub created_at_unix_ms: i64,
 }
 
+/// On-disk snapshot catalog archive, encoded with `rkyv`. This format is not
+/// guaranteed to be byte-compatible across `rkyv` releases that change the
+/// derive/bytecheck layout (e.g. the `0.7` -> `0.8` upgrade for
+/// RUSTSEC-2026-0235); no migration tooling is provided, so upgrading past a
+/// format-breaking `rkyv` release requires starting from an empty snapshot
+/// directory rather than reusing an existing catalog file. See "Persistence
+/// Format Compatibility" in the repository README.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 struct SnapshotCatalogFile {
     entries: Vec<SnapshotCatalogEntry>,

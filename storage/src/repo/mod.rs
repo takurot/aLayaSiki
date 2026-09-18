@@ -111,6 +111,13 @@ struct BackupEdgeMetadataRecord {
     metadata: HashMap<String, String>,
 }
 
+/// On-disk backup snapshot archive, encoded with `rkyv`. This format is not
+/// guaranteed to be byte-compatible across `rkyv` releases that change the
+/// derive/bytecheck layout (e.g. the `0.7` -> `0.8` upgrade for
+/// RUSTSEC-2026-0235); no migration tooling is provided, so upgrading past a
+/// format-breaking `rkyv` release requires starting from an empty snapshot
+/// directory rather than reusing existing backup files. See "Persistence
+/// Format Compatibility" in the repository README.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 struct RepositoryBackupSnapshot {
     lsn: u64,

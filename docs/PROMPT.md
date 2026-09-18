@@ -18,7 +18,8 @@ Use this file as the default execution rules for implementing tasks/PRs in this 
 ## Non‑Negotiable Project Principles
 
 ### 1) Zero‑Copy & Performance
-- Use **`rkyv`** with `check_archived_root` for validated zero-copy deserialization.
+- Use **`rkyv`** with `rkyv::access`/`rkyv::from_bytes` (parameterized with
+  `rkyv::rancor::Error`) for validated zero-copy deserialization.
 - Never deep-clone large data structures (Node/Edge) unless absolutely necessary.
 - Prefer **in-place updates** to indices over rebuild.
 
@@ -208,7 +209,8 @@ pub struct Edge {
 }
 ```
 
-Use `rkyv` derives with `#[archive(check_bytes)]` for safe zero-copy access.
+Use `#[derive(Archive, Deserialize, Serialize)]` (rkyv 0.8 derives bytecheck
+validation by default) for safe zero-copy access.
 
 ---
 
