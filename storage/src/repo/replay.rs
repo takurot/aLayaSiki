@@ -5,9 +5,6 @@ use crate::hyper_index::HyperIndex;
 use crate::snapshot::{SnapshotError, SnapshotManager};
 use crate::tiering::StorageProfile;
 use alayasiki_core::model::Node;
-use rkyv::ser::serializers::AllocSerializer;
-use rkyv::ser::Serializer;
-use rkyv::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -96,11 +93,9 @@ pub(super) fn mutations_to_tx_operations(mutations: &[super::IndexMutation]) -> 
 }
 
 pub(super) fn serialize_wal_entry(entry: &WalEntry) -> Result<Vec<u8>, RepoError> {
-    let mut serializer = AllocSerializer::<4096>::default();
-    serializer
-        .serialize_value(entry)
-        .map_err(|_| RepoError::Serialization)?;
-    Ok(serializer.into_serializer().into_inner().to_vec())
+    let bytes =
+        rkyv::to_bytes::<rkyv::rancor::Error>(entry).map_err(|_| RepoError::Serialization)?;
+    Ok(bytes.to_vec())
 }
 
 pub(super) async fn load_materialized_state_from_backup(
@@ -173,10 +168,7 @@ async fn deserialize_backup_snapshot(path: &Path) -> Result<RepositoryBackupSnap
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|err| RepoError::Snapshot(SnapshotError::Io(err)))?;
-    let archived = rkyv::check_archived_root::<RepositoryBackupSnapshot>(&bytes[..])
-        .map_err(|_| RepoError::Deserialization)?;
-    archived
-        .deserialize(&mut rkyv::Infallible)
+    rkyv::from_bytes::<RepositoryBackupSnapshot, rkyv::rancor::Error>(&bytes[..])
         .map_err(|_| RepoError::Deserialization)
 }
 

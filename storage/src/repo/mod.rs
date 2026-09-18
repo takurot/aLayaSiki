@@ -63,7 +63,6 @@ impl AlayasikiError for RepoError {
 
 /// WAL Entry types for durability
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[archive(check_bytes)]
 pub enum WalEntry {
     Put(Node),
     PutEdge(Edge),
@@ -73,7 +72,6 @@ pub enum WalEntry {
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[archive(check_bytes)]
 pub enum TxOperation {
     Put(Node),
     PutEdge(Edge),
@@ -92,7 +90,6 @@ pub enum IndexMutation {
 pub type EdgeMetaKey = (u64, u64, String);
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[archive(check_bytes)]
 struct BackupEdgeRecord {
     source: u64,
     target: u64,
@@ -101,14 +98,12 @@ struct BackupEdgeRecord {
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[archive(check_bytes)]
 struct BackupIdempotencyRecord {
     key: String,
     node_ids: Vec<u64>,
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[archive(check_bytes)]
 struct BackupEdgeMetadataRecord {
     source: u64,
     target: u64,
@@ -116,8 +111,14 @@ struct BackupEdgeMetadataRecord {
     metadata: HashMap<String, String>,
 }
 
+/// On-disk backup snapshot archive, encoded with `rkyv`. This format is not
+/// guaranteed to be byte-compatible across `rkyv` releases that change the
+/// derive/bytecheck layout (e.g. the `0.7` -> `0.8` upgrade for
+/// RUSTSEC-2026-0235); no migration tooling is provided, so upgrading past a
+/// format-breaking `rkyv` release requires starting from an empty snapshot
+/// directory rather than reusing existing backup files. See "Persistence
+/// Format Compatibility" in the repository README.
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
-#[archive(check_bytes)]
 struct RepositoryBackupSnapshot {
     lsn: u64,
     nodes: Vec<Node>,
@@ -319,11 +320,9 @@ impl Repository {
                     if lsn <= base_lsn {
                         return Ok(());
                     }
-                    let archived = rkyv::check_archived_root::<WalEntry>(&data[..])
-                        .map_err(|_| WalError::CorruptEntry)?;
-                    let entry: WalEntry = archived
-                        .deserialize(&mut rkyv::Infallible)
-                        .expect("infallible deserializer");
+                    let entry: WalEntry =
+                        rkyv::from_bytes::<WalEntry, rkyv::rancor::Error>(&data[..])
+                            .map_err(|_| WalError::CorruptEntry)?;
                     replay::apply_replayed_entry(
                         &entry,
                         &mut materialized.nodes,

@@ -188,11 +188,8 @@ async fn test_index_transaction_persists_single_wal_record() {
 
     wal.replay(|_lsn, payload| {
         record_count += 1;
-        let archived = rkyv::check_archived_root::<WalEntry>(&payload[..])
+        let entry: WalEntry = rkyv::from_bytes::<WalEntry, rkyv::rancor::Error>(&payload[..])
             .map_err(|_| WalError::CorruptEntry)?;
-        let entry: WalEntry = archived
-            .deserialize(&mut rkyv::Infallible)
-            .expect("infallible deserializer");
 
         match entry {
             WalEntry::Transaction(entries) => {
@@ -254,11 +251,8 @@ async fn test_persist_ingest_batch_persists_nodes_and_idempotency_in_single_wal_
 
     wal.replay(|_lsn, payload| {
         record_count += 1;
-        let archived = rkyv::check_archived_root::<WalEntry>(&payload[..])
+        let entry: WalEntry = rkyv::from_bytes::<WalEntry, rkyv::rancor::Error>(&payload[..])
             .map_err(|_| WalError::CorruptEntry)?;
-        let entry: WalEntry = archived
-            .deserialize(&mut rkyv::Infallible)
-            .expect("infallible deserializer");
 
         match entry {
             WalEntry::Transaction(entries) => {
@@ -624,6 +618,46 @@ async fn test_restore_from_latest_backup_rebuilds_in_memory_state() {
 }
 
 #[tokio::test]
+async fn test_restore_from_latest_backup_rejects_corrupt_snapshot_without_panic() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("restore_corrupt_backup.wal");
+    let snapshot_dir = dir.path().join("snapshots");
+
+    let repo = Repository::open_with_snapshots(&wal_path, &snapshot_dir)
+        .await
+        .unwrap();
+    repo.put_node(Node::new(1, vec![1.0], "N1".to_string()))
+        .await
+        .unwrap();
+    repo.create_backup_snapshot().await.unwrap();
+
+    // Overwrite the on-disk backup snapshot file with a truncated/garbage
+    // archive, simulating disk corruption of the rkyv-encoded bytes. Unlike
+    // WAL entries, backup snapshots have no CRC framing ahead of the rkyv
+    // validation layer, so rkyv's bytecheck validation is the only integrity
+    // gate for this read path.
+    let mut entries = tokio::fs::read_dir(&snapshot_dir).await.unwrap();
+    let mut snapshot_files = Vec::new();
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("snapshot_") && name.ends_with(".rkyv") {
+            snapshot_files.push(entry.path());
+        }
+    }
+    assert_eq!(snapshot_files.len(), 1);
+    tokio::fs::write(&snapshot_files[0], b"not a valid rkyv archive")
+        .await
+        .unwrap();
+
+    let result = repo.restore_from_latest_backup().await;
+    assert!(
+        matches!(result, Err(RepoError::Deserialization)),
+        "corrupt backup snapshot must be rejected safely, not panic or read out-of-bounds"
+    );
+}
+
+#[tokio::test]
 async fn test_backup_requires_snapshot_manager_configuration() {
     let dir = tempdir().unwrap();
     let wal_path = dir.path().join("no_snapshot_manager.wal");
@@ -731,4 +765,30 @@ async fn test_session_owner_enforced_for_ingest_and_query() {
         .expect("session should exist for owner");
     assert_eq!(allowed_read.nodes.len(), 1);
     assert!(allowed_read.nodes.contains_key(&1));
+}
+
+#[tokio::test]
+async fn test_repo_open_rejects_corrupt_wal_entry_payload_without_panic() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("corrupt_entry.wal");
+
+    {
+        let repo = Repository::open(&wal_path).await.unwrap();
+        repo.put_node(Node::new(1, vec![1.0], "Node 1".to_string()))
+            .await
+            .unwrap();
+    }
+
+    // Append a WAL record with a valid CRC/length envelope but a payload that is
+    // not a valid rkyv archive, simulating disk corruption of the archived bytes.
+    {
+        let mut wal = Wal::open(&wal_path).await.unwrap();
+        wal.append(b"not a valid rkyv archive").await.unwrap();
+    }
+
+    let result = Repository::open(&wal_path).await;
+    assert!(
+        matches!(result, Err(RepoError::Wal(WalError::CorruptEntry))),
+        "corrupt WAL entry payload must be rejected safely during replay, not panic"
+    );
 }

@@ -163,6 +163,20 @@ CI (`.github/workflows/ci.yml`) runs on every PR across Ubuntu and macOS:
 - **Python ANN** — ANN benchmark with baseline regression check.
 - **UI quality** — dashboard build + lint.
 
+## Persistence Format Compatibility
+
+WAL entries, snapshot catalog files, and backup snapshots are serialized with
+[`rkyv`](https://rkyv.org/) (currently `0.8.x`). The on-disk archive layout is
+not guaranteed to be byte-compatible across `rkyv` major/minor versions that
+change the derive/bytecheck metadata format — e.g. the `0.7` → `0.8` upgrade
+that resolved `RUSTSEC-2026-0235` is a hard break: data directories with
+`.wal`/`.rkyv` files written by a pre-upgrade build fail to open (rejected as
+corrupt, not silently misread) after upgrading.
+
+No automatic migration tooling is provided. When upgrading past an `rkyv`
+format-breaking release, start from an empty WAL/snapshot directory (or
+re-ingest from source data) rather than reusing an existing data directory.
+
 ## Test Coverage
 
 CI reports per-PR workspace coverage using

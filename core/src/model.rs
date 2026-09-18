@@ -2,7 +2,6 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
-#[archive(check_bytes)] // Enables bytecheck validation for zero-copy safety
 pub struct Node {
     pub id: u64,
     pub embedding: Vec<f32>,
@@ -11,7 +10,6 @@ pub struct Node {
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug, PartialEq, Clone)]
-#[archive(check_bytes)]
 pub struct Edge {
     pub source: u64,
     pub target: u64,
