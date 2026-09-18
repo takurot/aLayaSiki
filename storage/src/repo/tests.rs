@@ -188,11 +188,8 @@ async fn test_index_transaction_persists_single_wal_record() {
 
     wal.replay(|_lsn, payload| {
         record_count += 1;
-        let archived = rkyv::check_archived_root::<WalEntry>(&payload[..])
+        let entry: WalEntry = rkyv::from_bytes::<WalEntry, rkyv::rancor::Error>(&payload[..])
             .map_err(|_| WalError::CorruptEntry)?;
-        let entry: WalEntry = archived
-            .deserialize(&mut rkyv::Infallible)
-            .expect("infallible deserializer");
 
         match entry {
             WalEntry::Transaction(entries) => {
@@ -254,11 +251,8 @@ async fn test_persist_ingest_batch_persists_nodes_and_idempotency_in_single_wal_
 
     wal.replay(|_lsn, payload| {
         record_count += 1;
-        let archived = rkyv::check_archived_root::<WalEntry>(&payload[..])
+        let entry: WalEntry = rkyv::from_bytes::<WalEntry, rkyv::rancor::Error>(&payload[..])
             .map_err(|_| WalError::CorruptEntry)?;
-        let entry: WalEntry = archived
-            .deserialize(&mut rkyv::Infallible)
-            .expect("infallible deserializer");
 
         match entry {
             WalEntry::Transaction(entries) => {
@@ -731,4 +725,30 @@ async fn test_session_owner_enforced_for_ingest_and_query() {
         .expect("session should exist for owner");
     assert_eq!(allowed_read.nodes.len(), 1);
     assert!(allowed_read.nodes.contains_key(&1));
+}
+
+#[tokio::test]
+async fn test_repo_open_rejects_corrupt_wal_entry_payload_without_panic() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("corrupt_entry.wal");
+
+    {
+        let repo = Repository::open(&wal_path).await.unwrap();
+        repo.put_node(Node::new(1, vec![1.0], "Node 1".to_string()))
+            .await
+            .unwrap();
+    }
+
+    // Append a WAL record with a valid CRC/length envelope but a payload that is
+    // not a valid rkyv archive, simulating disk corruption of the archived bytes.
+    {
+        let mut wal = Wal::open(&wal_path).await.unwrap();
+        wal.append(b"not a valid rkyv archive").await.unwrap();
+    }
+
+    let result = Repository::open(&wal_path).await;
+    assert!(
+        matches!(result, Err(RepoError::Wal(WalError::CorruptEntry))),
+        "corrupt WAL entry payload must be rejected safely during replay, not panic"
+    );
 }

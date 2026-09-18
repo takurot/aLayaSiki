@@ -10,8 +10,7 @@ config = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
-rkyv = { version = "0.7.45", features = ["validation", "std"] }
-bytecheck = "0.6"
+rkyv = { version = "0.8.17", features = ["std", "bytecheck"] }
 bytes = "1.0"
 sha2 = "0.10"
 jsonwebtoken = "9.3"

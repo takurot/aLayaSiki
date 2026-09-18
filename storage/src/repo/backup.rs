@@ -3,9 +3,6 @@ use super::{
     collect_backup_edges, current_unix_timestamp_ms, parse_wal_snapshot_lsn, RepoError, Repository,
     RepositoryBackupSnapshot, SnapshotView,
 };
-use rkyv::ser::serializers::AllocSerializer;
-use rkyv::ser::Serializer;
-use rkyv::Deserialize;
 
 impl Repository {
     pub(super) async fn record_durable_snapshot(&self, durable_lsn: u64) -> Result<(), RepoError> {
@@ -118,11 +115,9 @@ impl Repository {
                     return Ok(());
                 }
 
-                let archived = rkyv::check_archived_root::<super::WalEntry>(&data[..])
-                    .map_err(|_| crate::wal::WalError::CorruptEntry)?;
-                let entry: super::WalEntry = archived
-                    .deserialize(&mut rkyv::Infallible)
-                    .expect("infallible deserializer");
+                let entry: super::WalEntry =
+                    rkyv::from_bytes::<super::WalEntry, rkyv::rancor::Error>(&data[..])
+                        .map_err(|_| crate::wal::WalError::CorruptEntry)?;
                 apply_replayed_entry(
                     &entry,
                     &mut materialized.nodes,
@@ -170,11 +165,9 @@ impl Repository {
                 return Ok(());
             }
 
-            let archived = rkyv::check_archived_root::<super::WalEntry>(&data[..])
-                .map_err(|_| crate::wal::WalError::CorruptEntry)?;
-            let entry: super::WalEntry = archived
-                .deserialize(&mut rkyv::Infallible)
-                .expect("infallible deserializer");
+            let entry: super::WalEntry =
+                rkyv::from_bytes::<super::WalEntry, rkyv::rancor::Error>(&data[..])
+                    .map_err(|_| crate::wal::WalError::CorruptEntry)?;
             apply_replayed_entry(
                 &entry,
                 &mut materialized.nodes,
@@ -196,9 +189,7 @@ impl Repository {
 }
 
 fn serialize_backup_snapshot(snapshot: &RepositoryBackupSnapshot) -> Result<Vec<u8>, RepoError> {
-    let mut serializer = AllocSerializer::<4096>::default();
-    serializer
-        .serialize_value(snapshot)
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(snapshot)
         .map_err(|_| RepoError::Serialization)?;
-    Ok(serializer.into_serializer().into_inner().to_vec())
+    Ok(bytes.to_vec())
 }

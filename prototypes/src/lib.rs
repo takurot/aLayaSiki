@@ -1,20 +1,17 @@
 pub mod bench_eval;
 
-use bytecheck::CheckBytes;
 use rkyv::{Archive, Deserialize, Serialize};
 
-#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, CheckBytes)]
-#[archive_attr(repr(C))]
-#[archive(check_bytes)]
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
+#[rkyv(attr(repr(C)))]
 pub struct Node {
     pub id: u64,
     pub embedding: Vec<f32>,
     pub metadata: String, // Simulating JSON for now
 }
 
-#[derive(Archive, Deserialize, Serialize, Debug, PartialEq, CheckBytes)]
-#[archive_attr(repr(C))]
-#[archive(check_bytes)]
+#[derive(Archive, Deserialize, Serialize, Debug, PartialEq)]
+#[rkyv(attr(repr(C)))]
 pub struct Edge {
     pub source: u64,
     pub target: u64,
@@ -35,16 +32,34 @@ mod tests {
         };
 
         // Serialize
-        let bytes = rkyv::to_bytes::<_, 256>(&node).expect("failed to serialize");
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&node).expect("failed to serialize");
 
         // Deserialize (Zero-copy access with validation)
-        // check_archived_root verifies the archive's integrity without full deserialization
-        let archived =
-            rkyv::check_archived_root::<Node>(&bytes[..]).expect("failed to verify archive");
+        // rkyv::access verifies the archive's integrity without full deserialization
+        let archived = rkyv::access::<ArchivedNode, rkyv::rancor::Error>(&bytes[..])
+            .expect("failed to verify archive");
 
         assert_eq!(archived.id, 1);
         assert_eq!(archived.embedding.len(), 3);
         // Note: rkyv strings are not standard rust strings, need conversion or direct comparison
         assert_eq!(archived.metadata, "{\"name\": \"Alice\"}");
+    }
+
+    #[test]
+    fn test_rkyv_rejects_truncated_archive() {
+        let node = Node {
+            id: 1,
+            embedding: vec![0.1, 0.2, 0.3],
+            metadata: "{\"name\": \"Alice\"}".to_string(),
+        };
+
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&node).expect("failed to serialize");
+        let truncated = &bytes[..bytes.len() / 2];
+
+        let result = rkyv::access::<ArchivedNode, rkyv::rancor::Error>(truncated);
+        assert!(
+            result.is_err(),
+            "truncated archive must be rejected by validation, not cause UB"
+        );
     }
 }
