@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -83,17 +83,23 @@ impl InMemoryAuditSink {
 
 impl AuditSink for InMemoryAuditSink {
     fn record(&self, mut event: AuditEvent) -> Result<(), AuditError> {
+        // Sequence assignment happens while holding the events lock so that
+        // the physical push order always matches assigned sequence order.
+        let mut events = self.events.lock().map_err(|_| AuditError::LockPoisoned)?;
         let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         event.sequence = next;
-        let mut events = self.events.lock().map_err(|_| AuditError::LockPoisoned)?;
         events.push(event);
         Ok(())
     }
 }
 
+struct JsonlSinkState {
+    file: std::fs::File,
+    sequence: u64,
+}
+
 pub struct JsonlAuditSink {
-    writer: Mutex<std::fs::File>,
-    sequence: AtomicU64,
+    state: Mutex<JsonlSinkState>,
 }
 
 impl JsonlAuditSink {
@@ -104,34 +110,53 @@ impl JsonlAuditSink {
             std::fs::create_dir_all(parent)?;
         }
 
-        let starting_sequence = std::fs::read_to_string(path)
-            .map(|content| {
-                content
-                    .lines()
-                    .filter(|line| !line.trim().is_empty())
-                    .count() as u64
-            })
+        // Open once in read+append mode: the same handle is used to derive
+        // the starting sequence and for subsequent writes, so no other
+        // process/thread can append between the read and the reopen (TOCTOU).
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)?;
+
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let content = String::from_utf8_lossy(&bytes);
+
+        // Recover the starting sequence from the max sequence observed among
+        // parseable lines, rather than counting lines. This tolerates
+        // corrupt/partial lines, non-UTF-8 content, and gaps left by prior
+        // write failures without under- or over-counting.
+        let starting_sequence = content
+            .lines()
+            .filter_map(|line| serde_json::from_str::<AuditEvent>(line).ok())
+            .map(|event| event.sequence)
+            .max()
             .unwrap_or(0);
 
-        let writer = OpenOptions::new().create(true).append(true).open(path)?;
-
         Ok(Self {
-            writer: Mutex::new(writer),
-            sequence: AtomicU64::new(starting_sequence),
+            state: Mutex::new(JsonlSinkState {
+                file,
+                sequence: starting_sequence,
+            }),
         })
     }
 }
 
 impl AuditSink for JsonlAuditSink {
     fn record(&self, mut event: AuditEvent) -> Result<(), AuditError> {
-        let next = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut state = self.state.lock().map_err(|_| AuditError::LockPoisoned)?;
+        let next = state.sequence + 1;
         event.sequence = next;
 
         let line = serde_json::to_string(&event)?;
-        let mut writer = self.writer.lock().map_err(|_| AuditError::LockPoisoned)?;
-        writer.write_all(line.as_bytes())?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
+        state.file.write_all(line.as_bytes())?;
+        state.file.write_all(b"\n")?;
+        state.file.flush()?;
+
+        // Only commit the sequence advance after a successful flush, so a
+        // failed write does not irreversibly consume a sequence number.
+        state.sequence = next;
         Ok(())
     }
 }
@@ -206,5 +231,107 @@ mod tests {
         let last_line = content.lines().last().unwrap();
         let event: AuditEvent = serde_json::from_str(last_line).unwrap();
         assert_eq!(event.sequence, 3);
+    }
+
+    #[test]
+    fn in_memory_sink_concurrent_records_are_physically_ordered_by_sequence() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let sink = Arc::new(InMemoryAuditSink::default());
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let sink = Arc::clone(&sink);
+            handles.push(thread::spawn(move || {
+                sink.record(AuditEvent::new(
+                    AuditOperation::Ingest,
+                    AuditOutcome::Succeeded,
+                ))
+                .unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let events = sink.events().unwrap();
+        assert_eq!(events.len(), 8);
+        let sequences: Vec<u64> = events.iter().map(|e| e.sequence).collect();
+        let mut sorted = sequences.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sequences, sorted,
+            "physical storage order must match sequence order"
+        );
+    }
+
+    #[test]
+    fn jsonl_sink_recovers_from_corrupt_and_non_utf8_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit-corrupt.log");
+
+        let mut event1 = AuditEvent::new(AuditOperation::Ingest, AuditOutcome::Succeeded);
+        event1.sequence = 1;
+        let mut event2 = AuditEvent::new(AuditOperation::Query, AuditOutcome::Succeeded);
+        event2.sequence = 2;
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(serde_json::to_string(&event1).unwrap().as_bytes());
+        bytes.push(b'\n');
+        // Corrupt/partial line.
+        bytes.extend_from_slice(b"{not valid json");
+        bytes.push(b'\n');
+        // Non-UTF-8 line.
+        bytes.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+        bytes.push(b'\n');
+        bytes.extend_from_slice(serde_json::to_string(&event2).unwrap().as_bytes());
+        bytes.push(b'\n');
+        std::fs::write(&path, &bytes).unwrap();
+
+        let sink = JsonlAuditSink::open(&path).unwrap();
+        sink.record(AuditEvent::new(
+            AuditOperation::Query,
+            AuditOutcome::Succeeded,
+        ))
+        .unwrap();
+
+        let raw = std::fs::read(&path).unwrap();
+        let content = String::from_utf8_lossy(&raw);
+        let last_line = content.lines().last().unwrap();
+        let event: AuditEvent = serde_json::from_str(last_line).unwrap();
+        assert_eq!(event.sequence, 3);
+    }
+
+    #[test]
+    fn jsonl_sink_concurrent_records_have_unique_sequential_sequences() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit-concurrent.log");
+        let sink = Arc::new(JsonlAuditSink::open(&path).unwrap());
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let sink = Arc::clone(&sink);
+            handles.push(thread::spawn(move || {
+                sink.record(AuditEvent::new(
+                    AuditOperation::Ingest,
+                    AuditOutcome::Succeeded,
+                ))
+                .unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut sequences: Vec<u64> = content
+            .lines()
+            .map(|line| serde_json::from_str::<AuditEvent>(line).unwrap().sequence)
+            .collect();
+        sequences.sort_unstable();
+        assert_eq!(sequences, (1..=8).collect::<Vec<u64>>());
     }
 }
