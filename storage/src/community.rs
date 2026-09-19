@@ -70,7 +70,7 @@ pub struct CommunityEngine {
     hierarchy: Vec<CommunityLevel>,
     summaries: Vec<CommunitySummary>,
     pagerank: HashMap<u64, f64>,
-    dirty_nodes: HashSet<u64>,
+    has_pending_changes: bool,
     max_levels: usize,
 }
 
@@ -81,7 +81,7 @@ impl CommunityEngine {
             hierarchy: Vec::new(),
             summaries: Vec::new(),
             pagerank: HashMap::new(),
-            dirty_nodes: HashSet::new(),
+            has_pending_changes: false,
             max_levels: 3,
         }
     }
@@ -158,7 +158,7 @@ impl CommunityEngine {
 
         let top_nodes = self.fastgraphrag_top_nodes();
         self.summaries = build_summaries(&self.hierarchy, &top_nodes, summarizer);
-        self.dirty_nodes.clear();
+        self.has_pending_changes = false;
     }
 
     pub fn add_edge_incremental(
@@ -169,17 +169,16 @@ impl CommunityEngine {
         weight: f32,
     ) {
         self.graph.add_edge(source, target, relation, weight);
-        self.dirty_nodes.insert(source);
-        self.dirty_nodes.insert(target);
+        self.has_pending_changes = true;
     }
 
     /// Refreshes the hierarchy after graph mutations recorded via
-    /// `add_edge_incremental`. This does not perform incremental re-clustering:
-    /// it triggers a full, deterministic `rebuild_hierarchy` gated on whether
-    /// any nodes were marked dirty since the last refresh, so cost stays
+    /// `add_edge_incremental`, but only if there are pending changes since the
+    /// last refresh. This does not perform incremental re-clustering: it
+    /// always triggers a full, deterministic `rebuild_hierarchy`, so cost is
     /// proportional to graph size rather than to the size of the edit.
-    pub fn refresh_incremental(&mut self, summarizer: &dyn CommunitySummarizer) {
-        if self.dirty_nodes.is_empty() {
+    pub fn refresh_if_dirty(&mut self, summarizer: &dyn CommunitySummarizer) {
+        if !self.has_pending_changes {
             return;
         }
 
@@ -329,6 +328,13 @@ fn detect_leiden_level(graph: &AdjacencyGraph) -> Vec<Community> {
         .map(|node_id| (*node_id, node_degree(*node_id, &undirected)))
         .collect();
 
+    // Maintained incrementally (+=/-=) as nodes move below, rather than
+    // recomputed from scratch, to avoid the O(n) rescan per candidate that
+    // made this function O(n^2) overall. Communities start as singletons, so
+    // each initial sum is a single term and this loop's `HashMap` iteration
+    // order does not affect the result; later incremental updates only ever
+    // add/subtract one node's degree at a time, so rounding drift stays
+    // negligible relative to the `1e-12` move threshold for realistic graphs.
     let mut community_total_degree: HashMap<usize, f64> = HashMap::new();
     for (node_id, comm_id) in &assignment {
         *community_total_degree.entry(*comm_id).or_insert(0.0) += degrees[node_id];
