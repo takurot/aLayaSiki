@@ -56,7 +56,7 @@ fn test_incremental_update_refreshes_summaries() {
     engine.rebuild_hierarchy(3, &DeterministicSummarizer);
 
     engine.add_edge_incremental(12, 13, "links", 1.0);
-    engine.refresh_incremental(&DeterministicSummarizer);
+    engine.refresh_if_dirty(&DeterministicSummarizer);
 
     assert!(!engine.summaries().is_empty());
     let contains_new_node = engine
@@ -65,4 +65,20 @@ fn test_incremental_update_refreshes_summaries() {
         .flat_map(|level| level.communities.iter())
         .any(|community| community.node_ids.contains(&13));
     assert!(contains_new_node);
+}
+
+#[test]
+fn test_refresh_if_dirty_is_noop_without_pending_changes() {
+    let graph = sample_graph_two_clusters();
+    let mut engine = CommunityEngine::new(graph);
+    engine.rebuild_hierarchy(3, &DeterministicSummarizer);
+
+    let hierarchy_before = engine.hierarchy().to_vec();
+    let summaries_before = engine.summaries().to_vec();
+
+    // No `add_edge_incremental` call was made, so this should be a no-op.
+    engine.refresh_if_dirty(&DeterministicSummarizer);
+
+    assert_eq!(engine.hierarchy(), hierarchy_before.as_slice());
+    assert_eq!(engine.summaries(), summaries_before.as_slice());
 }

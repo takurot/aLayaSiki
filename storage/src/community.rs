@@ -70,7 +70,7 @@ pub struct CommunityEngine {
     hierarchy: Vec<CommunityLevel>,
     summaries: Vec<CommunitySummary>,
     pagerank: HashMap<u64, f64>,
-    dirty_nodes: HashSet<u64>,
+    has_pending_changes: bool,
     max_levels: usize,
 }
 
@@ -81,7 +81,7 @@ impl CommunityEngine {
             hierarchy: Vec::new(),
             summaries: Vec::new(),
             pagerank: HashMap::new(),
-            dirty_nodes: HashSet::new(),
+            has_pending_changes: false,
             max_levels: 3,
         }
     }
@@ -105,16 +105,19 @@ impl CommunityEngine {
 
         let mut levels = vec![CommunityLevel {
             level: 0,
-            communities: level0.clone(),
+            communities: level0,
         }];
 
-        let mut current = level0;
         for level_idx in 1..self.max_levels {
+            let current = &levels
+                .last()
+                .expect("levels always has level 0")
+                .communities;
             if current.len() <= 1 {
                 break;
             }
 
-            let super_graph = build_super_graph(&self.graph, &current);
+            let super_graph = build_super_graph(&self.graph, current);
             let super_communities = detect_leiden_level(&super_graph);
 
             if super_communities.is_empty() || super_communities.len() >= current.len() {
@@ -146,9 +149,8 @@ impl CommunityEngine {
 
             levels.push(CommunityLevel {
                 level: level_idx,
-                communities: next_level.clone(),
+                communities: next_level,
             });
-            current = next_level;
         }
 
         self.hierarchy = levels;
@@ -156,7 +158,7 @@ impl CommunityEngine {
 
         let top_nodes = self.fastgraphrag_top_nodes();
         self.summaries = build_summaries(&self.hierarchy, &top_nodes, summarizer);
-        self.dirty_nodes.clear();
+        self.has_pending_changes = false;
     }
 
     pub fn add_edge_incremental(
@@ -167,16 +169,19 @@ impl CommunityEngine {
         weight: f32,
     ) {
         self.graph.add_edge(source, target, relation, weight);
-        self.dirty_nodes.insert(source);
-        self.dirty_nodes.insert(target);
+        self.has_pending_changes = true;
     }
 
-    pub fn refresh_incremental(&mut self, summarizer: &dyn CommunitySummarizer) {
-        if self.dirty_nodes.is_empty() {
+    /// Refreshes the hierarchy after graph mutations recorded via
+    /// `add_edge_incremental`, but only if there are pending changes since the
+    /// last refresh. This does not perform incremental re-clustering: it
+    /// always triggers a full, deterministic `rebuild_hierarchy`, so cost is
+    /// proportional to graph size rather than to the size of the edit.
+    pub fn refresh_if_dirty(&mut self, summarizer: &dyn CommunitySummarizer) {
+        if !self.has_pending_changes {
             return;
         }
 
-        // Incremental entry point: current version recomputes from updated graph deterministically.
         self.rebuild_hierarchy(self.max_levels, summarizer);
     }
 
@@ -318,16 +323,35 @@ fn detect_leiden_level(graph: &AdjacencyGraph) -> Vec<Community> {
         assignment.insert(*node_id, community_id);
     }
 
+    let degrees: HashMap<u64, f64> = nodes
+        .iter()
+        .map(|node_id| (*node_id, node_degree(*node_id, &undirected)))
+        .collect();
+
+    // Maintained incrementally (+=/-=) as nodes move below, rather than
+    // recomputed from scratch, to avoid the O(n) rescan per candidate that
+    // made this function O(n^2) overall. Communities start as singletons, so
+    // each initial sum is a single term and this loop's `HashMap` iteration
+    // order does not affect the result; later incremental updates only ever
+    // add/subtract one node's degree at a time, so rounding drift stays
+    // negligible relative to the `1e-12` move threshold for realistic graphs.
+    let mut community_total_degree: HashMap<usize, f64> = HashMap::new();
+    for (node_id, comm_id) in &assignment {
+        *community_total_degree.entry(*comm_id).or_insert(0.0) += degrees[node_id];
+    }
+
     for _ in 0..20 {
         let mut moved = false;
 
         for node_id in &nodes {
             let current_comm = assignment[node_id];
+            let k_i = degrees[node_id];
 
+            let neighbors = undirected.get(node_id);
             let mut candidate_communities = HashSet::new();
             candidate_communities.insert(current_comm);
-            if let Some(neighbors) = undirected.get(node_id) {
-                for neighbor_id in neighbors.keys() {
+            if let Some(nbrs) = neighbors {
+                for neighbor_id in nbrs.keys() {
                     if let Some(comm) = assignment.get(neighbor_id) {
                         candidate_communities.insert(*comm);
                     }
@@ -336,10 +360,12 @@ fn detect_leiden_level(graph: &AdjacencyGraph) -> Vec<Community> {
 
             let mut best_comm = current_comm;
             let mut best_score = community_affinity(
-                *node_id,
+                neighbors,
+                k_i,
                 current_comm,
-                &undirected,
+                current_comm,
                 &assignment,
+                &community_total_degree,
                 total_weight,
             );
 
@@ -347,8 +373,15 @@ fn detect_leiden_level(graph: &AdjacencyGraph) -> Vec<Community> {
             ordered_candidates.sort_unstable();
 
             for candidate in ordered_candidates {
-                let score =
-                    community_affinity(*node_id, candidate, &undirected, &assignment, total_weight);
+                let score = community_affinity(
+                    neighbors,
+                    k_i,
+                    candidate,
+                    current_comm,
+                    &assignment,
+                    &community_total_degree,
+                    total_weight,
+                );
                 if score > best_score + 1e-12 {
                     best_score = score;
                     best_comm = candidate;
@@ -357,6 +390,8 @@ fn detect_leiden_level(graph: &AdjacencyGraph) -> Vec<Community> {
 
             if best_comm != current_comm {
                 assignment.insert(*node_id, best_comm);
+                *community_total_degree.entry(current_comm).or_insert(0.0) -= k_i;
+                *community_total_degree.entry(best_comm).or_insert(0.0) += k_i;
                 moved = true;
             }
         }
@@ -425,17 +460,18 @@ fn node_degree(node_id: u64, adj: &HashMap<u64, HashMap<u64, f64>>) -> f64 {
 }
 
 fn community_affinity(
-    node_id: u64,
+    neighbors: Option<&HashMap<u64, f64>>,
+    k_i: f64,
     candidate_comm: usize,
-    adj: &HashMap<u64, HashMap<u64, f64>>,
+    current_comm: usize,
     assignment: &HashMap<u64, usize>,
+    community_total_degree: &HashMap<usize, f64>,
     total_weight: f64,
 ) -> f64 {
-    let Some(neighbors) = adj.get(&node_id) else {
+    let Some(neighbors) = neighbors else {
         return 0.0;
     };
 
-    let k_i: f64 = neighbors.values().sum();
     if k_i <= f64::EPSILON {
         return 0.0;
     }
@@ -447,11 +483,14 @@ fn community_affinity(
         }
     }
 
-    let mut sum_tot = 0.0;
-    for (other_node, comm_id) in assignment {
-        if *comm_id == candidate_comm {
-            sum_tot += node_degree(*other_node, adj);
-        }
+    let mut sum_tot = community_total_degree
+        .get(&candidate_comm)
+        .copied()
+        .unwrap_or(0.0);
+    // The node is conceptually removed from its own community before scoring,
+    // so its own degree must not inflate the penalty term when candidate == current.
+    if candidate_comm == current_comm {
+        sum_tot -= k_i;
     }
 
     // Leiden-like local move objective (modularity-oriented score).
@@ -629,5 +668,25 @@ mod tests {
         let graph = graph_for_test();
         let scores = compute_pagerank(&graph, 10, 0.85);
         assert!(!scores.is_empty());
+    }
+
+    #[test]
+    fn test_clique_stays_in_one_community() {
+        // For a fully-connected clique, splitting nodes into separate
+        // communities can never improve modularity, so Leiden should keep
+        // all nodes together. A self-degree-inflated penalty term biases
+        // the algorithm against staying in place and incorrectly fragments
+        // cliques like this one into singletons.
+        let mut graph = AdjacencyGraph::new();
+        let node_ids = [1u64, 2, 3, 4, 5];
+        for i in 0..node_ids.len() {
+            for j in (i + 1)..node_ids.len() {
+                graph.add_edge(node_ids[i], node_ids[j], "links", 1.0);
+            }
+        }
+
+        let communities = detect_leiden_level(&graph);
+        assert_eq!(communities.len(), 1);
+        assert_eq!(communities[0].node_ids.len(), node_ids.len());
     }
 }

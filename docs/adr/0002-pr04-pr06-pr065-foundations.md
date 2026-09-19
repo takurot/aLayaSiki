@@ -43,7 +43,7 @@ To complete remaining PR-04 and implement PR-06/PR-06.5 tasks, we needed clear b
   - hierarchical community rebuild
   - deterministic summarizer interface (`CommunitySummarizer`)
   - FastGraphRAG top-10% node selection via PageRank
-  - incremental refresh entrypoint (`add_edge_incremental` + `refresh_incremental`)
+  - incremental refresh entrypoint (`add_edge_incremental` + `refresh_if_dirty`)
 
 ## Consequences
 - Index mutation behavior is now explicitly atomic at repository API level.
