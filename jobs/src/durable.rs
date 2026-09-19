@@ -17,7 +17,27 @@ use storage::wal::{Wal, WalFlushPolicy, WalOptions, WalRecoveryMode};
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex};
 
-const JOB_WAL_SCHEMA_VERSION: u32 = 1;
+/// Current schema version written for every new WAL record.
+///
+/// Bumped to 2 when `JobWalOp::DeadLetter` gained a persisted
+/// `dead_lettered_at_ms` field (issue #106); v1 records lack that field.
+const JOB_WAL_SCHEMA_VERSION: u32 = 2;
+
+/// Oldest schema version `open_with_config` can still replay. Records older
+/// than this (or newer than [`JOB_WAL_SCHEMA_VERSION`]) abort recovery.
+const MIN_SUPPORTED_JOB_WAL_SCHEMA_VERSION: u32 = 1;
+
+/// Sentinel used by `#[serde(default)]` when decoding a v1 `DeadLetter` record,
+/// which has no `dead_lettered_at_ms` field on disk. Never produced by current
+/// writes: live dead-lettering always persists the real `now_unix_ms()` at the
+/// time of the event. Replay detects this sentinel and falls back to the
+/// envelope's `enqueued_at_ms` (a documented lower-bound approximation) rather
+/// than silently substituting the restart time as the original event time.
+const LEGACY_DEAD_LETTER_TIMESTAMP_UNKNOWN: i64 = i64::MIN;
+
+fn legacy_dead_letter_timestamp_unknown() -> i64 {
+    LEGACY_DEAD_LETTER_TIMESTAMP_UNKNOWN
+}
 
 #[derive(Debug, Error)]
 pub enum JobQueueError {
@@ -56,6 +76,11 @@ pub struct JobQueueStats {
     pub enqueued: u64,
     pub completed: u64,
     pub retried: u64,
+    /// Cumulative count of jobs that have ever been dead-lettered (one per
+    /// unique job id, reconstructed from the full WAL op stream on replay).
+    /// This is independent of `max_dead_letters` retention: unlike
+    /// [`DurableJobQueue::dead_letters`], which is a bounded, FIFO-evicted
+    /// inspection view, this counter never shrinks due to eviction or restart.
     pub dead_lettered: u64,
     pub pending_depth: usize,
 }
@@ -112,6 +137,10 @@ enum JobWalOp {
         id: u64,
         reason: String,
         envelope: JobEnvelope,
+        /// Original wall-clock time the job was dead-lettered. Missing on v1
+        /// records; see [`LEGACY_DEAD_LETTER_TIMESTAMP_UNKNOWN`].
+        #[serde(default = "legacy_dead_letter_timestamp_unknown")]
+        dead_lettered_at_ms: i64,
     },
 }
 
@@ -177,9 +206,13 @@ impl DurableJobQueue {
         let mut total_enqueue_ops: u64 = 0;
         let mut unique_enqueued: HashSet<u64> = HashSet::new();
         let mut completed: HashSet<u64> = HashSet::new();
+        // Cumulative dead-letter membership, independent of `max_dead_letters`
+        // eviction of the in-memory inspection deque (see `JobQueueStats::dead_lettered`).
+        let mut dead_lettered_ids: HashSet<u64> = HashSet::new();
 
         for record in &records {
-            if record.v != JOB_WAL_SCHEMA_VERSION {
+            if record.v < MIN_SUPPORTED_JOB_WAL_SCHEMA_VERSION || record.v > JOB_WAL_SCHEMA_VERSION
+            {
                 return Err(JobQueueError::SchemaVersion {
                     expected: JOB_WAL_SCHEMA_VERSION,
                     found: record.v,
@@ -201,8 +234,19 @@ impl DurableJobQueue {
                     id,
                     reason,
                     envelope,
+                    dead_lettered_at_ms,
                 } => {
                     state.pending.remove(id);
+                    dead_lettered_ids.insert(*id);
+                    // v1 records predate persisted dead-letter timestamps; fall back to
+                    // the envelope's enqueue time (a documented lower-bound approximation)
+                    // rather than claiming this replay's restart time as the original event.
+                    let dead_lettered_at_ms =
+                        if *dead_lettered_at_ms == LEGACY_DEAD_LETTER_TIMESTAMP_UNKNOWN {
+                            envelope.enqueued_at_ms
+                        } else {
+                            *dead_lettered_at_ms
+                        };
                     push_dead_letter(
                         &mut state,
                         DeadLetterEntry {
@@ -210,7 +254,7 @@ impl DurableJobQueue {
                             reason: reason.clone(),
                             attempts: envelope.attempt,
                             envelope: envelope.clone(),
-                            dead_lettered_at_ms: now_unix_ms(),
+                            dead_lettered_at_ms,
                         },
                         config.max_dead_letters,
                     );
@@ -224,7 +268,9 @@ impl DurableJobQueue {
         state.stats.enqueued = unique_enqueued.len() as u64;
         state.stats.retried = total_enqueue_ops.saturating_sub(unique_enqueued.len() as u64);
         state.stats.completed = completed.len() as u64;
-        state.stats.dead_lettered = state.dead_letters.len() as u64;
+        // Cumulative, not the retained-deque length: `max_dead_letters` eviction
+        // must not shrink this counter after restart.
+        state.stats.dead_lettered = dead_lettered_ids.len() as u64;
         state.stats.pending_depth = state.pending.len();
 
         let next_id = max_id + 1;
@@ -307,12 +353,14 @@ impl DurableJobQueue {
             envelope.attempt = new_attempt;
 
             if new_attempt >= self.config.max_attempts {
+                let dead_lettered_at_ms = now_unix_ms();
                 let record = JobWalRecord {
                     v: JOB_WAL_SCHEMA_VERSION,
                     op: JobWalOp::DeadLetter {
                         id,
                         reason: reason.clone(),
                         envelope: envelope.clone(),
+                        dead_lettered_at_ms,
                     },
                 };
                 self.append_locked(&record).await?;
@@ -324,7 +372,7 @@ impl DurableJobQueue {
                         reason,
                         attempts: new_attempt,
                         envelope,
-                        dead_lettered_at_ms: now_unix_ms(),
+                        dead_lettered_at_ms,
                     },
                     self.config.max_dead_letters,
                 );
@@ -353,7 +401,10 @@ impl DurableJobQueue {
         self.state.lock().await.stats.clone()
     }
 
-    /// Snapshot of the in-memory dead-letter table (oldest first).
+    /// Snapshot of the in-memory dead-letter table (oldest first). Bounded by
+    /// `max_dead_letters` (FIFO eviction); for the cumulative, non-evicting
+    /// count of every job ever dead-lettered, use [`Self::stats`]'s
+    /// `dead_lettered` field instead.
     pub async fn dead_letters(&self) -> Vec<DeadLetterEntry> {
         self.state
             .lock()
