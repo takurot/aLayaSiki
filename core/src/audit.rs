@@ -415,6 +415,9 @@ mod tests {
 
         assert!(health.is_degraded());
         assert_eq!(health.failure_count(), 2);
-        assert_eq!(health.last_error().as_deref(), Some("audit sink lock poisoned"));
+        assert_eq!(
+            health.last_error().as_deref(),
+            Some("audit sink lock poisoned")
+        );
     }
 }
