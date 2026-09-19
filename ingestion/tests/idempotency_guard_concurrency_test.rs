@@ -4,15 +4,20 @@ use ingestion::embedding::DeterministicEmbedder;
 use ingestion::policy::{BasicPolicy, NoOpPolicy};
 use ingestion::processor::{IngestionError, IngestionPipeline};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use storage::repo::Repository;
 use tempfile::tempdir;
-use tokio::sync::Notify;
+use tokio::sync::{Barrier, Notify};
 
 /// A `Chunker` that signals `started` as soon as it is invoked, then blocks
 /// until `release` is notified. Used to pin an in-flight `ingest()` call
-/// inside the idempotency-guarded critical section so a second, concurrent
-/// call can be deterministically observed racing against the guard.
+/// inside the idempotency-guarded critical section so a second call issued
+/// once the first has already acquired the guard deterministically observes
+/// the guard's *contract* (reject while held, release afterwards). This does
+/// not exercise the raw pre-fix `contains_key`/`insert` interleaving itself
+/// (see `concurrent_ingest_same_key_never_admits_more_than_one_at_once`
+/// below for a best-effort reproduction of that race).
 struct BlockingChunker {
     started: Arc<Notify>,
     release: Arc<Notify>,
@@ -234,4 +239,91 @@ async fn guard_is_released_after_failed_ingest() {
     // IdempotencyConflict instead of the same policy error.
     let second = pipeline.ingest(request).await;
     assert!(matches!(second, Err(IngestionError::Policy(_))));
+}
+
+/// A `Chunker` that tracks how many calls are inside its body concurrently,
+/// recording the highest concurrency ever observed. Because `chunk()` only
+/// runs once a caller has acquired the in-flight idempotency guard, a
+/// `max_observed` greater than 1 for a shared lock key proves that more than
+/// one caller was admitted into the guarded critical section at the same
+/// time, i.e. that the guard failed to enforce mutual exclusion.
+struct CountingChunker {
+    current: Arc<AtomicUsize>,
+    max_observed: Arc<AtomicUsize>,
+}
+
+impl Chunker for CountingChunker {
+    fn chunk<'a>(
+        &'a self,
+        content: &'a str,
+        base_metadata: HashMap<String, String>,
+    ) -> BoxFuture<'a, Vec<Chunk>> {
+        Box::pin(async move {
+            let now = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_observed.fetch_max(now, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            self.current.fetch_sub(1, Ordering::SeqCst);
+            vec![Chunk {
+                content: content.to_string(),
+                metadata: base_metadata,
+                embedding: None,
+            }]
+        })
+    }
+}
+
+/// Best-effort reproduction of the pre-fix race itself: the buggy
+/// `contains_key` -> `insert` sequence has no `.await` between the two
+/// `DashMap` calls, so the only way two callers can both observe the key as
+/// absent is genuine OS-thread-level parallelism landing inside that few-
+/// instruction window. That window cannot be widened from a test without
+/// instrumenting production code, so this test cannot *guarantee* a failure
+/// against the old implementation - but by running many callers, barrier-
+/// synchronized to start together, on a real multi-worker-thread runtime,
+/// over many iterations, it gives a realistic chance of catching the
+/// interleaving. This is the regression test for acceptance criterion 5;
+/// the tests above pin the guard's observable contract instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_ingest_same_key_never_admits_more_than_one_at_once() {
+    const TASKS: usize = 16;
+    const ITERATIONS: usize = 50;
+
+    for iter in 0..ITERATIONS {
+        let dir = tempdir().unwrap();
+        let current = Arc::new(AtomicUsize::new(0));
+        let max_observed = Arc::new(AtomicUsize::new(0));
+        let (_repo, pipeline) = new_pipeline(
+            &dir,
+            "race.wal",
+            Box::new(CountingChunker {
+                current: current.clone(),
+                max_observed: max_observed.clone(),
+            }),
+        )
+        .await;
+
+        let barrier = Arc::new(Barrier::new(TASKS));
+        let key = format!("race-key-{iter}");
+        let mut handles = Vec::with_capacity(TASKS);
+        for _ in 0..TASKS {
+            let pipeline = pipeline.clone();
+            let barrier = barrier.clone();
+            let request = text_request("racy content", Some(key.as_str()));
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                pipeline.ingest(request).await
+            }));
+        }
+
+        for handle in handles {
+            let _ = handle.await.unwrap();
+        }
+
+        assert_eq!(
+            max_observed.load(Ordering::SeqCst),
+            1,
+            "iteration {iter}: more than one caller was admitted into the guarded \
+             critical section concurrently for lock key {key:?}"
+        );
+    }
 }

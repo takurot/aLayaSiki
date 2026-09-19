@@ -12,6 +12,7 @@ use alayasiki_core::auth::{
 use alayasiki_core::governance::{GovernanceError, GovernancePolicyStore};
 use alayasiki_core::ingest::{ContentHash, IngestionRequest};
 use alayasiki_core::model::Node;
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -280,10 +281,10 @@ impl IngestionPipeline {
         // duration of the match, so two concurrent callers cannot both observe
         // `Vacant` for the same key.
         match self.locks.entry(lock_key.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(_) => {
+            Entry::Occupied(_) => {
                 return Err(IngestionError::IdempotencyConflict(lock_key));
             }
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
+            Entry::Vacant(entry) => {
                 entry.insert(());
             }
         }
@@ -394,9 +395,6 @@ impl IngestionPipeline {
                 }
             }
         }
-
-        // Guard will automatically remove lock on drop
-        // self.locks.remove(&lock_key);
 
         Ok(node_ids)
     }
