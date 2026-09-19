@@ -295,7 +295,8 @@ mod tests {
         ))
         .unwrap();
 
-        let content = std::fs::read_to_string(&path).unwrap();
+        let raw = std::fs::read(&path).unwrap();
+        let content = String::from_utf8_lossy(&raw);
         let last_line = content.lines().last().unwrap();
         let event: AuditEvent = serde_json::from_str(last_line).unwrap();
         assert_eq!(event.sequence, 3);
