@@ -12,6 +12,7 @@ use alayasiki_core::auth::{
 use alayasiki_core::governance::{GovernanceError, GovernancePolicyStore};
 use alayasiki_core::ingest::{ContentHash, IngestionRequest};
 use alayasiki_core::model::Node;
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -94,10 +95,6 @@ impl IngestionPipeline {
             chunker,
             embedder: Box::new(DeterministicEmbedder::default()),
             policy: Box::new(NoOpPolicy),
-            // This line is intentionally left as is, as the diff did not include changes for `with_chunker`
-            // and it's not using the `dedup` field anymore.
-            // The `locks` field will be initialized by `new` or `with_components` if they were used.
-            // For `with_chunker`, we'll add the default locks initialization.
             default_model_id: "embedding-default-v1".to_string(),
             default_extraction_model_id: "triplex-lite@1.0.0".to_string(),
             locks: Arc::new(DashMap::new()),
@@ -280,11 +277,16 @@ impl IngestionPipeline {
             .clone()
             .unwrap_or_else(|| content_hash.clone());
 
-        {
-            if self.locks.contains_key(&lock_key) {
+        // Atomically acquire the in-flight guard: `entry()` locks the shard for the
+        // duration of the match, so two concurrent callers cannot both observe
+        // `Vacant` for the same key.
+        match self.locks.entry(lock_key.clone()) {
+            Entry::Occupied(_) => {
                 return Err(IngestionError::IdempotencyConflict(lock_key));
             }
-            self.locks.insert(lock_key.clone(), ());
+            Entry::Vacant(entry) => {
+                entry.insert(());
+            }
         }
         // Created guard to remove lock on drop (RAII)
         let _guard = IdempotencyGuard {
@@ -393,9 +395,6 @@ impl IngestionPipeline {
                 }
             }
         }
-
-        // Guard will automatically remove lock on drop
-        // self.locks.remove(&lock_key);
 
         Ok(node_ids)
     }
