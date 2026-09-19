@@ -77,11 +77,13 @@ impl Repository {
             .collect();
         self.validate_index_transaction(&node_mutations).await?;
 
-        let mut idempotency_index = self.idempotency_index.write().await;
-        let new_idempotency_records: Vec<(String, Vec<u64>)> = idempotency_records
-            .into_iter()
-            .filter(|(key, _)| !idempotency_index.contains_key(key))
-            .collect();
+        let new_idempotency_records: Vec<(String, Vec<u64>)> = {
+            let idempotency_index = self.idempotency_index.read().await;
+            idempotency_records
+                .into_iter()
+                .filter(|(key, _)| !idempotency_index.contains_key(key))
+                .collect()
+        };
 
         let mut tx_operations = mutations_to_tx_operations(&node_mutations);
         tx_operations.extend(new_idempotency_records.iter().map(|(key, node_ids)| {
@@ -107,6 +109,7 @@ impl Repository {
 
         let mut nodes = self.nodes.write().await;
         let mut index = self.hyper_index.write().await;
+        let mut idempotency_index = self.idempotency_index.write().await;
         let mut edge_meta = self.edge_metadata.write().await;
 
         for operation in &tx_operations {
@@ -123,28 +126,35 @@ impl Repository {
     }
 
     pub async fn record_idempotency(&self, key: &str, node_ids: Vec<u64>) -> Result<(), RepoError> {
+        let _tx_guard = self.tx_lock.lock().await;
+
+        // Safe as a plain read-lock check only because this function holds
+        // `tx_lock` for its entire body: no other mutator of
+        // `idempotency_index` (`persist_ingest_batch`, `record_idempotency`,
+        // `restore_from_latest_backup`) can interleave between this check and
+        // the write-lock insert below. Do not drop `_tx_guard` early.
         {
-            let mut index = self.idempotency_index.write().await;
+            let index = self.idempotency_index.read().await;
             if index.contains_key(key) {
                 return Ok(());
             }
-
-            let entry = WalEntry::IdempotencyKey {
-                key: key.to_string(),
-                node_ids: node_ids.clone(),
-            };
-            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
-                .map_err(|_| RepoError::Serialization)?;
-
-            let durable_lsn = {
-                let mut wal = self.wal.lock().await;
-                wal.append(&bytes[..]).await?;
-                wal.durable_lsn()
-            };
-            self.record_durable_snapshot(durable_lsn).await?;
-
-            index.insert(key.to_string(), node_ids);
         }
+
+        let entry = WalEntry::IdempotencyKey {
+            key: key.to_string(),
+            node_ids: node_ids.clone(),
+        };
+        let bytes = serialize_wal_entry(&entry)?;
+
+        let durable_lsn = {
+            let mut wal = self.wal.lock().await;
+            wal.append(&bytes).await?;
+            wal.durable_lsn()
+        };
+        self.record_durable_snapshot(durable_lsn).await?;
+
+        let mut index = self.idempotency_index.write().await;
+        index.insert(key.to_string(), node_ids);
 
         Ok(())
     }
@@ -154,21 +164,36 @@ impl Repository {
         mutations: &[IndexMutation],
     ) -> Result<(), RepoError> {
         let nodes = self.nodes.read().await;
-        let mut visible_nodes: HashSet<u64> = nodes.keys().copied().collect();
+        // Track only the nodes this transaction adds or removes, rather than
+        // copying every existing node id: existence of ids untouched by the
+        // transaction is checked directly against `nodes`.
+        let mut added_in_tx: HashSet<u64> = HashSet::new();
+        let mut removed_in_tx: HashSet<u64> = HashSet::new();
+
+        let exists = |id: u64, added_in_tx: &HashSet<u64>, removed_in_tx: &HashSet<u64>| -> bool {
+            if added_in_tx.contains(&id) {
+                true
+            } else if removed_in_tx.contains(&id) {
+                false
+            } else {
+                nodes.contains_key(&id)
+            }
+        };
 
         for mutation in mutations {
             match mutation {
                 IndexMutation::PutNode(node) => {
-                    visible_nodes.insert(node.id);
+                    added_in_tx.insert(node.id);
+                    removed_in_tx.remove(&node.id);
                 }
                 IndexMutation::PutEdge(edge) => {
-                    if !visible_nodes.contains(&edge.source) {
+                    if !exists(edge.source, &added_in_tx, &removed_in_tx) {
                         return Err(RepoError::InvalidTransaction(format!(
                             "edge source {} does not exist",
                             edge.source
                         )));
                     }
-                    if !visible_nodes.contains(&edge.target) {
+                    if !exists(edge.target, &added_in_tx, &removed_in_tx) {
                         return Err(RepoError::InvalidTransaction(format!(
                             "edge target {} does not exist",
                             edge.target
@@ -176,9 +201,11 @@ impl Repository {
                     }
                 }
                 IndexMutation::DeleteNode(id) => {
-                    if !visible_nodes.remove(id) {
+                    if !exists(*id, &added_in_tx, &removed_in_tx) {
                         return Err(RepoError::NotFound);
                     }
+                    removed_in_tx.insert(*id);
+                    added_in_tx.remove(id);
                 }
             }
         }

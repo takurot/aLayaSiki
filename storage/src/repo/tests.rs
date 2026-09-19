@@ -319,6 +319,90 @@ async fn test_persist_ingest_batch_keeps_first_content_hash_mapping() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_record_idempotency_serializes_against_concurrent_persist_ingest_batch() {
+    // Regression test for issue #94: `record_idempotency` must take `tx_lock`
+    // so its check-then-act sequence is serialized against *other*
+    // transaction types (not just itself). Before the fix, `record_idempotency`
+    // and `persist_ingest_batch` could both observe an idempotency key as
+    // absent and each append a WAL entry for it, producing two durable
+    // records for what should be a single idempotency key. This test fails
+    // (record_count > 1 for some key) without `let _tx_guard =
+    // self.tx_lock.lock().await;` on `record_idempotency`.
+    use tokio::sync::Barrier;
+
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("concurrent_idempotency_cross_path.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let iterations = 32;
+    for i in 0..iterations {
+        let key = format!("shared-key-{i}");
+        let barrier = Arc::new(Barrier::new(2));
+
+        let repo_a = Arc::clone(&repo);
+        let key_a = key.clone();
+        let barrier_a = barrier.clone();
+        let record_task = tokio::spawn(async move {
+            barrier_a.wait().await;
+            repo_a.record_idempotency(&key_a, vec![1]).await.unwrap();
+        });
+
+        let repo_b = Arc::clone(&repo);
+        let key_b = key.clone();
+        let barrier_b = barrier.clone();
+        let batch_task = tokio::spawn(async move {
+            barrier_b.wait().await;
+            repo_b
+                .persist_ingest_batch(Vec::new(), vec![(key_b, vec![2])])
+                .await
+                .unwrap();
+        });
+
+        record_task.await.unwrap();
+        batch_task.await.unwrap();
+    }
+
+    drop(repo);
+
+    let mut wal = Wal::open(&wal_path).await.unwrap();
+    let mut record_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    wal.replay(|_lsn, payload| {
+        let entry: WalEntry = rkyv::from_bytes::<WalEntry, rkyv::rancor::Error>(&payload[..])
+            .map_err(|_| WalError::CorruptEntry)?;
+
+        match entry {
+            WalEntry::IdempotencyKey { key, .. } => {
+                *record_counts.entry(key).or_insert(0) += 1;
+            }
+            WalEntry::Transaction(operations) => {
+                for operation in operations {
+                    if let TxOperation::RecordIdempotency { key, .. } = operation {
+                        *record_counts.entry(key).or_insert(0) += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    for i in 0..iterations {
+        let key = format!("shared-key-{i}");
+        assert_eq!(
+            record_counts.get(&key).copied().unwrap_or(0),
+            1,
+            "key {key} must have exactly one durable idempotency record, got {:?}",
+            record_counts.get(&key)
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_index_transaction_flush_and_reopen_preserves_seeded_graph() {
     let dir = tempdir().unwrap();
