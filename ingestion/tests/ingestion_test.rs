@@ -58,6 +58,8 @@ async fn test_ingestion_flow() {
         metadata: metadata.clone(),
         idempotency_key: None,
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     // 3. Ingest
@@ -89,6 +91,8 @@ async fn test_ingestion_idempotency_key() {
         metadata,
         idempotency_key: Some("fixed-key".to_string()),
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     let first_ids = pipeline.ingest(request.clone()).await.unwrap();
@@ -118,6 +122,8 @@ async fn test_ingestion_batches_chunks_and_idempotency_into_single_wal_record() 
         metadata: HashMap::new(),
         idempotency_key: Some("batched-key".to_string()),
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     let node_ids = pipeline.ingest(request.clone()).await.unwrap();
@@ -176,6 +182,8 @@ async fn test_ingestion_policy_forbidden_word() {
         metadata: HashMap::new(),
         idempotency_key: None,
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     let result = pipeline.ingest(request).await;
@@ -199,6 +207,8 @@ async fn test_ingestion_pdf_extract() {
         metadata: HashMap::from([("source".to_string(), "tests/assets/dummy.pdf".to_string())]),
         idempotency_key: None,
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     let node_ids = pipeline.ingest(request).await.unwrap();
@@ -241,6 +251,8 @@ async fn test_ingestion_with_job_queue() {
         metadata: HashMap::new(),
         idempotency_key: None,
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     let node_ids = pipeline.ingest(request).await.unwrap();
@@ -283,6 +295,132 @@ impl jobs::queue::JobQueue for CapturingQueue {
 }
 
 #[tokio::test]
+async fn test_ingestion_routes_embedding_and_extraction_models_independently() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("routing.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let queue = Arc::new(CapturingQueue {
+        jobs: captured.clone(),
+    });
+
+    let mut pipeline = IngestionPipeline::new(repo.clone());
+    pipeline.set_job_queue(queue);
+
+    let content = "Independent embedding and extraction model routing.";
+    let request = IngestionRequest::Text {
+        content: content.to_string(),
+        metadata: HashMap::new(),
+        idempotency_key: None,
+        model_id: None,
+        embedding_model_id: Some("embed-A".to_string()),
+        extraction_model_id: Some("extract-B".to_string()),
+    };
+
+    let node_ids = pipeline.ingest(request).await.unwrap();
+    let node = repo.get_node(node_ids[0]).await.unwrap();
+
+    // The embedder must receive only the embedding-role model id.
+    let expected_embedding =
+        alayasiki_core::embedding::deterministic_embedding(content, "embed-A", 768);
+    assert_eq!(node.embedding, expected_embedding);
+    assert_eq!(
+        node.metadata.get("embedding_model_id").map(String::as_str),
+        Some("embed-A")
+    );
+
+    // The extraction job must receive only the extraction-role model id.
+    let jobs = captured.lock().await;
+    assert!(!jobs.is_empty());
+    match &jobs[0] {
+        jobs::queue::Job::ExtractEntities { model_id, .. } => {
+            assert_eq!(model_id, "extract-B");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_ingestion_defaulting_one_model_role_does_not_overwrite_the_other() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("routing_defaults.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let queue = Arc::new(CapturingQueue {
+        jobs: captured.clone(),
+    });
+
+    let mut pipeline = IngestionPipeline::new(repo.clone());
+    pipeline.set_job_queue(queue);
+
+    // Only extraction_model_id is set explicitly; embedding_model_id must fall
+    // back to the pipeline default rather than being overwritten.
+    let request = IngestionRequest::Text {
+        content: "Only extraction is pinned explicitly.".to_string(),
+        metadata: HashMap::new(),
+        idempotency_key: None,
+        model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: Some("extract-B".to_string()),
+    };
+
+    let node_ids = pipeline.ingest(request).await.unwrap();
+    let node = repo.get_node(node_ids[0]).await.unwrap();
+    assert_eq!(
+        node.metadata.get("embedding_model_id").map(String::as_str),
+        Some("embedding-default-v1")
+    );
+
+    let jobs = captured.lock().await;
+    match &jobs[0] {
+        jobs::queue::Job::ExtractEntities { model_id, .. } => {
+            assert_eq!(model_id, "extract-B");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_ingestion_legacy_model_id_aliases_embedding_role_only() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("routing_legacy.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let queue = Arc::new(CapturingQueue {
+        jobs: captured.clone(),
+    });
+
+    let mut pipeline = IngestionPipeline::new(repo.clone());
+    pipeline.set_job_queue(queue);
+
+    // The deprecated `model_id` field is a backward-compatibility alias for
+    // `embedding_model_id` only; it must never be forwarded to extraction.
+    let request = IngestionRequest::Text {
+        content: "Legacy model_id field should not leak into extraction.".to_string(),
+        metadata: HashMap::new(),
+        idempotency_key: None,
+        model_id: Some("legacy-embedding-model".to_string()),
+        embedding_model_id: None,
+        extraction_model_id: None,
+    };
+
+    let node_ids = pipeline.ingest(request).await.unwrap();
+    let node = repo.get_node(node_ids[0]).await.unwrap();
+    assert_eq!(
+        node.metadata.get("embedding_model_id").map(String::as_str),
+        Some("legacy-embedding-model")
+    );
+
+    let jobs = captured.lock().await;
+    match &jobs[0] {
+        jobs::queue::Job::ExtractEntities { model_id, .. } => {
+            assert_eq!(model_id, "triplex-lite@1.0.0");
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_ingestion_enqueues_fixed_model_and_snapshot_for_reproducibility() {
     let dir = tempdir().unwrap();
     let wal_path = dir.path().join("repro.wal");
@@ -300,7 +438,9 @@ async fn test_ingestion_enqueues_fixed_model_and_snapshot_for_reproducibility() 
         content: "Graph database query".to_string(),
         metadata: HashMap::new(),
         idempotency_key: None,
-        model_id: Some("triplex-lite@1.0.0".to_string()),
+        model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: Some("triplex-lite@1.0.0".to_string()),
     };
 
     pipeline.ingest(request).await.unwrap();
@@ -347,7 +487,9 @@ async fn test_ingestion_flushes_buffered_wal_before_enqueuing_snapshot() {
         content: "Graph database query".to_string(),
         metadata: HashMap::new(),
         idempotency_key: None,
-        model_id: Some("triplex-lite@1.0.0".to_string()),
+        model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: Some("triplex-lite@1.0.0".to_string()),
     };
 
     pipeline.ingest(request).await.unwrap();
@@ -402,7 +544,9 @@ async fn test_ingestion_is_failsafe_when_extraction_model_fails() {
         content: "This ingestion should succeed even if extraction fails.".to_string(),
         metadata: HashMap::new(),
         idempotency_key: None,
-        model_id: Some("broken-model".to_string()),
+        model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: Some("broken-model".to_string()),
     };
 
     let node_ids = pipeline.ingest(request).await.unwrap();

@@ -22,6 +22,8 @@ async fn ingest_records_audit_event_with_model_id() {
         metadata: HashMap::new(),
         idempotency_key: None,
         model_id: Some("embedding-audit-v1".to_string()),
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     pipeline.ingest(request).await.unwrap();
@@ -48,6 +50,8 @@ async fn ingest_authorized_records_denied_audit_event() {
         metadata: HashMap::new(),
         idempotency_key: None,
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
     let principal = Principal::new("reader-1", "acme").with_roles(["reader"]);
     let authorizer = Authorizer::default();

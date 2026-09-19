@@ -61,6 +61,8 @@ async fn ingestion_pipeline_enqueues_into_durable_queue() {
             metadata: HashMap::from([("source".to_string(), "ev_report.txt".to_string())]),
             idempotency_key: Some("doc-durable-1".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();

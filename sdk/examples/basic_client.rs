@@ -23,6 +23,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             metadata,
             idempotency_key: Some("sdk-example-doc-1".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await?;
 

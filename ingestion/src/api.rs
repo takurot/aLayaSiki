@@ -18,7 +18,14 @@ pub struct JsonIngestionPayload {
     pub content_type: String,
     pub metadata: HashMap<String, String>,
     pub idempotency_key: Option<String>,
+    /// Deprecated: use `embedding_model_id`/`extraction_model_id` instead.
+    /// Retained for backward compatibility and aliased to the embedding role only.
+    #[serde(default)]
     pub model_id: Option<String>,
+    #[serde(default)]
+    pub embedding_model_id: Option<String>,
+    #[serde(default)]
+    pub extraction_model_id: Option<String>,
 }
 
 impl JsonIngestionPayload {
@@ -32,6 +39,8 @@ impl JsonIngestionPayload {
                 metadata: self.metadata,
                 idempotency_key: self.idempotency_key,
                 model_id: self.model_id,
+                embedding_model_id: self.embedding_model_id,
+                extraction_model_id: self.extraction_model_id,
             }
         } else {
             IngestionRequest::Text {
@@ -39,6 +48,8 @@ impl JsonIngestionPayload {
                 metadata: self.metadata,
                 idempotency_key: self.idempotency_key,
                 model_id: self.model_id,
+                embedding_model_id: self.embedding_model_id,
+                extraction_model_id: self.extraction_model_id,
             }
         }
     }
@@ -52,6 +63,8 @@ pub struct MultipartIngestionPayload {
     pub metadata: HashMap<String, String>,
     pub idempotency_key: Option<String>,
     pub model_id: Option<String>,
+    pub embedding_model_id: Option<String>,
+    pub extraction_model_id: Option<String>,
 }
 
 impl MultipartIngestionPayload {
@@ -63,6 +76,8 @@ impl MultipartIngestionPayload {
             metadata: self.metadata,
             idempotency_key: self.idempotency_key,
             model_id: self.model_id,
+            embedding_model_id: self.embedding_model_id,
+            extraction_model_id: self.extraction_model_id,
         }
     }
 }
@@ -75,6 +90,8 @@ pub struct ImageIngestionPayload {
     pub metadata: HashMap<String, String>,
     pub idempotency_key: Option<String>,
     pub model_id: Option<String>,
+    pub embedding_model_id: Option<String>,
+    pub extraction_model_id: Option<String>,
 }
 
 impl ImageIngestionPayload {
@@ -88,6 +105,8 @@ impl ImageIngestionPayload {
             metadata: with_modality(self.metadata, "image"),
             idempotency_key: self.idempotency_key,
             model_id: self.model_id,
+            embedding_model_id: self.embedding_model_id,
+            extraction_model_id: self.extraction_model_id,
         })
     }
 }
@@ -101,6 +120,8 @@ impl From<MultipartIngestionPayload> for ImageIngestionPayload {
             metadata: payload.metadata,
             idempotency_key: payload.idempotency_key,
             model_id: payload.model_id,
+            embedding_model_id: payload.embedding_model_id,
+            extraction_model_id: payload.extraction_model_id,
         }
     }
 }
@@ -113,6 +134,8 @@ pub struct AudioIngestionPayload {
     pub metadata: HashMap<String, String>,
     pub idempotency_key: Option<String>,
     pub model_id: Option<String>,
+    pub embedding_model_id: Option<String>,
+    pub extraction_model_id: Option<String>,
 }
 
 impl AudioIngestionPayload {
@@ -126,6 +149,8 @@ impl AudioIngestionPayload {
             metadata: with_modality(self.metadata, "audio"),
             idempotency_key: self.idempotency_key,
             model_id: self.model_id,
+            embedding_model_id: self.embedding_model_id,
+            extraction_model_id: self.extraction_model_id,
         })
     }
 }
@@ -139,6 +164,8 @@ impl From<MultipartIngestionPayload> for AudioIngestionPayload {
             metadata: payload.metadata,
             idempotency_key: payload.idempotency_key,
             model_id: payload.model_id,
+            embedding_model_id: payload.embedding_model_id,
+            extraction_model_id: payload.extraction_model_id,
         }
     }
 }

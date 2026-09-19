@@ -13,6 +13,8 @@ fn test_json_payload_for_json_content_maps_to_file_request() {
         metadata: HashMap::new(),
         idempotency_key: Some("json-key".to_string()),
         model_id: Some("embedding-default-v1".to_string()),
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     match payload.into_request() {
@@ -33,6 +35,31 @@ fn test_json_payload_for_json_content_maps_to_file_request() {
 }
 
 #[test]
+fn test_json_payload_forwards_independent_embedding_and_extraction_model_ids() {
+    let payload = JsonIngestionPayload {
+        content: "plain text content".to_string(),
+        content_type: "text/plain".to_string(),
+        metadata: HashMap::new(),
+        idempotency_key: None,
+        model_id: None,
+        embedding_model_id: Some("embed-A".to_string()),
+        extraction_model_id: Some("extract-B".to_string()),
+    };
+
+    match payload.into_request() {
+        IngestionRequest::Text {
+            embedding_model_id,
+            extraction_model_id,
+            ..
+        } => {
+            assert_eq!(embedding_model_id.as_deref(), Some("embed-A"));
+            assert_eq!(extraction_model_id.as_deref(), Some("extract-B"));
+        }
+        other => panic!("expected text request, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_image_payload_into_request_sets_image_modality() {
     let payload = ImageIngestionPayload {
         filename: "graph.png".to_string(),
@@ -41,6 +68,8 @@ fn test_image_payload_into_request_sets_image_modality() {
         metadata: HashMap::new(),
         idempotency_key: Some("image-key".to_string()),
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     match payload.try_into_request().unwrap() {
@@ -67,6 +96,8 @@ fn test_audio_payload_into_request_sets_audio_modality() {
         metadata: HashMap::new(),
         idempotency_key: None,
         model_id: Some("embedding-default-v1".to_string()),
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     match payload.try_into_request().unwrap() {
@@ -96,6 +127,8 @@ fn test_media_payload_from_multipart_overwrites_conflicting_modality() {
         metadata,
         idempotency_key: Some("audio-1".to_string()),
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     let audio_payload: AudioIngestionPayload = multipart.into();
@@ -116,6 +149,8 @@ fn test_image_payload_rejects_non_image_mime_type() {
         metadata: HashMap::new(),
         idempotency_key: None,
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     let err = payload.try_into_request().unwrap_err();
@@ -137,6 +172,8 @@ fn test_audio_payload_rejects_non_audio_mime_type() {
         metadata: HashMap::new(),
         idempotency_key: None,
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     };
 
     let err = payload.try_into_request().unwrap_err();

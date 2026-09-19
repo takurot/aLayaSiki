@@ -49,6 +49,8 @@ async fn test_e2e_ingest_to_query_with_filters_and_citations() {
             metadata: company_meta,
             idempotency_key: Some("e2e-doc-company".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();
@@ -59,6 +61,8 @@ async fn test_e2e_ingest_to_query_with_filters_and_citations() {
             metadata: policy_meta,
             idempotency_key: Some("e2e-doc-policy".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();
@@ -118,6 +122,8 @@ async fn test_e2e_query_is_reproducible_with_fixed_model_and_snapshot() {
             metadata,
             idempotency_key: Some("e2e-repro-doc".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();
@@ -151,6 +157,8 @@ async fn test_e2e_query_is_reproducible_with_fixed_model_and_snapshot() {
             metadata: extra_metadata,
             idempotency_key: Some("e2e-repro-extra-doc".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();
@@ -204,6 +212,8 @@ async fn test_e2e_pdf_file_ingest_to_query_uses_extracted_text() {
             metadata: HashMap::from([("source".to_string(), "tests/assets/dummy.pdf".to_string())]),
             idempotency_key: Some("e2e-pdf-doc".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();
@@ -264,6 +274,8 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
         ]),
         idempotency_key: Some("e2e-image-doc".to_string()),
         model_id: Some("embedding-default-v1".to_string()),
+        embedding_model_id: None,
+        extraction_model_id: None,
     }
     .try_into_request()
     .unwrap();
@@ -287,6 +299,8 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
             )]),
             idempotency_key: Some("e2e-image-distractor".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();
@@ -344,6 +358,8 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
         ]),
         idempotency_key: Some("e2e-audio-doc".to_string()),
         model_id: Some("embedding-default-v1".to_string()),
+        embedding_model_id: None,
+        extraction_model_id: None,
     }
     .try_into_request()
     .unwrap();
@@ -366,6 +382,8 @@ async fn test_e2e_multimodal_metadata_ingest_to_query_supports_image_and_audio()
             )]),
             idempotency_key: Some("e2e-audio-distractor".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();
@@ -428,6 +446,8 @@ async fn test_e2e_pii_masking_persists_and_queries_masked_content() {
             )]),
             idempotency_key: Some("e2e-pii-doc".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();
@@ -499,6 +519,8 @@ async fn test_e2e_full_graphrag_flow_with_global_and_drift() {
             metadata: HashMap::from([("source".to_string(), "market_report.txt".to_string())]),
             idempotency_key: Some("doc-1".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();
@@ -510,6 +532,8 @@ async fn test_e2e_full_graphrag_flow_with_global_and_drift() {
             metadata: HashMap::from([("source".to_string(), "byd_news.txt".to_string())]),
             idempotency_key: Some("doc-2".to_string()),
             model_id: Some("embedding-default-v1".to_string()),
+            embedding_model_id: None,
+            extraction_model_id: None,
         })
         .await
         .unwrap();
@@ -605,6 +629,8 @@ async fn test_e2e_jwt_authorized_ingest_and_query_flow() {
                 metadata,
                 idempotency_key: Some("e2e-jwt-doc".to_string()),
                 model_id: Some("embedding-default-v1".to_string()),
+                embedding_model_id: None,
+                extraction_model_id: None,
             },
             &token,
             &authenticator,
@@ -662,6 +688,8 @@ async fn test_e2e_tenant_isolation_prevents_cross_tenant_leakage() {
                 metadata: HashMap::from([("source".to_string(), "tenant/acme-doc.md".to_string())]),
                 idempotency_key: Some("tenant-acme-doc".to_string()),
                 model_id: Some("embedding-default-v1".to_string()),
+                embedding_model_id: None,
+                extraction_model_id: None,
             },
             &acme_token,
             &authenticator,
@@ -677,6 +705,8 @@ async fn test_e2e_tenant_isolation_prevents_cross_tenant_leakage() {
                 metadata: HashMap::from([("source".to_string(), "tenant/beta-doc.md".to_string())]),
                 idempotency_key: Some("tenant-beta-doc".to_string()),
                 model_id: Some("embedding-default-v1".to_string()),
+                embedding_model_id: None,
+                extraction_model_id: None,
             },
             &beta_token,
             &authenticator,
@@ -796,6 +826,8 @@ async fn test_e2e_dynamic_rbac_abac_permission_transition() {
                 )]),
                 idempotency_key: Some("tenant-acme-dynamic-doc".to_string()),
                 model_id: Some("embedding-default-v1".to_string()),
+                embedding_model_id: None,
+                extraction_model_id: None,
             },
             &admin_token,
             &authenticator,
@@ -904,6 +936,8 @@ async fn test_e2e_retention_dynamic_excludes_expired_nodes() {
                 ]),
                 idempotency_key: Some("tenant-acme-retention-expired".to_string()),
                 model_id: Some("embedding-default-v1".to_string()),
+                embedding_model_id: None,
+                extraction_model_id: None,
             },
             &token,
             &authenticator,
@@ -930,6 +964,8 @@ async fn test_e2e_retention_dynamic_excludes_expired_nodes() {
                 ]),
                 idempotency_key: Some("tenant-acme-retention-active".to_string()),
                 model_id: Some("embedding-default-v1".to_string()),
+                embedding_model_id: None,
+                extraction_model_id: None,
             },
             &token,
             &authenticator,
@@ -1008,6 +1044,8 @@ async fn test_e2e_data_residency_enforces_region_boundary() {
                 ]),
                 idempotency_key: Some("tenant-acme-residency-blocked".to_string()),
                 model_id: Some("embedding-default-v1".to_string()),
+                embedding_model_id: None,
+                extraction_model_id: None,
             },
             &token,
             &authenticator,
@@ -1041,6 +1079,8 @@ async fn test_e2e_data_residency_enforces_region_boundary() {
                 ]),
                 idempotency_key: Some("tenant-acme-residency-allowed".to_string()),
                 model_id: Some("embedding-default-v1".to_string()),
+                embedding_model_id: None,
+                extraction_model_id: None,
             },
             &token,
             &authenticator,

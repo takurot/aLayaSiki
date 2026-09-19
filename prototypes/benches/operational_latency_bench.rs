@@ -286,6 +286,8 @@ async fn main() {
                         metadata,
                         idempotency_key: Some(format!("runtime-{worker_id}-{op}")),
                         model_id: Some(MODEL_ID.to_string()),
+                        embedding_model_id: None,
+                        extraction_model_id: None,
                     };
 
                     let begin = Instant::now();

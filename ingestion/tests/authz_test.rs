@@ -12,6 +12,8 @@ fn sample_request() -> IngestionRequest {
         metadata: HashMap::new(),
         idempotency_key: None,
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     }
 }
 

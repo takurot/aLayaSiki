@@ -18,6 +18,8 @@ fn make_request(region: &str) -> IngestionRequest {
         metadata,
         idempotency_key: None,
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     }
 }
 
@@ -30,6 +32,8 @@ fn make_request_with_idempotency(region: &str, idempotency_key: &str) -> Ingesti
         metadata,
         idempotency_key: Some(idempotency_key.to_string()),
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     }
 }
 
