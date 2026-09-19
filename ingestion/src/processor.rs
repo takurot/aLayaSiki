@@ -5,7 +5,10 @@ use crate::extract::{
     ContentKind,
 };
 use crate::policy::{ContentPolicy, NoOpPolicy, PolicyError};
-use alayasiki_core::audit::{AuditEvent, AuditOperation, AuditOutcome, AuditSink};
+use alayasiki_core::audit::{
+    AuditError, AuditEvent, AuditFailurePolicy, AuditHealth, AuditOperation, AuditOutcome,
+    AuditSink,
+};
 use alayasiki_core::auth::{
     Action, AuthError, Authorizer, AuthzError, JwtAuthenticator, Principal, ResourceContext,
 };
@@ -46,6 +49,8 @@ pub enum IngestionError {
     Unauthenticated(#[from] AuthError),
     #[error("Governance error: {0}")]
     Governance(#[from] GovernanceError),
+    #[error("Audit sink record failed: {0}")]
+    AuditFailure(#[from] AuditError),
 }
 
 struct IdempotencyGuard {
@@ -70,6 +75,8 @@ pub struct IngestionPipeline {
     locks: Arc<DashMap<String, ()>>,
     job_queue: Option<Arc<dyn JobQueue>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    audit_failure_policy: AuditFailurePolicy,
+    audit_health: Arc<AuditHealth>,
     governance_policy_store: Option<Arc<dyn GovernancePolicyStore>>,
 }
 
@@ -85,6 +92,8 @@ impl IngestionPipeline {
             locks: Arc::new(DashMap::new()),
             job_queue: None,
             audit_sink: None,
+            audit_failure_policy: AuditFailurePolicy::default(),
+            audit_health: Arc::new(AuditHealth::default()),
             governance_policy_store: None,
         }
     }
@@ -100,6 +109,8 @@ impl IngestionPipeline {
             locks: Arc::new(DashMap::new()),
             job_queue: None,
             audit_sink: None,
+            audit_failure_policy: AuditFailurePolicy::default(),
+            audit_health: Arc::new(AuditHealth::default()),
             governance_policy_store: None,
         }
     }
@@ -121,6 +132,8 @@ impl IngestionPipeline {
             locks: Arc::new(DashMap::new()),
             job_queue: None,
             audit_sink: None,
+            audit_failure_policy: AuditFailurePolicy::default(),
+            audit_health: Arc::new(AuditHealth::default()),
             governance_policy_store: None,
         }
     }
@@ -131,6 +144,22 @@ impl IngestionPipeline {
 
     pub fn set_audit_sink(&mut self, sink: Arc<dyn AuditSink>) {
         self.audit_sink = Some(sink);
+    }
+
+    pub fn set_audit_failure_policy(&mut self, policy: AuditFailurePolicy) {
+        self.audit_failure_policy = policy;
+    }
+
+    pub fn with_audit_failure_policy(mut self, policy: AuditFailurePolicy) -> Self {
+        self.audit_failure_policy = policy;
+        self
+    }
+
+    /// Audit sink health, so operators can observe audit-write degradation
+    /// (relevant under `AuditFailurePolicy::BestEffort`, where operations
+    /// continue despite audit loss).
+    pub fn audit_health(&self) -> Arc<AuditHealth> {
+        self.audit_health.clone()
     }
 
     pub fn with_governance_policy_store(mut self, store: Arc<dyn GovernancePolicyStore>) -> Self {
@@ -151,14 +180,14 @@ impl IngestionPipeline {
     ) -> Result<Vec<u64>, IngestionError> {
         let model_id = effective_ingest_model_id(&request, &self.default_model_id);
         if let Err(err) = authorizer.authorize(principal, Action::Ingest, resource) {
-            self.emit_audit_event(build_audit_event(
+            let event = build_audit_event(
                 AuditOutcome::Denied,
                 &model_id,
                 Some(principal.subject.clone()),
                 Some(principal.tenant.clone()),
                 Some(err.to_string()),
-            ));
-            return Err(err.into());
+            );
+            return self.finalize_with_audit(Err(err.into()), event);
         }
 
         let actor = Some(principal.subject.clone());
@@ -177,14 +206,14 @@ impl IngestionPipeline {
     ) -> Result<Vec<u64>, IngestionError> {
         let model_id = effective_ingest_model_id(&request, &self.default_model_id);
         if let Err(err) = authorizer.authorize(principal, Action::Ingest, resource) {
-            self.emit_audit_event(build_audit_event(
+            let event = build_audit_event(
                 AuditOutcome::Denied,
                 &model_id,
                 Some(principal.subject.clone()),
                 Some(principal.tenant.clone()),
                 Some(err.to_string()),
-            ));
-            return Err(err.into());
+            );
+            return self.finalize_with_audit(Err(err.into()), event);
         }
 
         let actor = Some(principal.subject.clone());
@@ -213,14 +242,14 @@ impl IngestionPipeline {
         let principal = match authenticator.authenticate(bearer_token) {
             Ok(principal) => principal,
             Err(err) => {
-                self.emit_audit_event(build_audit_event(
+                let event = build_audit_event(
                     AuditOutcome::Denied,
                     &model_id,
                     None,
                     None,
                     Some(err.to_string()),
-                ));
-                return Err(err.into());
+                );
+                return self.finalize_with_audit(Err(err.into()), event);
             }
         };
 
@@ -256,8 +285,8 @@ impl IngestionPipeline {
             Err(_) => AuditOutcome::Failed,
         };
         let error = result.as_ref().err().map(|err| err.to_string());
-        self.emit_audit_event(build_audit_event(outcome, &model_id, actor, tenant, error));
-        result
+        let event = build_audit_event(outcome, &model_id, actor, tenant, error);
+        self.finalize_with_audit(result, event)
     }
 
     async fn ingest_internal(
@@ -448,10 +477,34 @@ impl IngestionPipeline {
         Ok(())
     }
 
-    fn emit_audit_event(&self, event: AuditEvent) {
-        if let Some(sink) = &self.audit_sink {
-            let _ = sink.record(event);
+    /// Records an audit event and folds the outcome into `result` according
+    /// to `audit_failure_policy`: under `Strict`, an audit write failure
+    /// turns a would-be success into an error; a pre-existing failure is
+    /// always preserved so audit-loss handling never masks the original
+    /// cause.
+    fn finalize_with_audit<T>(
+        &self,
+        result: Result<T, IngestionError>,
+        event: AuditEvent,
+    ) -> Result<T, IngestionError> {
+        match (result, self.emit_audit_event(event)) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(audit_err)) => Err(audit_err),
+            (Err(op_err), _) => Err(op_err),
         }
+    }
+
+    fn emit_audit_event(&self, event: AuditEvent) -> Result<(), IngestionError> {
+        let Some(sink) = &self.audit_sink else {
+            return Ok(());
+        };
+        if let Err(err) = sink.record(event) {
+            self.audit_health.record_failure(&err);
+            if self.audit_failure_policy == AuditFailurePolicy::Strict {
+                return Err(IngestionError::AuditFailure(err));
+            }
+        }
+        Ok(())
     }
 }
 
