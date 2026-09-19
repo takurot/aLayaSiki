@@ -279,6 +279,8 @@ async fn run_worker(
                 ]),
                 idempotency_key: Some(format!("warmup-{worker_id}-{op}")),
                 model_id: Some(MODEL_ID.to_string()),
+                embedding_model_id: None,
+                extraction_model_id: None,
             };
             pipeline.ingest(request).await.unwrap();
         } else {
@@ -309,6 +311,8 @@ async fn run_worker(
                 ]),
                 idempotency_key: Some(format!("measured-{worker_id}-{op}")),
                 model_id: Some(MODEL_ID.to_string()),
+                embedding_model_id: None,
+                extraction_model_id: None,
             };
 
             let begin = Instant::now();

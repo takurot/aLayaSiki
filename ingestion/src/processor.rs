@@ -307,17 +307,17 @@ impl IngestionPipeline {
         }
 
         let embedding_model_id = request
-            .model_id()
+            .embedding_model_id()
             .unwrap_or(&self.default_model_id)
             .to_string();
         let extraction_model_id = request
-            .model_id()
+            .extraction_model_id()
             .unwrap_or(&self.default_extraction_model_id)
             .to_string();
 
         let (text, mut metadata) = extract_request_text(request)?;
         metadata.insert("content_hash".to_string(), content_hash.clone());
-        metadata.insert("model_id".to_string(), embedding_model_id.clone());
+        metadata.insert("embedding_model_id".to_string(), embedding_model_id.clone());
         if let Some(tenant) = tenant {
             // Enforce tenant ownership metadata for authorized ingest.
             metadata.insert("tenant".to_string(), tenant.to_string());
@@ -456,7 +456,10 @@ impl IngestionPipeline {
 }
 
 fn effective_ingest_model_id(request: &IngestionRequest, default_model_id: &str) -> String {
-    request.model_id().unwrap_or(default_model_id).to_string()
+    request
+        .embedding_model_id()
+        .unwrap_or(default_model_id)
+        .to_string()
 }
 
 fn build_audit_event(

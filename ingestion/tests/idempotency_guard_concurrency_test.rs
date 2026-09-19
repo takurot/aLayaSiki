@@ -64,6 +64,8 @@ fn text_request(content: &str, idempotency_key: Option<&str>) -> IngestionReques
         metadata: HashMap::new(),
         idempotency_key: idempotency_key.map(str::to_string),
         model_id: None,
+        embedding_model_id: None,
+        extraction_model_id: None,
     }
 }
 
