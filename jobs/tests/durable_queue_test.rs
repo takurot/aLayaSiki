@@ -274,7 +274,7 @@ async fn unsupported_schema_version_aborts_open() {
     let path = dir.path().join("jobs.wal");
 
     // Append a record with an incompatible schema version directly to the WAL.
-    let payload = serde_json::to_vec(&serde_json::json!({"v": 2u32, "op": {"Enqueue": {"id": 1u64, "attempt": 0u32, "enqueued_at_ms": 0i64, "job": {"ExtractEntities": {"node_id": 1u64, "content": "x", "model_id": "m", "snapshot_id": "s"}}}}})).unwrap();
+    let payload = serde_json::to_vec(&serde_json::json!({"v": 99u32, "op": {"Enqueue": {"id": 1u64, "attempt": 0u32, "enqueued_at_ms": 0i64, "job": {"ExtractEntities": {"node_id": 1u64, "content": "x", "model_id": "m", "snapshot_id": "s"}}}}})).unwrap();
     {
         let mut wal = storage::wal::Wal::open(&path).await.unwrap();
         wal.append(&payload).await.unwrap();
@@ -491,6 +491,163 @@ async fn durable_worker_dead_letters_failing_job_and_continues() {
     );
     assert_eq!(queue.stats().await.dead_lettered, 1);
     assert_eq!(queue.stats().await.pending_depth, 0);
+}
+
+#[tokio::test]
+async fn dead_letter_timestamp_survives_restart() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("jobs.wal");
+
+    let (id, original_ts) = {
+        let (queue, mut rx) = DurableJobQueue::open_with_config(&path, zero_backoff())
+            .await
+            .unwrap();
+        let id = queue.enqueue_tracked(sample_job(1)).await.unwrap();
+        rx.recv().await.unwrap();
+        queue.fail(id, "first".to_string()).await.unwrap();
+        rx.recv().await.unwrap();
+        queue.fail(id, "second".to_string()).await.unwrap(); // -> dead-letter
+        let dead_letters = queue.dead_letters().await;
+        (id, dead_letters[0].dead_lettered_at_ms)
+    };
+
+    let (queue, _rx) = DurableJobQueue::open_with_config(&path, zero_backoff())
+        .await
+        .unwrap();
+    let dead_letters = queue.dead_letters().await;
+    assert_eq!(dead_letters.len(), 1);
+    assert_eq!(dead_letters[0].id, id);
+    assert_eq!(
+        dead_letters[0].dead_lettered_at_ms, original_ts,
+        "dead-letter timestamp must not change across restart"
+    );
+}
+
+#[tokio::test]
+async fn cumulative_dead_lettered_stat_survives_retention_cap_and_restart() {
+    let config = DurableQueueConfig {
+        max_dead_letters: 1,
+        ..zero_backoff()
+    };
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("jobs.wal");
+
+    {
+        let (queue, mut rx) = DurableJobQueue::open_with_config(&path, config.clone())
+            .await
+            .unwrap();
+
+        let a = queue.enqueue_tracked(sample_job(1)).await.unwrap();
+        rx.recv().await.unwrap();
+        queue.fail(a, "e".to_string()).await.unwrap();
+        rx.recv().await.unwrap();
+        queue.fail(a, "e".to_string()).await.unwrap(); // dead-letter a
+
+        let b = queue.enqueue_tracked(sample_job(2)).await.unwrap();
+        rx.recv().await.unwrap();
+        queue.fail(b, "e".to_string()).await.unwrap();
+        rx.recv().await.unwrap();
+        queue.fail(b, "e".to_string()).await.unwrap(); // dead-letter b, evicts a
+
+        assert_eq!(
+            queue.dead_letters().await.len(),
+            1,
+            "retention cap keeps only the newest entry"
+        );
+        assert_eq!(
+            queue.stats().await.dead_lettered,
+            2,
+            "cumulative count must not shrink due to retention eviction"
+        );
+    }
+
+    // Restart: retained length stays capped, cumulative count is unaffected.
+    let (queue, _rx) = DurableJobQueue::open_with_config(&path, config)
+        .await
+        .unwrap();
+    assert_eq!(queue.dead_letters().await.len(), 1);
+    assert_eq!(
+        queue.stats().await.dead_lettered,
+        2,
+        "restart must not reduce the cumulative dead_lettered stat"
+    );
+}
+
+#[tokio::test]
+async fn legacy_v1_dead_letter_record_replays_with_fallback_timestamp() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("jobs.wal");
+
+    let enqueued_at_ms = 12_345_i64;
+    let enqueue_payload = serde_json::to_vec(&serde_json::json!({
+        "v": 1u32,
+        "op": {"Enqueue": {"id": 1u64, "attempt": 1u32, "enqueued_at_ms": enqueued_at_ms, "job": {"ExtractEntities": {"node_id": 1u64, "content": "x", "model_id": "m", "snapshot_id": "s"}}}}
+    }))
+    .unwrap();
+    // A v1 DeadLetter record has no `dead_lettered_at_ms` field on disk.
+    let dead_letter_payload = serde_json::to_vec(&serde_json::json!({
+        "v": 1u32,
+        "op": {"DeadLetter": {"id": 1u64, "reason": "boom", "envelope": {"id": 1u64, "attempt": 1u32, "enqueued_at_ms": enqueued_at_ms, "job": {"ExtractEntities": {"node_id": 1u64, "content": "x", "model_id": "m", "snapshot_id": "s"}}}}}
+    }))
+    .unwrap();
+    {
+        let mut wal = storage::wal::Wal::open(&path).await.unwrap();
+        wal.append(&enqueue_payload).await.unwrap();
+        wal.append(&dead_letter_payload).await.unwrap();
+        wal.flush().await.unwrap();
+    }
+
+    let (queue, _rx) = DurableJobQueue::open_with_config(&path, zero_backoff())
+        .await
+        .unwrap();
+    let dead_letters = queue.dead_letters().await;
+    assert_eq!(dead_letters.len(), 1);
+    assert_eq!(
+        dead_letters[0].dead_lettered_at_ms, enqueued_at_ms,
+        "legacy v1 records fall back to the envelope's enqueue time, not restart time"
+    );
+    assert_eq!(queue.stats().await.dead_lettered, 1);
+}
+
+#[tokio::test]
+async fn duplicate_dead_letter_op_for_same_id_does_not_inflate_cumulative_stat() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("jobs.wal");
+
+    let envelope = serde_json::json!({"id": 1u64, "attempt": 2u32, "enqueued_at_ms": 0i64, "job": {"ExtractEntities": {"node_id": 1u64, "content": "x", "model_id": "m", "snapshot_id": "s"}}});
+    let enqueue_payload = serde_json::to_vec(&serde_json::json!({
+        "v": 2u32,
+        "op": {"Enqueue": envelope.clone()}
+    }))
+    .unwrap();
+    let dead_letter_payload = serde_json::to_vec(&serde_json::json!({
+        "v": 2u32,
+        "op": {"DeadLetter": {"id": 1u64, "reason": "boom", "envelope": envelope.clone(), "dead_lettered_at_ms": 100i64}}
+    }))
+    .unwrap();
+    // A duplicate terminal DeadLetter op for the same id (should not normally
+    // occur, but replay must be defensive against it) must not double-count.
+    let duplicate_dead_letter_payload = serde_json::to_vec(&serde_json::json!({
+        "v": 2u32,
+        "op": {"DeadLetter": {"id": 1u64, "reason": "boom-again", "envelope": envelope, "dead_lettered_at_ms": 200i64}}
+    }))
+    .unwrap();
+    {
+        let mut wal = storage::wal::Wal::open(&path).await.unwrap();
+        wal.append(&enqueue_payload).await.unwrap();
+        wal.append(&dead_letter_payload).await.unwrap();
+        wal.append(&duplicate_dead_letter_payload).await.unwrap();
+        wal.flush().await.unwrap();
+    }
+
+    let (queue, _rx) = DurableJobQueue::open_with_config(&path, zero_backoff())
+        .await
+        .unwrap();
+    assert_eq!(
+        queue.stats().await.dead_lettered,
+        1,
+        "duplicate DeadLetter ops for the same id must not inflate the cumulative stat"
+    );
 }
 
 async fn flip_last_byte(path: &std::path::Path) {
