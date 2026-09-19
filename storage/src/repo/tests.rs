@@ -320,6 +320,49 @@ async fn test_persist_ingest_batch_keeps_first_content_hash_mapping() {
 }
 
 #[tokio::test]
+async fn test_concurrent_record_idempotency_writes_single_wal_entry() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("concurrent_idempotency.wal");
+    let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
+
+    let mut handles = Vec::new();
+    for _ in 0..16 {
+        let repo = Arc::clone(&repo);
+        handles.push(tokio::spawn(async move {
+            repo.record_idempotency("shared-key", vec![1, 2, 3])
+                .await
+                .unwrap();
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    assert_eq!(
+        repo.check_idempotency("shared-key").await,
+        Some(vec![1, 2, 3])
+    );
+
+    let mut wal = Wal::open(&wal_path).await.unwrap();
+    let mut record_count = 0usize;
+
+    wal.replay(|_lsn, payload| {
+        record_count += 1;
+        let entry: WalEntry = rkyv::from_bytes::<WalEntry, rkyv::rancor::Error>(&payload[..])
+            .map_err(|_| WalError::CorruptEntry)?;
+        assert!(matches!(entry, WalEntry::IdempotencyKey { .. }));
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        record_count, 1,
+        "concurrent record_idempotency calls for the same key must produce exactly one WAL entry"
+    );
+}
+
+#[tokio::test]
 async fn test_index_transaction_flush_and_reopen_preserves_seeded_graph() {
     let dir = tempdir().unwrap();
     let wal_path = dir.path().join("txn_seed_flush_reopen.wal");

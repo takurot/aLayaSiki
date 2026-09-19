@@ -77,11 +77,13 @@ impl Repository {
             .collect();
         self.validate_index_transaction(&node_mutations).await?;
 
-        let mut idempotency_index = self.idempotency_index.write().await;
-        let new_idempotency_records: Vec<(String, Vec<u64>)> = idempotency_records
-            .into_iter()
-            .filter(|(key, _)| !idempotency_index.contains_key(key))
-            .collect();
+        let new_idempotency_records: Vec<(String, Vec<u64>)> = {
+            let idempotency_index = self.idempotency_index.read().await;
+            idempotency_records
+                .into_iter()
+                .filter(|(key, _)| !idempotency_index.contains_key(key))
+                .collect()
+        };
 
         let mut tx_operations = mutations_to_tx_operations(&node_mutations);
         tx_operations.extend(new_idempotency_records.iter().map(|(key, node_ids)| {
@@ -107,6 +109,7 @@ impl Repository {
 
         let mut nodes = self.nodes.write().await;
         let mut index = self.hyper_index.write().await;
+        let mut idempotency_index = self.idempotency_index.write().await;
         let mut edge_meta = self.edge_metadata.write().await;
 
         for operation in &tx_operations {
@@ -123,28 +126,30 @@ impl Repository {
     }
 
     pub async fn record_idempotency(&self, key: &str, node_ids: Vec<u64>) -> Result<(), RepoError> {
+        let _tx_guard = self.tx_lock.lock().await;
+
         {
-            let mut index = self.idempotency_index.write().await;
+            let index = self.idempotency_index.read().await;
             if index.contains_key(key) {
                 return Ok(());
             }
-
-            let entry = WalEntry::IdempotencyKey {
-                key: key.to_string(),
-                node_ids: node_ids.clone(),
-            };
-            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
-                .map_err(|_| RepoError::Serialization)?;
-
-            let durable_lsn = {
-                let mut wal = self.wal.lock().await;
-                wal.append(&bytes[..]).await?;
-                wal.durable_lsn()
-            };
-            self.record_durable_snapshot(durable_lsn).await?;
-
-            index.insert(key.to_string(), node_ids);
         }
+
+        let entry = WalEntry::IdempotencyKey {
+            key: key.to_string(),
+            node_ids: node_ids.clone(),
+        };
+        let bytes = serialize_wal_entry(&entry)?;
+
+        let durable_lsn = {
+            let mut wal = self.wal.lock().await;
+            wal.append(&bytes).await?;
+            wal.durable_lsn()
+        };
+        self.record_durable_snapshot(durable_lsn).await?;
+
+        let mut index = self.idempotency_index.write().await;
+        index.insert(key.to_string(), node_ids);
 
         Ok(())
     }
