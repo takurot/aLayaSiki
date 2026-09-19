@@ -172,20 +172,24 @@ impl JsonlAuditSink {
             .append(true)
             .open(path)?;
 
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let content = String::from_utf8_lossy(&bytes);
+        let starting_sequence = if file.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+            0
+        } else {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            let content = String::from_utf8_lossy(&bytes);
 
-        // Recover the starting sequence from the max sequence observed among
-        // parseable lines, rather than counting lines. This tolerates
-        // corrupt/partial lines, non-UTF-8 content, and gaps left by prior
-        // write failures without under- or over-counting.
-        let starting_sequence = content
-            .lines()
-            .filter_map(|line| serde_json::from_str::<AuditEvent>(line).ok())
-            .map(|event| event.sequence)
-            .max()
-            .unwrap_or(0);
+            // Recover the starting sequence from the max sequence observed among
+            // parseable lines, rather than counting lines. This tolerates
+            // corrupt/partial lines, non-UTF-8 content, and gaps left by prior
+            // write failures without under- or over-counting.
+            content
+                .lines()
+                .filter_map(|line| serde_json::from_str::<AuditEvent>(line).ok())
+                .map(|event| event.sequence)
+                .max()
+                .unwrap_or(0)
+        };
 
         Ok(Self {
             state: Mutex::new(JsonlSinkState {
