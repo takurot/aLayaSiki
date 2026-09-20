@@ -4,7 +4,9 @@ mod synthesis;
 
 use crate::dsl::{QueryRequest, SearchMode};
 use crate::semantic_cache::{SemanticCache, SemanticCacheConfig, SemanticCacheKey};
-use alayasiki_core::audit::{AuditEvent, AuditOutcome, AuditSink};
+use alayasiki_core::audit::{
+    AuditError, AuditEvent, AuditFailurePolicy, AuditHealth, AuditOutcome, AuditSink,
+};
 use alayasiki_core::auth::{
     Action, AuthError, Authorizer, AuthzError, JwtAuthenticator, Principal, ResourceContext,
 };
@@ -129,6 +131,8 @@ pub enum QueryError {
     Unauthorized(#[from] AuthzError),
     #[error("authentication error: {0}")]
     Unauthenticated(#[from] AuthError),
+    #[error("audit sink record failed: {0}")]
+    AuditFailure(#[from] AuditError),
 }
 
 impl AlayasikiError for QueryError {
@@ -139,6 +143,7 @@ impl AlayasikiError for QueryError {
             QueryError::Repository(err) => err.error_code(),
             QueryError::Unauthorized(err) => err.error_code(),
             QueryError::Unauthenticated(err) => err.error_code(),
+            QueryError::AuditFailure(_) => ErrorCode::Internal,
         }
     }
 }
@@ -173,6 +178,8 @@ pub struct QueryEngine {
     repo: Arc<Repository>,
     community_summaries: Vec<CommunitySummary>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    audit_failure_policy: AuditFailurePolicy,
+    audit_health: Arc<AuditHealth>,
     semantic_cache: Arc<Mutex<SemanticCache<QueryResponse>>>,
     metrics: Arc<MetricsCollector>,
 }
@@ -228,6 +235,8 @@ impl QueryEngine {
             repo,
             community_summaries: Vec::new(),
             audit_sink: None,
+            audit_failure_policy: AuditFailurePolicy::default(),
+            audit_health: Arc::new(AuditHealth::default()),
             semantic_cache: Arc::new(Mutex::new(SemanticCache::with_config(
                 SemanticCacheConfig::default(),
             ))),
@@ -244,6 +253,18 @@ impl QueryEngine {
     pub fn with_audit_sink(mut self, sink: Arc<dyn AuditSink>) -> Self {
         self.audit_sink = Some(sink);
         self
+    }
+
+    pub fn with_audit_failure_policy(mut self, policy: AuditFailurePolicy) -> Self {
+        self.audit_failure_policy = policy;
+        self
+    }
+
+    /// Audit sink health, so operators can observe audit-write degradation
+    /// (relevant under `AuditFailurePolicy::BestEffort`, where queries
+    /// continue despite audit loss).
+    pub fn audit_health(&self) -> Arc<AuditHealth> {
+        self.audit_health.clone()
     }
 
     pub fn with_semantic_cache_config(mut self, config: SemanticCacheConfig) -> Self {
@@ -306,15 +327,15 @@ impl QueryEngine {
     ) -> Result<QueryResponse, QueryError> {
         let model_id = effective_query_model_id(&request);
         if let Err(err) = authorizer.authorize(principal, Action::Query, resource) {
-            self.emit_audit_event(build_query_audit_event(
+            let event = build_query_audit_event(
                 AuditOutcome::Denied,
                 &model_id,
                 Some(principal.subject.clone()),
                 Some(principal.tenant.clone()),
                 None,
                 Some(err.to_string()),
-            ));
-            return Err(err.into());
+            );
+            return self.finalize_with_audit(Err(err.into()), event);
         }
 
         self.execute_with_audit(
@@ -352,17 +373,20 @@ impl QueryEngine {
         authenticator: &JwtAuthenticator,
         model_id: &str,
     ) -> Result<Principal, QueryError> {
-        authenticator.authenticate(bearer_token).map_err(|err| {
-            self.emit_audit_event(build_query_audit_event(
-                AuditOutcome::Denied,
-                model_id,
-                None,
-                None,
-                None,
-                Some(err.to_string()),
-            ));
-            err.into()
-        })
+        match authenticator.authenticate(bearer_token) {
+            Ok(principal) => Ok(principal),
+            Err(err) => {
+                let event = build_query_audit_event(
+                    AuditOutcome::Denied,
+                    model_id,
+                    None,
+                    None,
+                    None,
+                    Some(err.to_string()),
+                );
+                self.finalize_with_audit(Err(err.into()), event)
+            }
+        }
     }
 
     pub async fn execute(&self, request: QueryRequest) -> Result<QueryResponse, QueryError> {
@@ -383,37 +407,59 @@ impl QueryEngine {
         let result = self
             .execute_internal(request, start, tenant_scope, session_owner)
             .await;
-        match &result {
-            Ok(response) => {
-                self.emit_audit_event(build_query_audit_event(
-                    AuditOutcome::Succeeded,
-                    &model_id,
-                    actor,
-                    tenant,
-                    response.snapshot_id.clone(),
-                    None,
-                ));
-            }
+        let event = match &result {
+            Ok(response) => build_query_audit_event(
+                AuditOutcome::Succeeded,
+                &model_id,
+                actor,
+                tenant,
+                response.snapshot_id.clone(),
+                None,
+            ),
             Err(err) => {
-                self.emit_audit_event(build_query_audit_event(
+                self.metrics
+                    .record_query(start.elapsed().as_micros() as u64, false);
+                build_query_audit_event(
                     AuditOutcome::Failed,
                     &model_id,
                     actor,
                     tenant,
                     None,
                     Some(err.to_string()),
-                ));
-                self.metrics
-                    .record_query(start.elapsed().as_micros() as u64, false);
+                )
             }
-        }
-        result
+        };
+        self.finalize_with_audit(result, event)
     }
 
-    fn emit_audit_event(&self, event: AuditEvent) {
-        if let Some(sink) = &self.audit_sink {
-            let _ = sink.record(event);
+    /// Records an audit event and folds the outcome into `result` according
+    /// to `audit_failure_policy`: under `Strict`, an audit write failure
+    /// turns a would-be success into an error; a pre-existing failure is
+    /// always preserved so audit-loss handling never masks the original
+    /// cause.
+    fn finalize_with_audit<T>(
+        &self,
+        result: Result<T, QueryError>,
+        event: AuditEvent,
+    ) -> Result<T, QueryError> {
+        match (result, self.emit_audit_event(event)) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(audit_err)) => Err(audit_err),
+            (Err(op_err), _) => Err(op_err),
         }
+    }
+
+    fn emit_audit_event(&self, event: AuditEvent) -> Result<(), QueryError> {
+        let Some(sink) = &self.audit_sink else {
+            return Ok(());
+        };
+        if let Err(err) = sink.record(event) {
+            self.audit_health.record_failure(&err);
+            if self.audit_failure_policy == AuditFailurePolicy::Strict {
+                return Err(QueryError::AuditFailure(err));
+            }
+        }
+        Ok(())
     }
 
     async fn lookup_semantic_cache(

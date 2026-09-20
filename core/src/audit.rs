@@ -68,6 +68,59 @@ pub trait AuditSink: Send + Sync {
     fn record(&self, event: AuditEvent) -> Result<(), AuditError>;
 }
 
+/// Governs what happens when a configured `AuditSink` fails to durably
+/// record an event. This only applies when a sink is actually configured;
+/// callers that intentionally run without a sink (e.g. anonymous/dev mode)
+/// are unaffected and never consult this policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuditFailurePolicy {
+    /// Fail the operation rather than report success when the audit event
+    /// could not be durably recorded. This is the default: configuring a
+    /// sink is a signal that audit evidence is mandatory, so silent loss
+    /// must not be allowed to masquerade as a successful operation.
+    #[default]
+    Strict,
+    /// Allow the operation to continue despite an audit write failure. The
+    /// failure is still surfaced via `AuditHealth` (logging + a degraded
+    /// counter) so operators have a reliable signal that audit evidence is
+    /// being lost.
+    BestEffort,
+}
+
+/// Tracks audit sink health so that operators have a metric/health signal
+/// when audit persistence degrades, independent of whether individual
+/// operations are configured to fail closed or continue best-effort.
+#[derive(Default)]
+pub struct AuditHealth {
+    failure_count: AtomicU64,
+    last_error: Mutex<Option<String>>,
+}
+
+impl AuditHealth {
+    /// Record an observed audit sink failure. Intentionally does not
+    /// attempt to write to the audit sink itself, since a sink that just
+    /// failed should not be retried recursively for its own failure.
+    pub fn record_failure(&self, error: &AuditError) {
+        self.failure_count.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(error.to_string());
+        }
+        tracing::error!(error = %error, "audit sink record failed");
+    }
+
+    pub fn failure_count(&self) -> u64 {
+        self.failure_count.load(Ordering::SeqCst)
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        self.failure_count() > 0
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.lock().ok().and_then(|guard| guard.clone())
+    }
+}
+
 #[derive(Default)]
 pub struct InMemoryAuditSink {
     events: Mutex<Vec<AuditEvent>>,
@@ -119,20 +172,24 @@ impl JsonlAuditSink {
             .append(true)
             .open(path)?;
 
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let content = String::from_utf8_lossy(&bytes);
+        let starting_sequence = if file.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+            0
+        } else {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            let content = String::from_utf8_lossy(&bytes);
 
-        // Recover the starting sequence from the max sequence observed among
-        // parseable lines, rather than counting lines. This tolerates
-        // corrupt/partial lines, non-UTF-8 content, and gaps left by prior
-        // write failures without under- or over-counting.
-        let starting_sequence = content
-            .lines()
-            .filter_map(|line| serde_json::from_str::<AuditEvent>(line).ok())
-            .map(|event| event.sequence)
-            .max()
-            .unwrap_or(0);
+            // Recover the starting sequence from the max sequence observed among
+            // parseable lines, rather than counting lines. This tolerates
+            // corrupt/partial lines, non-UTF-8 content, and gaps left by prior
+            // write failures without under- or over-counting.
+            content
+                .lines()
+                .filter_map(|line| serde_json::from_str::<AuditEvent>(line).ok())
+                .map(|event| event.sequence)
+                .max()
+                .unwrap_or(0)
+        };
 
         Ok(Self {
             state: Mutex::new(JsonlSinkState {
@@ -333,5 +390,38 @@ mod tests {
             .collect();
         sequences.sort_unstable();
         assert_eq!(sequences, (1..=8).collect::<Vec<u64>>());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn jsonl_sink_surfaces_write_failure_on_disk_full() {
+        // `/dev/full` always reports ENOSPC on write, letting us exercise the
+        // real write/flush failure path without relying on filesystem quotas
+        // or permission tricks that don't reliably fail an already-open fd.
+        let sink = JsonlAuditSink::open("/dev/full").unwrap();
+
+        let result = sink.record(AuditEvent::new(
+            AuditOperation::Ingest,
+            AuditOutcome::Succeeded,
+        ));
+
+        assert!(matches!(result, Err(AuditError::Io(_))));
+    }
+
+    #[test]
+    fn audit_health_tracks_failures_without_recursing_into_the_sink() {
+        let health = AuditHealth::default();
+        assert!(!health.is_degraded());
+        assert_eq!(health.failure_count(), 0);
+
+        health.record_failure(&AuditError::LockPoisoned);
+        health.record_failure(&AuditError::LockPoisoned);
+
+        assert!(health.is_degraded());
+        assert_eq!(health.failure_count(), 2);
+        assert_eq!(
+            health.last_error().as_deref(),
+            Some("audit sink lock poisoned")
+        );
     }
 }
