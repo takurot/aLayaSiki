@@ -1,10 +1,10 @@
 import argparse
 import json
 import time
+import warnings
 from pathlib import Path
 
 import faiss
-import matplotlib.pyplot as plt
 import numpy as np
 import usearch
 
@@ -76,13 +76,18 @@ def write_outputs(results, json_output: Path, png_output: Path):
         json.dump(results, f, ensure_ascii=False, indent=2)
     print(f"Saved results to {json_output}")
 
-    names = list(results["metrics"].keys())
-    search_times = [results["metrics"][name]["search_sec"] for name in names]
-    plt.bar(names, search_times)
-    plt.title("Search Time")
-    plt.ylabel("Seconds")
-    plt.savefig(png_output)
-    print(f"Saved plot to {png_output}")
+    try:
+        import matplotlib.pyplot as plt
+
+        names = list(results["metrics"].keys())
+        search_times = [results["metrics"][name]["search_sec"] for name in names]
+        plt.bar(names, search_times)
+        plt.title("Search Time")
+        plt.ylabel("Seconds")
+        plt.savefig(png_output)
+        print(f"Saved plot to {png_output}")
+    except ImportError as exc:
+        warnings.warn(f"Skipping plot generation: matplotlib unavailable ({exc})")
 
 
 def main():
