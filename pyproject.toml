@@ -1,0 +1,14 @@
+# Dependency metadata only, mirroring benchmarks/requirements.txt for
+# tooling/humans that expect standard PEP 621 metadata. Not an installable
+# distribution (no [build-system] table) — the repo root is not a Python
+# package; install via `pip install -r benchmarks/requirements.txt` instead.
+[project]
+name = "alayasiki-benchmarks"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy<2.0.0",
+    "usearch",
+    "faiss-cpu",
+    "matplotlib",
+]

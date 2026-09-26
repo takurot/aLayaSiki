@@ -97,10 +97,17 @@ cargo test -p ingestion --test e2e_pipeline_test -- --nocapture   # ingest -> qu
 `benchmarks/benchmark_suite.py` runs the PR-14 benchmark set (Rust criterion
 benches + a Python ANN benchmark) and writes normalized JSON/Markdown artifacts
 into `benchmarks/results/`. Past runs are preserved under timestamped
-`benchmarks/results_archive_*/` directories.
+`benchmarks/results_archive_*/` directories. See
+[`docs/E2E_EVALUATION.md`](docs/E2E_EVALUATION.md) for the Python dependency
+constraints (`benchmarks/requirements.txt` / root `pyproject.toml`) and the
+`numpy`/`faiss-cpu` ABI pitfall they prevent.
+
+Use an explicit interpreter version (matching CI's Python 3.11) when creating
+the venv so the wheels resolved match the interpreter actually used, rather
+than relying on whatever `python3` happens to point to:
 
 ```sh
-python3 -m venv .venv-benchmarks
+python3.11 -m venv .venv-benchmarks
 .venv-benchmarks/bin/pip install -r benchmarks/requirements.txt
 
 # PR-14 baseline suite (operational latency + GraphRAG + ANN)
