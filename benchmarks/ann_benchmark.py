@@ -85,9 +85,10 @@ def write_outputs(results, json_output: Path, png_output: Path):
         plt.title("Search Time")
         plt.ylabel("Seconds")
         plt.savefig(png_output)
+        plt.close()
         print(f"Saved plot to {png_output}")
-    except ImportError as exc:
-        warnings.warn(f"Skipping plot generation: matplotlib unavailable ({exc})")
+    except Exception as exc:
+        warnings.warn(f"Skipping plot generation: {exc}")
 
 
 def main():
