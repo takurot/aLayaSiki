@@ -10,5 +10,6 @@ __pycache__/
 .serena/
 temp/
 test_failure.log
+/benchmarks/results/
 /coverage/
 /lcov.info

@@ -87,6 +87,7 @@ impl ClientError {
     }
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SdkTransport: Send + Sync {
     async fn ingest(&self, request: IngestionRequest) -> Result<IngestResult, ClientError>;

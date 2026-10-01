@@ -8,6 +8,7 @@ pub struct Entity {
     pub confidence: f32,
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait EntityExtractor: Send + Sync {
     async fn extract(&self, text: &str) -> anyhow::Result<Vec<Entity>>;

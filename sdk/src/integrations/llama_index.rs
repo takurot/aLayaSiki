@@ -25,6 +25,7 @@ pub struct LlamaGraphQuery {
     pub snapshot_id: Option<String>,
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait VectorStore {
     async fn add(&self, request: IngestionRequest) -> Result<IngestResult, ClientError>;
@@ -34,6 +35,7 @@ pub trait VectorStore {
     ) -> Result<QueryResponse, ClientError>;
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait GraphStore {
     async fn query_subgraph(&self, query: LlamaGraphQuery) -> Result<QueryResponse, ClientError>;
