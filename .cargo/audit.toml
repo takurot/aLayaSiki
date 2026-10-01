@@ -1,5 +1,18 @@
 [advisories]
 ignore = [
-    "RUSTSEC-2026-0187", # lopdf 0.34.0 via pdf-extract — stack overflow in deeply nested PDF (pre-existing, tracked separately)
-    "RUSTSEC-2026-0190", # anyhow 1.0.100 — unsoundness in downcast_mut (pre-existing, tracked separately)
+    # RUSTSEC-2026-0187 — lopdf 0.34.0 (via ingestion -> pdf-extract) stack
+    # overflow / DoS on deeply nested PDF objects. Reachable: pdf-extract is
+    # used by `ingestion::extract::extract_pdf_text` to parse bytes from
+    # ingested documents, which may originate from untrusted uploads. No
+    # upstream fix available yet. Tracked: issue #85.
+    # Reviewed: 2026-10-01. Re-review by: 2027-01-01.
+    "RUSTSEC-2026-0187",
+    # RUSTSEC-2026-0190 — anyhow 1.0.100 unsoundness in `downcast_mut`.
+    # Exposure: anyhow is a direct dependency of ingestion/jobs/slm, but this
+    # codebase does not call `Error::downcast_mut` (verified via repo-wide
+    # grep), so the unsound path is not exercised by our code. Transitive
+    # crates could still reach it; re-check on dependency upgrades. Tracked:
+    # issue #85.
+    # Reviewed: 2026-10-01. Re-review by: 2027-01-01.
+    "RUSTSEC-2026-0190",
 ]
