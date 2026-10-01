@@ -12,14 +12,13 @@ hnsw = ["dep:usearch"]
 
 [dependencies]
 alayasiki-core.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "sync", "macros", "rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
 thiserror.workspace = true
 dashmap.workspace = true
 rkyv.workspace = true
 crc32fast = "1.3"
 bytes = "1.0"
 tracing.workspace = true
-tempfile.workspace = true
 serde.workspace = true
 aes-gcm = "0.10"
 sha2.workspace = true
@@ -27,4 +26,8 @@ hkdf = "0.12"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 usearch = { version = "2", optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
