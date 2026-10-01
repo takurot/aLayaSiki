@@ -1,17 +1,20 @@
 [package]
 name = "alayasiki-sdk"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+publish = false
 
 [dependencies]
-alayasiki-core = { path = "../core" }
-ingestion = { path = "../ingestion" }
-query = { path = "../query" }
-storage = { path = "../storage" }
-thiserror = "1.0"
-tokio = { version = "1.0", features = ["time", "rt-multi-thread", "macros"] }
-async-trait = "0.1"
+alayasiki-core.workspace = true
+ingestion.workspace = true
+query.workspace = true
+storage.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time", "rt-multi-thread", "macros"] }
+async-trait.workspace = true
 
 [dev-dependencies]
-tempfile = "3.3"
-tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
