@@ -11,6 +11,7 @@ pub enum Job {
     },
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait JobQueue: Send + Sync {
     async fn enqueue(&self, job: Job) -> anyhow::Result<()>;

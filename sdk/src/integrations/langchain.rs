@@ -25,6 +25,7 @@ pub struct LangChainGraphQuery {
     pub snapshot_id: Option<String>,
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait GraphVectorStore {
     async fn add_documents(
