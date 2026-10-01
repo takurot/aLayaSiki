@@ -2,10 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
-    />
+    <!--
+      The Content-Security-Policy meta tag is injected by the
+      inject-production-csp Vite plugin (see vite.config.ts) only for
+      production builds, since `script-src 'self'` would block the
+      inline React-refresh preamble that @vitejs/plugin-react injects
+      during `vite dev`. `frame-ancestors` is intentionally omitted here
+      because it is ignored in a meta-tag CSP per spec; clickjacking
+      protection must be delivered via an HTTP response header
+      (CSP frame-ancestors or X-Frame-Options) by whatever serves the
+      built assets.
+    -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="aLayaSiki Explorer: interactive UI for exploring the aLayaSiki GraphRAG knowledge graph." />
