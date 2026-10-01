@@ -1,25 +1,28 @@
 [package]
 name = "ingestion"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+publish = false
 
 [dependencies]
-alayasiki-core = { path = "../core" }
-storage = { path = "../storage" }
-jobs = { path = "../jobs" }
-tokio = { version = "1.0", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-thiserror = "1.0"
-tracing = "0.1"
-sha2 = "0.10"
+alayasiki-core.workspace = true
+storage.workspace = true
+jobs.workspace = true
+tokio = { workspace = true, features = ["full"] }
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sha2.workspace = true
 text-splitter = "0.4"
 pdf-extract = "0.7"
-dashmap = "5.5"
-anyhow = "1.0"
+dashmap.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
-tempfile = "3.3"
-slm = { path = "../slm" }
-async-trait = "0.1"
-query = { path = "../query" }
-jsonwebtoken = "9"
+tempfile.workspace = true
+slm.workspace = true
+async-trait.workspace = true
+query.workspace = true
+jsonwebtoken.workspace = true
