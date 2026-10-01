@@ -16,9 +16,14 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "numpy<2.0.0",
-    "usearch",
-    "faiss-cpu",
-    "matplotlib",
+    "usearch>=2.9.0",
+    "faiss-cpu>=1.7.4",
+    "matplotlib>=3.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
 ]
 ```
 
@@ -36,6 +41,18 @@ time with errors such as:
 ```
 ModuleNotFoundError: No module named 'numpy.core._multiarray_umath'
 ```
+
+`usearch`, `faiss-cpu`, and `matplotlib` now carry minimum-version floors
+for reproducibility, but intentionally stay otherwise unpinned (not capped)
+so they can resolve alongside the `numpy<2.0.0` constraint above; capping
+them too would risk the same kind of resolution deadlock the numpy pin was
+added to prevent. The `[build-system]` table and the `numpy<2.0.0` /
+`requires-python` constraints are deliberately left as-is: both were set by
+a prior incident fix (issue #55) for the ABI breakage described above, and
+removing the numpy cap or declaring this an installable package would
+reopen that failure mode without a corresponding numpy/faiss-cpu
+compatibility verification. A `dev` extra (`pytest`) is now available for
+running `benchmarks/tests/`.
 
 ## Installing into a virtualenv
 

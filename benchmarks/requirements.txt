@@ -1,4 +1,4 @@
 numpy<2.0.0
-usearch
-faiss-cpu
-matplotlib
+usearch>=2.9.0
+faiss-cpu>=1.7.4
+matplotlib>=3.7.0
