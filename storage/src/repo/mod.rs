@@ -462,31 +462,22 @@ impl Repository {
         k: usize,
         session: Option<&SessionGraph>,
     ) -> Vec<(u64, f32)> {
-        let mut results = {
+        let results = {
             let index = self.hyper_index.read().await;
             index.search_vector(query, k)
         };
 
-        if let Some(session) = session {
-            use alayasiki_core::embedding::cosine_similarity;
-            let mut session_results: Vec<(u64, f32)> = session
-                .nodes
-                .values()
-                .filter_map(|node| {
-                    cosine_similarity(query, &node.embedding).map(|sim| (node.id, sim))
-                })
-                .collect();
+        let Some(session) = session else {
+            return results;
+        };
 
-            results.append(&mut session_results);
-            results.sort_by(|a, b| {
-                a.0.cmp(&b.0)
-                    .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
-            });
-            results.dedup_by_key(|(id, _)| *id);
-            results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            results.truncate(k);
-        }
-        results
+        use alayasiki_core::embedding::cosine_similarity;
+        let session_results = session
+            .nodes
+            .values()
+            .filter_map(|node| cosine_similarity(query, &node.embedding).map(|sim| (node.id, sim)));
+
+        search::merge_vector_results(results, session_results, k)
     }
 
     pub async fn search_vector_with_session(
@@ -505,7 +496,7 @@ impl Repository {
         node_id: u64,
         session: Option<&SessionGraph>,
     ) -> Vec<(u64, String, f32)> {
-        let mut results: Vec<(u64, String, f32)> = {
+        let results: Vec<(u64, String, f32)> = {
             let index = self.hyper_index.read().await;
             index
                 .graph_index
@@ -514,14 +505,18 @@ impl Repository {
                 .cloned()
                 .collect()
         };
-        if let Some(session) = session {
-            for edge in &session.edges {
-                if edge.source == node_id {
-                    results.push((edge.target, edge.relation.clone(), edge.weight));
-                }
-            }
-        }
-        results
+
+        let Some(session) = session else {
+            return results;
+        };
+
+        let session_edges = session
+            .edges
+            .iter()
+            .filter(|edge| edge.source == node_id)
+            .map(|edge| (edge.target, edge.relation.clone(), edge.weight));
+
+        search::merge_edges(results, session_edges)
     }
 
     pub async fn neighbors_with_session(
