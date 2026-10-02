@@ -4,6 +4,53 @@ use alayasiki_core::embedding::cosine_similarity;
 use alayasiki_core::model::Node;
 use std::collections::HashMap;
 
+/// Merges session vector results over snapshot/live results, with session entries
+/// always taking precedence over a base entry for the same node id regardless of
+/// similarity score. Ties are broken by ascending node id for determinism.
+pub(crate) fn merge_vector_results(
+    base: impl IntoIterator<Item = (u64, f32)>,
+    session: impl IntoIterator<Item = (u64, f32)>,
+    k: usize,
+) -> Vec<(u64, f32)> {
+    let mut merged: HashMap<u64, f32> = base.into_iter().collect();
+    for (id, sim) in session {
+        merged.insert(id, sim);
+    }
+
+    let mut merged: Vec<(u64, f32)> = merged.into_iter().collect();
+    merged.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    merged.truncate(k);
+    merged
+}
+
+/// Merges session edges over snapshot/live edges for a single source node, deduping
+/// by `(target, relation)` with session weight taking precedence. The result is
+/// sorted by `(target, relation)` for deterministic ordering across runs.
+pub(crate) fn merge_edges(
+    base: impl IntoIterator<Item = (u64, String, f32)>,
+    session: impl IntoIterator<Item = (u64, String, f32)>,
+) -> Vec<(u64, String, f32)> {
+    let mut merged: HashMap<(u64, String), f32> = base
+        .into_iter()
+        .map(|(target, relation, weight)| ((target, relation), weight))
+        .collect();
+
+    for (target, relation, weight) in session {
+        merged.insert((target, relation), weight);
+    }
+
+    let mut merged: Vec<(u64, String, f32)> = merged
+        .into_iter()
+        .map(|((target, relation), weight)| (target, relation, weight))
+        .collect();
+    merged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    merged
+}
+
 impl SnapshotView {
     pub fn snapshot_id(&self) -> &str {
         &self.snapshot_id
@@ -49,17 +96,12 @@ impl SnapshotView {
             return results;
         };
 
-        let mut merged: HashMap<u64, f32> = results.into_iter().collect();
-        for node in session.nodes.values() {
-            if let Some(sim) = cosine_similarity(query, &node.embedding) {
-                merged.insert(node.id, sim);
-            }
-        }
+        let session_results = session
+            .nodes
+            .values()
+            .filter_map(|node| cosine_similarity(query, &node.embedding).map(|sim| (node.id, sim)));
 
-        let mut merged: Vec<(u64, f32)> = merged.into_iter().collect();
-        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        merged.truncate(k);
-        merged
+        merge_vector_results(results, session_results, k)
     }
 
     pub fn neighbors(&self, node_id: u64) -> Vec<(u64, String, f32)> {
@@ -80,22 +122,13 @@ impl SnapshotView {
             return self.neighbors(node_id);
         };
 
-        let mut merged: HashMap<(u64, String), f32> = self
-            .neighbors(node_id)
-            .into_iter()
-            .map(|(target, relation, weight)| ((target, relation), weight))
-            .collect();
+        let session_edges = session
+            .edges
+            .iter()
+            .filter(|edge| edge.source == node_id)
+            .map(|edge| (edge.target, edge.relation.clone(), edge.weight));
 
-        for edge in &session.edges {
-            if edge.source == node_id {
-                merged.insert((edge.target, edge.relation.clone()), edge.weight);
-            }
-        }
-
-        merged
-            .into_iter()
-            .map(|((target, relation), weight)| (target, relation, weight))
-            .collect()
+        merge_edges(self.neighbors(node_id), session_edges)
     }
 
     pub fn get_edge_metadata_bulk(
@@ -163,12 +196,24 @@ mod tests {
         let snapshot = snapshot_with(&[], &[(1, 2, "links", 1.0)]);
         let session = session_with(&[], &[(1, 3, "links", 0.5)]);
 
-        let mut results = snapshot.neighbors_with_session(1, Some(&session));
-        results.sort_by_key(|(target, _, _)| *target);
+        let results = snapshot.neighbors_with_session(1, Some(&session));
 
         assert_eq!(
             results,
             vec![(2, "links".to_string(), 1.0), (3, "links".to_string(), 0.5)]
+        );
+    }
+
+    #[test]
+    fn neighbors_with_session_is_deterministically_ordered() {
+        let snapshot = snapshot_with(&[], &[(1, 3, "links", 1.0)]);
+        let session = session_with(&[], &[(1, 2, "links", 0.5)]);
+
+        let results = snapshot.neighbors_with_session(1, Some(&session));
+
+        assert_eq!(
+            results,
+            vec![(2, "links".to_string(), 0.5), (3, "links".to_string(), 1.0)]
         );
     }
 
@@ -189,11 +234,15 @@ mod tests {
         let snapshot = snapshot_with(&[(1, vec![1.0, 0.0])], &[]);
         let session = session_with(&[(2, vec![0.0, 1.0])], &[]);
 
-        let mut results = snapshot.search_vector_with_session(&[1.0, 0.0], 5, Some(&session));
-        results.sort_by_key(|(id, _)| *id);
+        let results = snapshot.search_vector_with_session(&[1.0, 0.0], 5, Some(&session));
 
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, 1);
-        assert_eq!(results[1].0, 2);
+        assert_eq!(results, vec![(1, 1.0), (2, 0.0)]);
+    }
+
+    #[test]
+    fn merge_vector_results_breaks_similarity_ties_by_ascending_id() {
+        let results = merge_vector_results(vec![(2, 1.0), (1, 1.0)], vec![], 5);
+
+        assert_eq!(results, vec![(1, 1.0), (2, 1.0)]);
     }
 }

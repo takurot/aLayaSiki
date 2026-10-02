@@ -852,6 +852,78 @@ async fn test_session_owner_enforced_for_ingest_and_query() {
 }
 
 #[tokio::test]
+async fn test_neighbors_with_session_dedups_shared_edge_preferring_session_weight() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("neighbors_session_dedup.wal");
+    let repo = Repository::open(&wal_path).await.unwrap();
+
+    repo.put_node(Node::new(1, vec![1.0], "node-1".to_string()))
+        .await
+        .unwrap();
+    repo.put_node(Node::new(2, vec![2.0], "node-2".to_string()))
+        .await
+        .unwrap();
+    repo.put_edge(Edge::new(1, 2, "links", 1.0)).await.unwrap();
+
+    let session_id = "session-neighbors-dedup";
+    repo.insert_edge_to_session(session_id, Edge::new(1, 2, "links", 0.5));
+
+    let results = repo.neighbors_with_session(1, Some(session_id)).await;
+
+    assert_eq!(results, vec![(2, "links".to_string(), 0.5)]);
+}
+
+#[tokio::test]
+async fn test_neighbors_with_session_is_deterministically_ordered() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("neighbors_session_order.wal");
+    let repo = Repository::open(&wal_path).await.unwrap();
+
+    repo.put_node(Node::new(1, vec![1.0], "node-1".to_string()))
+        .await
+        .unwrap();
+    repo.put_node(Node::new(3, vec![3.0], "node-3".to_string()))
+        .await
+        .unwrap();
+    repo.put_edge(Edge::new(1, 3, "links", 1.0)).await.unwrap();
+
+    let session_id = "session-neighbors-order";
+    repo.insert_edge_to_session(session_id, Edge::new(1, 2, "links", 0.5));
+
+    let results = repo.neighbors_with_session(1, Some(session_id)).await;
+
+    assert_eq!(
+        results,
+        vec![(2, "links".to_string(), 0.5), (3, "links".to_string(), 1.0)]
+    );
+}
+
+#[tokio::test]
+async fn test_search_vector_with_session_prefers_session_result_over_higher_similarity() {
+    let dir = tempdir().unwrap();
+    let wal_path = dir.path().join("search_vector_session_dedup.wal");
+    let repo = Repository::open(&wal_path).await.unwrap();
+
+    repo.put_node(Node::new(1, vec![1.0, 0.0], "node".to_string()))
+        .await
+        .unwrap();
+
+    let session_id = "session-search-dedup";
+    repo.ingest_to_session(
+        session_id,
+        Node::new(1, vec![0.0, 1.0], "session-node".to_string()),
+    );
+
+    let results = repo
+        .search_vector_with_session(&[1.0, 0.0], 5, Some(session_id))
+        .await;
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, 1);
+    assert_eq!(results[0].1, 0.0);
+}
+
+#[tokio::test]
 async fn test_repo_open_rejects_corrupt_wal_entry_payload_without_panic() {
     let dir = tempdir().unwrap();
     let wal_path = dir.path().join("corrupt_entry.wal");
