@@ -19,17 +19,6 @@ const DetailsPanel: React.FC<DetailsPanelProps> = ({ selectedNode, onClose }) =>
     );
   }
 
-  const parseMetadata = (metadata?: string) => {
-    if (!metadata) return null;
-    try {
-      return JSON.parse(metadata);
-    } catch {
-      return { raw: metadata };
-    }
-  };
-
-  const parsedMetadata = parseMetadata(selectedNode.metadata);
-
   return (
     <div className="h-full flex flex-col bg-white border-l border-slate-200 overflow-y-auto">
       <div className="flex items-center justify-between p-4 border-b border-slate-200 bg-slate-50">
@@ -93,11 +82,11 @@ const DetailsPanel: React.FC<DetailsPanelProps> = ({ selectedNode, onClose }) =>
           </div>
         )}
 
-        {parsedMetadata && (
+        {selectedNode.metadata && (
           <div className="space-y-2">
             <h4 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Metadata</h4>
             <div className="bg-slate-900 text-slate-200 p-3 rounded-md text-sm font-mono overflow-x-auto">
-              <pre>{JSON.stringify(parsedMetadata, null, 2)}</pre>
+              <pre>{JSON.stringify(selectedNode.metadata, null, 2)}</pre>
             </div>
           </div>
         )}
