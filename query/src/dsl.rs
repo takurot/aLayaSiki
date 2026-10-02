@@ -83,6 +83,11 @@ pub struct QueryRequest {
     pub time_travel: Option<String>,
 }
 
+/// `QueryRequest::default()` always fails `validate()` because `query` is
+/// empty. This is intentional: there is no sensible non-empty default query
+/// text, so the default is only useful as a builder starting point (e.g.
+/// `QueryRequest { query: "...".into(), ..Default::default() }`), never as a
+/// directly-submittable request.
 impl Default for QueryRequest {
     fn default() -> Self {
         Self {
@@ -130,6 +135,8 @@ pub enum QueryValidationError {
     InvalidModelId,
     #[error("snapshot_id must not be empty when provided")]
     InvalidSnapshotId,
+    #[error("session_id must not be empty when provided")]
+    InvalidSessionId,
     #[error("time_travel must be YYYY-MM-DD or RFC3339 format")]
     InvalidTimeTravelFormat,
 }
@@ -168,6 +175,11 @@ impl QueryRequest {
                 return Err(QueryValidationError::InvalidSnapshotId);
             }
         }
+        if let Some(session_id) = &self.session_id {
+            if session_id.trim().is_empty() {
+                return Err(QueryValidationError::InvalidSessionId);
+            }
+        }
         if let Some(range) = &self.filters.time_range {
             let from = parse_date(&range.from)?;
             let to = parse_date(&range.to)?;
@@ -188,7 +200,17 @@ fn has_empty_values(values: &[String]) -> bool {
     values.iter().any(|value| value.trim().is_empty())
 }
 
+/// Strict YYYY-MM-DD check: `chrono::NaiveDate::parse_from_str` accepts
+/// non-zero-padded values (e.g. "2024-6-1") which the error message does
+/// not advertise, so reject anything that isn't exactly 10 characters.
+fn is_strict_ymd(input: &str) -> bool {
+    input.len() == 10
+}
+
 fn parse_date(input: &str) -> Result<chrono::NaiveDate, QueryValidationError> {
+    if !is_strict_ymd(input) {
+        return Err(QueryValidationError::InvalidTimeRangeFormat);
+    }
     chrono::NaiveDate::parse_from_str(input, "%Y-%m-%d")
         .map_err(|_| QueryValidationError::InvalidTimeRangeFormat)
 }
@@ -196,7 +218,7 @@ fn parse_date(input: &str) -> Result<chrono::NaiveDate, QueryValidationError> {
 /// Validate time_travel format: accepts YYYY-MM-DD or RFC3339.
 fn is_valid_time_travel(input: &str) -> bool {
     // Try YYYY-MM-DD first
-    if chrono::NaiveDate::parse_from_str(input, "%Y-%m-%d").is_ok() {
+    if is_strict_ymd(input) && chrono::NaiveDate::parse_from_str(input, "%Y-%m-%d").is_ok() {
         return true;
     }
     // Try RFC3339 (e.g. "2024-06-01T10:00:00Z")
@@ -204,4 +226,99 @@ fn is_valid_time_travel(input: &str) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_request() -> QueryRequest {
+        QueryRequest {
+            query: "x".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn default_request_fails_validation_due_to_empty_query() {
+        assert_eq!(
+            QueryRequest::default().validate(),
+            Err(QueryValidationError::EmptyQuery)
+        );
+    }
+
+    #[test]
+    fn empty_session_id_is_rejected() {
+        let request = QueryRequest {
+            session_id: Some("  ".to_string()),
+            ..base_request()
+        };
+        assert_eq!(
+            request.validate(),
+            Err(QueryValidationError::InvalidSessionId)
+        );
+    }
+
+    #[test]
+    fn non_empty_session_id_is_accepted() {
+        let request = QueryRequest {
+            session_id: Some("session-1".to_string()),
+            ..base_request()
+        };
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn non_zero_padded_time_range_date_is_rejected() {
+        let request = QueryRequest {
+            filters: QueryFilters {
+                time_range: Some(TimeRange {
+                    from: "2024-6-1".to_string(),
+                    to: "2024-12-31".to_string(),
+                }),
+                ..Default::default()
+            },
+            ..base_request()
+        };
+        assert_eq!(
+            request.validate(),
+            Err(QueryValidationError::InvalidTimeRangeFormat)
+        );
+    }
+
+    #[test]
+    fn zero_padded_time_range_date_is_accepted() {
+        let request = QueryRequest {
+            filters: QueryFilters {
+                time_range: Some(TimeRange {
+                    from: "2024-06-01".to_string(),
+                    to: "2024-12-31".to_string(),
+                }),
+                ..Default::default()
+            },
+            ..base_request()
+        };
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn non_zero_padded_time_travel_date_is_rejected() {
+        let request = QueryRequest {
+            time_travel: Some("2024-6-1".to_string()),
+            ..base_request()
+        };
+        assert_eq!(
+            request.validate(),
+            Err(QueryValidationError::InvalidTimeTravelFormat)
+        );
+    }
+
+    #[test]
+    fn rfc3339_time_travel_is_accepted() {
+        let request = QueryRequest {
+            time_travel: Some("2024-06-01T10:00:00Z".to_string()),
+            ..base_request()
+        };
+        assert!(request.validate().is_ok());
+    }
 }
