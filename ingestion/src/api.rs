@@ -30,12 +30,12 @@ pub struct JsonIngestionPayload {
 
 impl JsonIngestionPayload {
     pub fn into_request(self) -> IngestionRequest {
-        let content_type = self.content_type.to_lowercase();
-        if content_type == "application/json" {
+        let normalized_content_type = normalize_mime_type(&self.content_type);
+        if normalized_content_type == "application/json" {
             IngestionRequest::File {
                 filename: "payload.json".to_string(),
                 content: self.content.into_bytes(),
-                mime_type: self.content_type,
+                mime_type: normalized_content_type,
                 metadata: self.metadata,
                 idempotency_key: self.idempotency_key,
                 model_id: self.model_id,
@@ -175,24 +175,97 @@ fn with_modality(mut metadata: HashMap<String, String>, modality: &str) -> HashM
     metadata
 }
 
+fn normalize_mime_type(mime_type: &str) -> String {
+    mime_type
+        .split(';')
+        .next()
+        .expect("split always yields at least one item")
+        .trim()
+        .to_lowercase()
+}
+
 fn validate_media_mime_type(
     mime_type: &str,
     expected_modality: &'static str,
 ) -> Result<(), ApiPayloadError> {
-    let normalized_mime = mime_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-    let expected_prefix = format!("{expected_modality}/");
+    let normalized_mime = normalize_mime_type(mime_type);
 
-    if normalized_mime.starts_with(&expected_prefix) {
+    let is_match = normalized_mime
+        .strip_prefix(expected_modality)
+        .is_some_and(|rest| rest.starts_with('/'));
+
+    if is_match {
         Ok(())
     } else {
         Err(ApiPayloadError::InvalidMediaMimeType {
             expected_modality,
             actual_mime_type: mime_type.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn json_payload(content_type: &str) -> JsonIngestionPayload {
+        JsonIngestionPayload {
+            content: "{}".to_string(),
+            content_type: content_type.to_string(),
+            metadata: HashMap::new(),
+            idempotency_key: None,
+            model_id: None,
+            embedding_model_id: None,
+            extraction_model_id: None,
+        }
+    }
+
+    #[test]
+    fn into_request_treats_json_with_charset_param_as_file() {
+        let request = json_payload("application/json; charset=utf-8").into_request();
+        match request {
+            IngestionRequest::File { mime_type, .. } => {
+                assert_eq!(mime_type, "application/json");
+            }
+            IngestionRequest::Text { .. } => panic!("expected File request for JSON content type"),
+        }
+    }
+
+    #[test]
+    fn into_request_normalizes_mixed_case_json_content_type() {
+        let request = json_payload("Application/JSON").into_request();
+        match request {
+            IngestionRequest::File { mime_type, .. } => {
+                assert_eq!(mime_type, "application/json");
+            }
+            IngestionRequest::Text { .. } => panic!("expected File request for JSON content type"),
+        }
+    }
+
+    #[test]
+    fn into_request_treats_plain_text_as_text() {
+        let request = json_payload("text/plain").into_request();
+        assert!(matches!(request, IngestionRequest::Text { .. }));
+    }
+
+    #[test]
+    fn validate_media_mime_type_accepts_params_and_mixed_case() {
+        assert!(validate_media_mime_type("Image/PNG; charset=binary", "image").is_ok());
+    }
+
+    #[test]
+    fn validate_media_mime_type_rejects_mismatched_modality() {
+        assert_eq!(
+            validate_media_mime_type("video/mp4", "image"),
+            Err(ApiPayloadError::InvalidMediaMimeType {
+                expected_modality: "image",
+                actual_mime_type: "video/mp4".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_media_mime_type_rejects_prefix_without_slash() {
+        assert!(validate_media_mime_type("imageography/png", "image").is_err());
     }
 }
