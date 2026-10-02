@@ -16,6 +16,12 @@ interface SimulationLink extends d3.SimulationLinkDatum<SimulationNode> {
   relation_type: number;
 }
 
+// Nodes may carry either a `community` or a `group` id; fall back to 0 when neither is set.
+const communityOf = (n: Pick<Node, 'community' | 'group'>): number => n.community || n.group || 0;
+
+// d3.polygonHull on every community is O(n log n) per frame; only recompute every Nth tick.
+const HULL_UPDATE_INTERVAL = 5;
+
 const GraphExplorer: React.FC<GraphExplorerProps> = ({
   data,
   onNodeClick,
@@ -24,6 +30,11 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
 }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const onNodeClickRef = useRef(onNodeClick);
+
+  useEffect(() => {
+    onNodeClickRef.current = onNodeClick;
+  }, [onNodeClick]);
 
   useEffect(() => {
     if (!svgRef.current || !containerRef.current || !data || data.nodes.length === 0) return;
@@ -83,8 +94,8 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
     const drag = (simulation: d3.Simulation<SimulationNode, undefined>) => {
       function dragstarted(event: any) {
         if (!event.active) simulation.alphaTarget(0.3).restart();
-        event.subject.fx = event.subject.x;
-        event.subject.fy = event.subject.y;
+        event.subject.fx = event.subject.x ?? 0;
+        event.subject.fy = event.subject.y ?? 0;
       }
 
       function dragged(event: any) {
@@ -105,7 +116,7 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
     };
 
     // Draw community groupings (convex hulls) - basic visual clustering
-    const communityGroups = Array.from(d3.group(nodes, d => d.community || d.group || 0));
+    const communityGroups = Array.from(d3.group(nodes, communityOf));
 
     // We only draw hulls for communities with > 2 nodes
     const validCommunities = communityGroups.filter(c => c[1].length > 2);
@@ -131,10 +142,10 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
       .attr('class', 'graph-node')
       .attr('id', d => `node-${d.id}`)
       .attr('r', 20)
-      .attr('fill', d => colorScale(String(d.community || d.group || 0)))
+      .attr('fill', d => colorScale(String(communityOf(d))))
       .call(drag(simulation))
       .on('click', (_event, d) => {
-        onNodeClick(d as Node);
+        onNodeClickRef.current(d as Node);
       });
 
     // Add labels
@@ -154,24 +165,30 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
       .text(d => `${d.label} (ID: ${d.id})\nCommunity: ${d.community || 'N/A'}`);
 
     // Tick function to update positions
+    let tickCount = 0;
     simulation.on('tick', () => {
+      tickCount += 1;
+
       link
-        .attr('x1', d => (d.source as SimulationNode).x!)
-        .attr('y1', d => (d.source as SimulationNode).y!)
-        .attr('x2', d => (d.target as SimulationNode).x!)
-        .attr('y2', d => (d.target as SimulationNode).y!);
+        .attr('x1', d => (d.source as SimulationNode).x ?? 0)
+        .attr('y1', d => (d.source as SimulationNode).y ?? 0)
+        .attr('x2', d => (d.target as SimulationNode).x ?? 0)
+        .attr('y2', d => (d.target as SimulationNode).y ?? 0);
 
       node
-        .attr('cx', d => d.x!)
-        .attr('cy', d => d.y!);
+        .attr('cx', d => d.x ?? 0)
+        .attr('cy', d => d.y ?? 0);
 
       label
-        .attr('x', d => d.x!)
-        .attr('y', d => d.y!);
+        .attr('x', d => d.x ?? 0)
+        .attr('y', d => d.y ?? 0);
+
+      // Convex hulls are expensive to recompute; throttle to every Nth tick.
+      if (tickCount % HULL_UPDATE_INTERVAL !== 0) return;
 
       // Update community hulls
       hullPath.attr('d', d => {
-        const points: [number, number][] = d[1].map(n => [n.x || 0, n.y || 0]);
+        const points: [number, number][] = d[1].map(n => [n.x ?? 0, n.y ?? 0]);
         if (points.length < 3) return null;
         // Add padding to hull
         const hull = d3.polygonHull(points);
@@ -189,13 +206,19 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
       simulation.alpha(0.3).restart();
     };
 
-    window.addEventListener('resize', handleResize);
+    // Observe the container directly: a plain `window` resize event misses
+    // layout-driven size changes (e.g. sidebar toggles), leaving stale
+    // dimensions and an off-center graph.
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(containerRef.current);
 
     return () => {
       simulation.stop();
-      window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
     };
-  }, [data, onNodeClick]);
+    // onNodeClick is intentionally omitted: it's read via onNodeClickRef so
+    // a new callback identity on parent re-render doesn't tear down the simulation.
+  }, [data]);
 
   // Handle highlights externally without restarting simulation
   useEffect(() => {
