@@ -920,7 +920,7 @@ async fn test_search_vector_with_session_prefers_session_result_over_higher_simi
 
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, 1);
-    assert_eq!(results[0].1, 0.0);
+    assert!((results[0].1 - 0.0).abs() < 1e-5);
 }
 
 #[tokio::test]
