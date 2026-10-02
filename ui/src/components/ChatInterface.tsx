@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Bot, User, Sparkles, Network } from 'lucide-react';
+import { getMockChatResponse } from '../mockChatResponse';
 
 interface Message {
   id: string;
@@ -22,6 +23,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onHighlightNodes }) => {
     }
   ]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const responseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -31,12 +33,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onHighlightNodes }) => {
     scrollToBottom();
   }, [messages]);
 
+  useEffect(() => {
+    return () => {
+      if (responseTimerRef.current) {
+        clearTimeout(responseTimerRef.current);
+      }
+    };
+  }, []);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
 
     const userMsg: Message = {
-      id: `msg-${Date.now()}`,
+      id: crypto.randomUUID(),
       sender: 'user',
       text: input,
     };
@@ -45,26 +55,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onHighlightNodes }) => {
     setInput('');
 
     // Simulate AI response and node highlighting
-    setTimeout(() => {
-      let responseText = `I found some relevant information regarding "${userMsg.text}".`;
-      let highlightIds: number[] = [];
-
-      // Simple mock logic based on input keywords
-      const lowerInput = userMsg.text.toLowerCase();
-      if (lowerInput.includes('apple') || lowerInput.includes('vision pro')) {
-        responseText += ' Here are the key entities connected to Apple and Vision Pro.';
-        highlightIds = [1, 2, 4]; // Mock IDs matching the sample data
-      } else if (lowerInput.includes('meta') || lowerInput.includes('quest')) {
-        responseText += ' Here is the cluster related to Meta and VR/AR competition.';
-        highlightIds = [3, 4];
-      } else {
-        responseText = 'I processed your query. Let me highlight some key nodes across the graph that might be relevant.';
-        // Highlight some random nodes to show interaction
-        highlightIds = [1, 5, 8];
-      }
+    responseTimerRef.current = setTimeout(() => {
+      const { text: responseText, highlightIds } = getMockChatResponse(userMsg.text);
 
       const aiMsg: Message = {
-        id: `msg-${Date.now() + 1}`,
+        id: crypto.randomUUID(),
         sender: 'ai',
         text: responseText,
         highlightedNodeIds: highlightIds,
@@ -114,7 +109,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ onHighlightNodes }) => {
               {msg.highlightedNodeIds && msg.highlightedNodeIds.length > 0 && (
                 <div
                   className="mt-1 flex items-center gap-1 text-xs text-indigo-600 cursor-pointer hover:underline font-medium"
-                  onClick={() => onHighlightNodes(msg.highlightedNodeIds!)}
+                  onClick={() => onHighlightNodes(msg.highlightedNodeIds ?? [])}
                 >
                   <Network size={12} />
                   View {msg.highlightedNodeIds.length} related nodes
