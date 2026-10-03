@@ -1,7 +1,6 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useRef } from 'react';
 import * as d3 from 'd3';
-import type { Node, GraphData } from '../types';
+import type { Node, GraphData, RelationType } from '../types';
 
 interface GraphExplorerProps {
   data: GraphData;
@@ -13,11 +12,10 @@ interface GraphExplorerProps {
 // Extend d3 simulation types to include x and y which are injected by d3
 interface SimulationNode extends Node, d3.SimulationNodeDatum { }
 interface SimulationLink extends d3.SimulationLinkDatum<SimulationNode> {
-  relation_type: number;
+  relation_type: RelationType;
 }
 
-// Nodes may carry either a `community` or a `group` id; fall back to 0 when neither is set.
-const communityOf = (n: Pick<Node, 'community' | 'group'>): number => n.community || n.group || 0;
+const communityOf = (node: Pick<Node, 'community'>): number => node.community ?? 0;
 
 // d3.polygonHull on every community is O(n log n) per frame; only recompute every Nth tick.
 const HULL_UPDATE_INTERVAL = 5;
@@ -66,13 +64,13 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
     // Add zoom capabilities
     const zoom = d3.zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.1, 4])
-      .on('zoom', (event) => {
-        g.attr('transform', event.transform);
+      .on('zoom', (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => {
+        g.attr('transform', event.transform.toString());
       });
 
-    svg.call(zoom as any);
+    svg.call(zoom);
 
-    // Color scale for communities/groups
+    // Color scale for communities
     const colorScale = d3.scaleOrdinal(d3.schemeCategory10);
 
     const simulation = d3.forceSimulation<SimulationNode>(nodes)
@@ -92,24 +90,24 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
 
     // Define drag behavior
     const drag = (simulation: d3.Simulation<SimulationNode, undefined>) => {
-      function dragstarted(event: any) {
+      function dragstarted(event: d3.D3DragEvent<SVGCircleElement, SimulationNode, SimulationNode>) {
         if (!event.active) simulation.alphaTarget(0.3).restart();
         event.subject.fx = event.subject.x ?? 0;
         event.subject.fy = event.subject.y ?? 0;
       }
 
-      function dragged(event: any) {
+      function dragged(event: d3.D3DragEvent<SVGCircleElement, SimulationNode, SimulationNode>) {
         event.subject.fx = event.x;
         event.subject.fy = event.y;
       }
 
-      function dragended(event: any) {
+      function dragended(event: d3.D3DragEvent<SVGCircleElement, SimulationNode, SimulationNode>) {
         if (!event.active) simulation.alphaTarget(0);
         event.subject.fx = null;
         event.subject.fy = null;
       }
 
-      return d3.drag<any, SimulationNode>()
+      return d3.drag<SVGCircleElement, SimulationNode, SimulationNode>()
         .on('start', dragstarted)
         .on('drag', dragged)
         .on('end', dragended);
@@ -136,7 +134,7 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
     const node = g.append('g')
       .attr('stroke', '#fff')
       .attr('stroke-width', 1.5)
-      .selectAll('circle')
+      .selectAll<SVGCircleElement, SimulationNode>('circle')
       .data(nodes)
       .join('circle')
       .attr('class', 'graph-node')
@@ -162,7 +160,7 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
 
     // Add titles (tooltips)
     node.append('title')
-      .text(d => `${d.label} (ID: ${d.id})\nCommunity: ${d.community || 'N/A'}`);
+      .text(d => `${d.label} (ID: ${d.id})\nCommunity: ${d.community ?? 'N/A'}`);
 
     // Tick function to update positions
     let tickCount = 0;
@@ -225,13 +223,13 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
     if (!svgRef.current) return;
     const svg = d3.select(svgRef.current);
 
-    svg.selectAll('.graph-node')
-      .attr('stroke', (d: any) => {
+    svg.selectAll<SVGCircleElement, SimulationNode>('.graph-node')
+      .attr('stroke', (d) => {
         if (d.id === selectedNodeId) return '#333';
         if (d.id === highlightedNodeId) return '#ff0000';
         return '#fff';
       })
-      .attr('stroke-width', (d: any) => {
+      .attr('stroke-width', (d) => {
         if (d.id === selectedNodeId) return 4;
         if (d.id === highlightedNodeId) return 5;
         return 1.5;

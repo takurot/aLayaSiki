@@ -9,27 +9,27 @@ import { DatabaseZap } from 'lucide-react';
 // Sample mock data resembling aLayaSiki entities
 const mockData: GraphData = {
   nodes: [
-    { id: 1, label: 'Apple', community: 1, embedding: [0.1, 0.2, 0.3], confidence: 0.95, provenance: 'apple_news_2024.pdf', metadata: '{"type": "Company"}' },
-    { id: 2, label: 'Vision Pro', community: 1, embedding: [0.4, 0.5, 0.6], confidence: 0.88, provenance: 'apple_news_2024.pdf', metadata: '{"type": "Product", "category": "AR/VR"}' },
-    { id: 3, label: 'Meta', community: 2, embedding: [0.7, 0.8, 0.9], confidence: 0.92, provenance: 'tech_report.json', metadata: '{"type": "Company"}' },
-    { id: 4, label: 'Meta Quest 3', community: 2, embedding: [0.11, 0.12, 0.13], confidence: 0.99, provenance: 'tech_report.json', metadata: '{"type": "Product", "category": "VR"}' },
-    { id: 5, label: 'Tim Cook', community: 1, embedding: [0.14, 0.15, 0.16], confidence: 0.91, provenance: 'apple_news_2024.pdf', metadata: '{"type": "Person", "role": "CEO"}' },
-    { id: 6, label: 'Mark Zuckerberg', community: 2, embedding: [0.17, 0.18, 0.19], confidence: 0.94, provenance: 'tech_report.json', metadata: '{"type": "Person", "role": "CEO"}' },
-    { id: 7, label: 'Spatial Computing', community: 3, embedding: [0.21, 0.22, 0.23], confidence: 0.85, provenance: 'industry_analysis.md', metadata: '{"type": "Concept"}' },
-    { id: 8, label: 'Virtual Reality', community: 3, embedding: [0.24, 0.25, 0.26], confidence: 0.89, provenance: 'industry_analysis.md', metadata: '{"type": "Concept"}' },
-    { id: 9, label: 'Mixed Reality', community: 3, embedding: [0.27, 0.28, 0.29], confidence: 0.87, provenance: 'industry_analysis.md', metadata: '{"type": "Concept"}' },
+    { id: 1, label: 'Apple', community: 1, embedding: [0.1, 0.2, 0.3], confidence: 0.95, provenance: 'apple_news_2024.pdf', metadata: { type: 'Company' } },
+    { id: 2, label: 'Vision Pro', community: 1, embedding: [0.4, 0.5, 0.6], confidence: 0.88, provenance: 'apple_news_2024.pdf', metadata: { type: 'Product', category: 'AR/VR' } },
+    { id: 3, label: 'Meta', community: 2, embedding: [0.7, 0.8, 0.9], confidence: 0.92, provenance: 'tech_report.json', metadata: { type: 'Company' } },
+    { id: 4, label: 'Meta Quest 3', community: 2, embedding: [0.11, 0.12, 0.13], confidence: 0.99, provenance: 'tech_report.json', metadata: { type: 'Product', category: 'VR' } },
+    { id: 5, label: 'Tim Cook', community: 1, embedding: [0.14, 0.15, 0.16], confidence: 0.91, provenance: 'apple_news_2024.pdf', metadata: { type: 'Person', role: 'CEO' } },
+    { id: 6, label: 'Mark Zuckerberg', community: 2, embedding: [0.17, 0.18, 0.19], confidence: 0.94, provenance: 'tech_report.json', metadata: { type: 'Person', role: 'CEO' } },
+    { id: 7, label: 'Spatial Computing', community: 3, embedding: [0.21, 0.22, 0.23], confidence: 0.85, provenance: 'industry_analysis.md', metadata: { type: 'Concept' } },
+    { id: 8, label: 'Virtual Reality', community: 3, embedding: [0.24, 0.25, 0.26], confidence: 0.89, provenance: 'industry_analysis.md', metadata: { type: 'Concept' } },
+    { id: 9, label: 'Mixed Reality', community: 3, embedding: [0.27, 0.28, 0.29], confidence: 0.87, provenance: 'industry_analysis.md', metadata: { type: 'Concept' } },
   ],
   edges: [
-    { source: 1, target: 2, relation_type: 1, weight: 1.0 }, // Apple makes Vision Pro
-    { source: 1, target: 5, relation_type: 2, weight: 1.0 }, // Apple CEO is Tim Cook
-    { source: 3, target: 4, relation_type: 1, weight: 1.0 }, // Meta makes Quest 3
-    { source: 3, target: 6, relation_type: 2, weight: 1.0 }, // Meta CEO is Mark Z
-    { source: 2, target: 7, relation_type: 3, weight: 0.9 }, // Vision pro is Spatial Computing
-    { source: 4, target: 8, relation_type: 3, weight: 0.9 }, // Quest is VR
-    { source: 7, target: 9, relation_type: 4, weight: 0.8 }, // Spatial related to MR
-    { source: 8, target: 9, relation_type: 4, weight: 0.8 }, // VR related to MR
-    { source: 2, target: 4, relation_type: 5, weight: 0.7 }, // Vision Pro competes with Quest
-    { source: 1, target: 3, relation_type: 5, weight: 0.8 }, // Apple competes with Meta
+    { source: 1, target: 2, relation_type: 'produces', weight: 1.0 }, // Apple makes Vision Pro
+    { source: 1, target: 5, relation_type: 'leads', weight: 1.0 }, // Apple CEO is Tim Cook
+    { source: 3, target: 4, relation_type: 'produces', weight: 1.0 }, // Meta makes Quest 3
+    { source: 3, target: 6, relation_type: 'leads', weight: 1.0 }, // Meta CEO is Mark Z
+    { source: 2, target: 7, relation_type: 'is_a', weight: 0.9 }, // Vision pro is Spatial Computing
+    { source: 4, target: 8, relation_type: 'is_a', weight: 0.9 }, // Quest is VR
+    { source: 7, target: 9, relation_type: 'related_to', weight: 0.8 }, // Spatial related to MR
+    { source: 8, target: 9, relation_type: 'related_to', weight: 0.8 }, // VR related to MR
+    { source: 2, target: 4, relation_type: 'competes_with', weight: 0.7 }, // Vision Pro competes with Quest
+    { source: 1, target: 3, relation_type: 'competes_with', weight: 0.8 }, // Apple competes with Meta
   ]
 };
 
