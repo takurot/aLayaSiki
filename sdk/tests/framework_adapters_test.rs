@@ -38,6 +38,8 @@ async fn test_llama_vector_store_add_and_similarity_search() {
         LlamaVectorQuery {
             query: "battery plants osaka".to_string(),
             top_k: 5,
+            mode: None,
+            search_mode: None,
             model_id: Some("embedding-default-v1".to_string()),
             snapshot_id: None,
         },
@@ -83,6 +85,9 @@ async fn test_llama_graph_store_normalizes_invalid_depth_and_top_k() {
             query: "electric vehicle strategy".to_string(),
             top_k: 0,
             depth: 0,
+            mode: None,
+            search_mode: None,
+            relation_types: None,
             model_id: None,
             snapshot_id: None,
         },
