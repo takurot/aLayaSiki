@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,9 +15,8 @@ pub enum ContentKind {
 
 pub fn detect_content_kind(mime_type: &str, filename: Option<&str>) -> ContentKind {
     let mime = mime_type
-        .split(';')
-        .next()
-        .unwrap_or("")
+        .split_once(';')
+        .map_or(mime_type, |(head, _)| head)
         .trim()
         .to_lowercase();
     if mime.starts_with("image/") {
@@ -58,19 +58,34 @@ pub fn extract_utf8(bytes: &[u8]) -> Result<String, std::string::FromUtf8Error> 
 }
 
 pub fn extract_pdf_text(bytes: &[u8]) -> Option<String> {
-    // pdf-extract panics on some errors/signals, and handles bytes via Cursor?
-    // pdf_extract::extract_text_from_mem (if available) or generic read
+    // pdf_extract::extract_text_from_mem panics on some malformed PDFs instead of
+    // returning an Err, so it must be run behind catch_unwind to avoid aborting
+    // the whole ingestion process on a single corrupt document.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        pdf_extract::extract_text_from_mem(bytes)
+    }));
 
-    // pdf-extract 0.7 API: extract_text(path) or extract_text_from_mem(bytes)
-    match pdf_extract::extract_text_from_mem(bytes) {
-        Ok(text) => {
+    match result {
+        Ok(Ok(text)) => {
             if text.trim().is_empty() {
                 None
             } else {
                 Some(text)
             }
         }
-        Err(_) => None,
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "pdf text extraction failed");
+            None
+        }
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            tracing::warn!(panic = %message, "pdf text extraction panicked");
+            None
+        }
     }
 }
 
@@ -111,7 +126,7 @@ fn extract_metadata_text(metadata: &HashMap<String, String>, fields: &[&str]) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_audio_text, extract_image_text};
+    use super::{extract_audio_text, extract_image_text, extract_pdf_text};
     use std::collections::HashMap;
 
     #[test]
@@ -147,5 +162,40 @@ mod tests {
         let text = extract_audio_text(&metadata).unwrap();
 
         assert_eq!(text, "Tokyo pilot launch");
+    }
+
+    #[test]
+    fn pdf_extraction_returns_none_instead_of_panicking_on_missing_mediabox() {
+        // Structurally valid PDF whose page dictionary omits /MediaBox, which makes
+        // pdf_extract panic internally at `get_inherited(..).expect("MediaBox")` in
+        // pdf-extract's lib.rs. This must be caught by catch_unwind rather than
+        // aborting the whole ingestion process.
+        let bytes: &[u8] = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n162\n%%EOF";
+
+        let result = extract_pdf_text(bytes);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn pdf_extraction_returns_none_on_parse_error_without_panicking() {
+        // Malformed PDF that pdf_extract rejects with an Err (not a panic), e.g. a
+        // missing/invalid xref table. Covers the Ok(Err(_)) branch distinctly from
+        // the caught-panic branch above.
+        let bytes =
+            b"%PDF-1.1\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Size 1 >>\n%%EOF";
+
+        let result = extract_pdf_text(bytes);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn pdf_extraction_returns_none_on_garbage_bytes() {
+        let bytes = b"not a pdf at all";
+
+        let result = extract_pdf_text(bytes);
+
+        assert_eq!(result, None);
     }
 }
