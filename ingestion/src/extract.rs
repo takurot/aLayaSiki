@@ -14,9 +14,11 @@ pub enum ContentKind {
 }
 
 pub fn detect_content_kind(mime_type: &str, filename: Option<&str>) -> ContentKind {
-    // `str::split` always yields at least one item (even for an empty string),
-    // so `next()` on a non-empty pattern is infallible here; no `unwrap_or` needed.
-    let mime = mime_type.split(';').next().unwrap().trim().to_lowercase();
+    let mime = mime_type
+        .split_once(';')
+        .map_or(mime_type, |(head, _)| head)
+        .trim()
+        .to_lowercase();
     if mime.starts_with("image/") {
         return ContentKind::Image;
     }
@@ -163,10 +165,23 @@ mod tests {
     }
 
     #[test]
-    fn pdf_extraction_returns_none_instead_of_panicking_on_malformed_input() {
-        // Well-formed PDF syntax but missing the trailer's Root entry, which
-        // makes pdf_extract panic internally (see get_catalog in pdf-extract's
-        // lib.rs). This must be caught rather than aborting the process.
+    fn pdf_extraction_returns_none_instead_of_panicking_on_missing_mediabox() {
+        // Structurally valid PDF whose page dictionary omits /MediaBox, which makes
+        // pdf_extract panic internally at `get_inherited(..).expect("MediaBox")` in
+        // pdf-extract's lib.rs. This must be caught by catch_unwind rather than
+        // aborting the whole ingestion process.
+        let bytes: &[u8] = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \n0000000115 00000 n \ntrailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n162\n%%EOF";
+
+        let result = extract_pdf_text(bytes);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn pdf_extraction_returns_none_on_parse_error_without_panicking() {
+        // Malformed PDF that pdf_extract rejects with an Err (not a panic), e.g. a
+        // missing/invalid xref table. Covers the Ok(Err(_)) branch distinctly from
+        // the caught-panic branch above.
         let bytes =
             b"%PDF-1.1\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Size 1 >>\n%%EOF";
 
