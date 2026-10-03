@@ -25,7 +25,10 @@ pub struct RetryConfig {
     pub max_backoff: Duration,
     pub backoff_multiplier: f64,
     /// Overall wall-clock budget for a single operation's retry loop,
-    /// including all attempts and backoff delays. `None` means unbounded.
+    /// including all attempts and backoff delays. Each in-flight attempt is
+    /// bounded by the remaining budget via `tokio::time::timeout`, so a
+    /// single hung attempt cannot stall the caller past the deadline.
+    /// `None` means unbounded.
     pub deadline: Option<Duration>,
     /// By default, ingestion requests are only retried when they carry an
     /// `idempotency_key`, since retrying a request whose WAL append already
@@ -63,16 +66,20 @@ impl RetryConfig {
     }
 
     /// Computes the backoff delay for the given retry attempt using
-    /// exponential backoff with full jitter: the result is sampled
-    /// uniformly from `[0, computed_delay]` to avoid thundering-herd
-    /// retries across clients hitting the same transient error.
+    /// exponential backoff with equal jitter: the result is sampled
+    /// uniformly from `[computed_delay / 2, computed_delay]` to avoid
+    /// thundering-herd retries across clients hitting the same transient
+    /// error, while keeping a floor so retries against a momentarily
+    /// contended resource (e.g. an idempotency lock) don't hot-spin at a
+    /// near-zero delay.
     fn backoff_for_retry(&self, retry_number: usize) -> Duration {
         let retry_number = retry_number.max(1) as i32;
         let base_ms = self.initial_backoff.as_secs_f64() * 1_000.0;
         let max_ms = self.max_backoff.as_secs_f64() * 1_000.0;
         let delay_ms = (base_ms * self.backoff_multiplier.powi(retry_number - 1)).min(max_ms);
         let delay_ms = delay_ms.max(0.0);
-        let jittered_ms = fastrand::f64() * delay_ms;
+        let half_ms = delay_ms / 2.0;
+        let jittered_ms = half_ms + fastrand::f64() * half_ms;
         Duration::from_secs_f64(jittered_ms / 1_000.0)
     }
 }
@@ -93,6 +100,16 @@ pub enum ClientError {
     Ingestion(#[from] IngestionError),
     #[error("query failed: {0}")]
     Query(#[from] QueryError),
+    /// The retry loop's overall `RetryConfig::deadline` elapsed while an
+    /// attempt was still in flight. The underlying attempt keeps running on
+    /// its own spawned task (so the WAL/repository write is not torn down),
+    /// but this caller can no longer observe its outcome.
+    #[error("operation exceeded its retry deadline")]
+    DeadlineExceeded,
+    /// A retry attempt's task was cancelled (e.g. the Tokio runtime shut
+    /// down) before it could report an outcome.
+    #[error("retry attempt task was cancelled before completing")]
+    AttemptCancelled,
 }
 
 impl ClientError {
@@ -184,6 +201,13 @@ impl Client {
         &self.retry_config
     }
 
+    /// Note on cancellation: each retry attempt runs on its own spawned
+    /// task so dropping the future returned by this method (e.g. via an
+    /// external timeout) does not abort an in-flight WAL write. However,
+    /// if the caller stops awaiting, or `RetryConfig::deadline` elapses
+    /// mid-attempt (surfaced as `ClientError::DeadlineExceeded`), the
+    /// spawned attempt's eventual `Ok`/`Err` outcome is discarded -- there
+    /// is currently no channel for observing it after the fact.
     pub async fn ingest(&self, request: IngestionRequest) -> Result<IngestResult, ClientError> {
         // Retrying ingestion is only safe when the request is idempotent:
         // if the first attempt's WAL append succeeded but its ack was lost
@@ -231,9 +255,34 @@ impl Client {
             // completion instead of being torn down mid-write. This avoids
             // leaving the WAL/repository in a state that a subsequent retry
             // cannot safely reason about.
-            let result = tokio::spawn(op())
-                .await
-                .expect("retry attempt task panicked");
+            let handle = tokio::spawn(op());
+
+            // Bound this attempt by whatever remains of the overall
+            // deadline so a single hung attempt cannot stall the caller
+            // indefinitely. The spawned task itself is not aborted on
+            // timeout (that would reintroduce the mid-write teardown this
+            // spawn is meant to avoid) -- it keeps running in the
+            // background, but its outcome becomes unobservable to this
+            // caller.
+            let remaining = self
+                .retry_config
+                .deadline
+                .map(|deadline| deadline.saturating_sub(start.elapsed()));
+            let join_result = match remaining {
+                Some(remaining) => match tokio::time::timeout(remaining, handle).await {
+                    Ok(join_result) => join_result,
+                    Err(_elapsed) => return Err(ClientError::DeadlineExceeded),
+                },
+                None => handle.await,
+            };
+
+            let result = match join_result {
+                Ok(result) => result,
+                Err(join_err) if join_err.is_panic() => {
+                    std::panic::resume_unwind(join_err.into_panic())
+                }
+                Err(_cancelled) => return Err(ClientError::AttemptCancelled),
+            };
             match result {
                 Ok(value) => return Ok(value),
                 Err(err) => {

@@ -14,7 +14,7 @@ storage.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time", "rt-multi-thread", "macros"] }
 async-trait.workspace = true
-fastrand = "2.3"
+fastrand.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

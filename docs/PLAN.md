@@ -270,7 +270,7 @@
 - `sdk` crate (`alayasiki-sdk`) を追加し、`Client` / `InProcessTransport` / `ClientBuilder` を実装。
 - `Client::ingest` は `IngestionRequest` を受けて `IngestResult { node_ids, snapshot_id }` を返却。
 - `Client::query` は `QueryRequest` を受けて `QueryResponse` を返却し、既存 Query Engine と整合。
-- `RetryConfig`（max_attempts / initial_backoff / max_backoff / multiplier）を実装し、retryable エラー時に指数バックオフ再試行。
+- `RetryConfig`（max_attempts / initial_backoff / max_backoff / multiplier / deadline / retry_non_idempotent_ingestion）を実装し、retryable エラー時に等分ジッタ付き指数バックオフで再試行。`deadline` は各試行を `tokio::time::timeout` で包み、ハング中の単一試行が呼び出し元を無期限にブロックしないことを保証する。ingestion は `idempotency_key` が設定されている場合、または `retry_non_idempotent_ingestion` を明示的に opt-in した場合のみ自動リトライ対象になる。
 - `sdk/tests/client_test.rs` で ingest->query の一気通貫、retryable/non-retryable の再試行挙動、repo 注入ビルドを検証。
 - `sdk/examples/basic_client.rs` に SPEC の擬似コードに沿った最小サンプルを追加。
 - `sdk::integrations::llama_index` を追加し、`VectorStore`/`GraphStore` trait と `LlamaIndexAdapter` を実装。
