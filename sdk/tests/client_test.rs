@@ -79,6 +79,71 @@ async fn test_client_retries_retryable_ingest_error() {
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(2),
             backoff_multiplier: 2.0,
+            deadline: None,
+            retry_non_idempotent_ingestion: false,
+        },
+    );
+
+    let result = client
+        .ingest(IngestionRequest::Text {
+            content: "retry me".to_string(),
+            metadata: HashMap::new(),
+            idempotency_key: Some("retry-me-key".to_string()),
+            model_id: None,
+            embedding_model_id: None,
+            extraction_model_id: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.node_ids, vec![42]);
+    assert_eq!(result.snapshot_id, "wal-lsn-99");
+    assert_eq!(transport.attempts(), 3);
+}
+
+#[tokio::test]
+async fn test_client_does_not_retry_ingest_without_idempotency_key() {
+    let transport = Arc::new(FlakyIngestTransport::new(2));
+    let client = Client::new(
+        transport.clone(),
+        RetryConfig {
+            max_attempts: 4,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(2),
+            backoff_multiplier: 2.0,
+            deadline: None,
+            retry_non_idempotent_ingestion: false,
+        },
+    );
+
+    let err = client
+        .ingest(IngestionRequest::text(
+            "retry me".to_string(),
+            HashMap::new(),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ClientError::Ingestion(_)));
+    assert_eq!(
+        transport.attempts(),
+        1,
+        "non-idempotent ingest requests must not be retried"
+    );
+}
+
+#[tokio::test]
+async fn test_client_retries_non_idempotent_ingest_when_opted_in() {
+    let transport = Arc::new(FlakyIngestTransport::new(2));
+    let client = Client::new(
+        transport.clone(),
+        RetryConfig {
+            max_attempts: 4,
+            initial_backoff: Duration::from_millis(1),
+            max_backoff: Duration::from_millis(2),
+            backoff_multiplier: 2.0,
+            deadline: None,
+            retry_non_idempotent_ingestion: true,
         },
     );
 
@@ -91,8 +156,38 @@ async fn test_client_retries_retryable_ingest_error() {
         .unwrap();
 
     assert_eq!(result.node_ids, vec![42]);
-    assert_eq!(result.snapshot_id, "wal-lsn-99");
     assert_eq!(transport.attempts(), 3);
+}
+
+#[tokio::test]
+async fn test_client_respects_deadline_and_stops_retrying() {
+    let transport = Arc::new(FlakyIngestTransport::new(usize::MAX - 1));
+    let client = Client::new(
+        transport.clone(),
+        RetryConfig {
+            max_attempts: usize::MAX,
+            initial_backoff: Duration::from_millis(20),
+            max_backoff: Duration::from_millis(20),
+            backoff_multiplier: 1.0,
+            deadline: Some(Duration::from_millis(60)),
+            retry_non_idempotent_ingestion: true,
+        },
+    );
+
+    let err = client
+        .ingest(IngestionRequest::text(
+            "retry me".to_string(),
+            HashMap::new(),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, ClientError::Ingestion(_)));
+    assert!(
+        transport.attempts() < 10,
+        "deadline should have stopped retries well before the attempt cap, got {}",
+        transport.attempts()
+    );
 }
 
 #[tokio::test]
@@ -105,6 +200,8 @@ async fn test_client_does_not_retry_non_retryable_ingest_error() {
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(2),
             backoff_multiplier: 2.0,
+            deadline: None,
+            retry_non_idempotent_ingestion: false,
         },
     );
 
@@ -133,6 +230,8 @@ async fn test_client_retries_retryable_query_error() {
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(2),
             backoff_multiplier: 2.0,
+            deadline: None,
+            retry_non_idempotent_ingestion: false,
         },
     );
 
