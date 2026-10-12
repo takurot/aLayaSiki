@@ -28,6 +28,7 @@ query = { path = "query" }
 anyhow = "1.0"
 async-trait = "0.1"
 dashmap = "5.5"
+fastrand = "2.3"
 jsonwebtoken = "9.3"
 rkyv = { version = "0.8.17", features = ["std", "bytecheck"] }
 serde = { version = "1.0", features = ["derive"] }
