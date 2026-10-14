@@ -1,4 +1,4 @@
-use crate::chunker::{Chunker, ChunkingConfig, SemanticChunker};
+use crate::chunker::{CharacterChunker, Chunker, ChunkingConfig};
 use crate::embedding::{DeterministicEmbedder, Embedder};
 use crate::extract::{
     detect_content_kind, extract_audio_text, extract_image_text, extract_pdf_text, extract_utf8,
@@ -84,7 +84,7 @@ impl IngestionPipeline {
     pub fn new(repo: Arc<Repository>) -> Self {
         Self {
             repo,
-            chunker: Box::new(SemanticChunker::default()),
+            chunker: Box::new(CharacterChunker::default()),
             embedder: Box::new(DeterministicEmbedder::default()),
             policy: Box::new(NoOpPolicy),
             default_model_id: "embedding-default-v1".to_string(),
@@ -95,6 +95,17 @@ impl IngestionPipeline {
             audit_failure_policy: AuditFailurePolicy::default(),
             audit_health: Arc::new(AuditHealth::default()),
             governance_policy_store: None,
+        }
+    }
+
+    /// Compose ingestion using the chunking settings loaded by `AppConfig`.
+    pub fn with_config(repo: Arc<Repository>, config: &alayasiki_core::config::AppConfig) -> Self {
+        use alayasiki_core::config::ChunkingStrategy;
+        match config.chunking.strategy {
+            ChunkingStrategy::Character => Self::with_chunker(
+                repo,
+                Box::new(CharacterChunker::new(config.chunking.clone().into())),
+            ),
         }
     }
 
@@ -605,5 +616,5 @@ fn extract_request_text(
 
 #[allow(dead_code)]
 pub fn default_chunker() -> Box<dyn Chunker> {
-    Box::new(SemanticChunker::new(ChunkingConfig::default()))
+    Box::new(CharacterChunker::new(ChunkingConfig::default()))
 }

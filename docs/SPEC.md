@@ -112,7 +112,9 @@
 * **Multi-Modal Ingestion API:**
   * PDF, JSON, Markdown, 画像, 音声データをそのまま受け入れるエンドポイント。
 * **Auto-Chunking & Embedding:**
-  * 入力データの内容（意味の区切り）をSLMが解析し、動的にチャンク分割。自動でベクトル化を実行。
+  * 目標仕様: 入力データの内容（意味の区切り）をSLMが解析し、動的にチャンク分割。自動でベクトル化を実行。
+  * 現状 (Issue #105): デフォルトは `CharacterChunker` の文字数上限付き分割（base 1000 Unicode scalar values + 最大100文字の固定 overlap）。text-splitter の構造/空白ヒューリスティックを使用し、SLM/埋め込みによる意味分割は未実装。`AppConfig.chunking` → `IngestionPipeline::with_config` で設定を適用し、代替実装は `Chunker` trait で注入可能。未対応 strategy は設定エラー。
+  * サイズ計測: `chunk_chars` は Unicode scalar values、`chunk_bytes` は UTF-8 bytes。token 数は未計測。既存保存済みの `chunk_chars` (bytes) は自動移行しない。
 * **Auto-Graph Construction (自動グラフ構築):** 【最大の差別化機能】
   * テキスト読み込み時に、SLMが**固有表現抽出 (NER)** と **関係抽出 (Relation Extraction)** をリアルタイムで実行。
   * 例: 「A社はB社を買収した」というテキストから、`Node(A社)` --`[acquired]`--> `Node(B社)` というグラフ構造を自動生成し、データベースに格納する。

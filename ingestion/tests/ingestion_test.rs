@@ -1,5 +1,5 @@
 use alayasiki_core::ingest::{Chunk, IngestionRequest};
-use ingestion::chunker::{BoxFuture, Chunker, SemanticChunker};
+use ingestion::chunker::{BoxFuture, CharacterChunker, Chunker};
 use ingestion::embedding::DeterministicEmbedder;
 use ingestion::policy::BasicPolicy;
 use ingestion::processor::IngestionPipeline;
@@ -171,7 +171,7 @@ async fn test_ingestion_policy_forbidden_word() {
     let policy = BasicPolicy::new(vec!["forbidden".to_string()], true);
     let pipeline = IngestionPipeline::with_components(
         repo.clone(),
-        Box::new(SemanticChunker::default()),
+        Box::new(CharacterChunker::default()),
         Box::new(DeterministicEmbedder::default()),
         Box::new(policy),
         "embedding-default-v1",

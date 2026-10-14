@@ -10,7 +10,7 @@ use alayasiki_core::governance::{
 };
 use alayasiki_core::ingest::IngestionRequest;
 use ingestion::api::{AudioIngestionPayload, ImageIngestionPayload};
-use ingestion::chunker::SemanticChunker;
+use ingestion::chunker::CharacterChunker;
 use ingestion::embedding::DeterministicEmbedder;
 use ingestion::policy::BasicPolicy;
 use ingestion::processor::{IngestionError, IngestionPipeline};
@@ -429,7 +429,7 @@ async fn test_e2e_pii_masking_persists_and_queries_masked_content() {
     let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
     let pipeline = IngestionPipeline::with_components(
         repo.clone(),
-        Box::new(SemanticChunker::default()),
+        Box::new(CharacterChunker::default()),
         Box::new(DeterministicEmbedder::default()),
         Box::new(BasicPolicy::new(Vec::new(), true)),
         "embedding-default-v1",

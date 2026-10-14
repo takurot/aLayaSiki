@@ -748,3 +748,41 @@ async fn test_client_builder_rejects_conflicting_repo_and_wal_path() {
         Err(ClientBuildError::ConflictingRepositoryAndWalPath)
     ));
 }
+
+#[tokio::test]
+async fn chunking_settings_apply_to_both_standard_builder_paths() {
+    use alayasiki_core::config::AppConfig;
+    let config: AppConfig = serde_json::from_value(serde_json::json!({
+        "server": {"host": "127.0.0.1", "port": 8080},
+        "storage": {"data_dir": "./data", "wal_flush_interval_ms": 100},
+        "chunking": {"strategy": "character", "max_chars": 3, "overlap_chars": 0}
+    }))
+    .unwrap();
+    for connect in [false, true] {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sdk-chunking.wal");
+        let builder = ClientBuilder::new().app_config(config.clone());
+        let client = if connect {
+            builder.connect_in_process(&path).await.unwrap()
+        } else {
+            builder
+                .with_repo(Arc::new(Repository::open(&path).await.unwrap()))
+                .build()
+                .unwrap()
+        };
+        let request = IngestionRequest::Text {
+            content: "あいうえおか".into(),
+            metadata: HashMap::new(),
+            idempotency_key: Some("sdk-chunking".into()),
+            model_id: None,
+            embedding_model_id: None,
+            extraction_model_id: None,
+        };
+        let result = client.ingest(request.clone()).await.unwrap();
+        assert_eq!(result.node_ids.len(), 2);
+        assert_eq!(
+            result.node_ids,
+            client.ingest(request).await.unwrap().node_ids
+        );
+    }
+}
