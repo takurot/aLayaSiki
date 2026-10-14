@@ -72,6 +72,19 @@ impl Worker {
         }
     }
 
+    pub fn with_durable_registry(
+        repo: Arc<Repository>,
+        registry: Arc<ModelRegistry>,
+        default_model_ref: impl Into<String>,
+    ) -> Self {
+        Self {
+            receiver: None,
+            repo,
+            registry,
+            default_model_ref: default_model_ref.into(),
+        }
+    }
+
     pub async fn run(mut self) {
         info!("Worker started");
         let Some(mut receiver) = self.receiver.take() else {
@@ -102,13 +115,28 @@ impl Worker {
     /// Drive extraction from a [`DurableJobQueue`], acknowledging completion (after
     /// flushing the graph WAL so extracted nodes/edges are durable before the job is
     /// retired) or reporting failures for bounded retry / dead-lettering.
-    pub async fn run_durable(
+    pub async fn run_durable(self, queue: Arc<DurableJobQueue>, rx: mpsc::Receiver<JobEnvelope>) {
+        let (_stop, shutdown) = tokio::sync::watch::channel(false);
+        self.run_durable_until_shutdown(queue, rx, shutdown).await;
+    }
+
+    /// Stops between jobs, never cancelling an in-flight graph/WAL mutation.
+    pub async fn run_durable_until_shutdown(
         self,
         queue: Arc<DurableJobQueue>,
         mut rx: mpsc::Receiver<JobEnvelope>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) {
         info!("Durable worker started");
-        while let Some(envelope) = rx.recv().await {
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+            let envelope = tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                envelope = rx.recv() => match envelope { Some(envelope) => envelope, None => break },
+            };
             let id = envelope.id;
             let started = Instant::now();
             match envelope.job {
@@ -163,6 +191,7 @@ impl Worker {
         let extraction_model_ref = format!("{}@{}", resolved.model_id, resolved.version);
         let entities = resolved.extractor.extract(content).await?;
 
+        let mut mutations = Vec::new();
         for entity in entities {
             // Stable ID generation for entity node using Sha256
             let mut hasher = Sha256::new();
@@ -190,11 +219,7 @@ impl Worker {
                 ]),
             };
 
-            if let Err(e) = self.repo.put_node(entity_node).await {
-                error!("Failed to put entity node {}: {}", target_id, e);
-                // Continue to try putting edge? Maybe edge will fail if node missing in some DBs,
-                // but our Repo/HyperIndex might allow it. Better to log and proceed.
-            }
+            mutations.push(storage::repo::IndexMutation::PutNode(entity_node));
 
             // Create Edge
             let edge = alayasiki_core::model::Edge {
@@ -211,15 +236,9 @@ impl Worker {
                 ]),
             };
 
-            if let Err(e) = self.repo.put_edge(edge.clone()).await {
-                error!("Failed to put edge: {}", e);
-            } else {
-                info!(
-                    "Created edge from {} to {} ({})",
-                    node_id, target_id, entity.text
-                );
-            }
+            mutations.push(storage::repo::IndexMutation::PutEdge(edge));
         }
+        self.repo.apply_index_transaction(mutations).await?;
         Ok(())
     }
 }
