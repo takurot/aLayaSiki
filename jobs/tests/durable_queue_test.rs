@@ -374,6 +374,16 @@ async fn durable_worker_processes_job_and_completes() {
     let dir = tempdir().unwrap();
     let repo = Arc::new(Repository::open(dir.path().join("repo.wal")).await.unwrap());
 
+    // Extraction jobs refer to chunk nodes already persisted by ingestion.
+    repo.put_node(alayasiki_core::model::Node {
+        id: 9999,
+        data: "Rust and AI".into(),
+        embedding: vec![],
+        metadata: Default::default(),
+    })
+    .await
+    .unwrap();
+
     let config = DurableQueueConfig {
         max_attempts: 3,
         base_backoff: Duration::ZERO,
@@ -435,6 +445,16 @@ impl EntityExtractor for ConditionalFailingExtractor {
 async fn durable_worker_dead_letters_failing_job_and_continues() {
     let dir = tempdir().unwrap();
     let repo = Arc::new(Repository::open(dir.path().join("repo.wal")).await.unwrap());
+
+    // Extraction jobs refer to chunk nodes already persisted by ingestion.
+    repo.put_node(alayasiki_core::model::Node {
+        id: 2,
+        data: "Rust and AI".into(),
+        embedding: vec![],
+        metadata: Default::default(),
+    })
+    .await
+    .unwrap();
 
     let config = DurableQueueConfig {
         max_attempts: 2,
@@ -673,4 +693,42 @@ async fn flip_last_byte(path: &std::path::Path) {
         .unwrap();
     file.write_all(&byte).await.unwrap();
     file.flush().await.unwrap();
+}
+
+#[tokio::test]
+async fn graph_write_failure_retries_instead_of_acknowledging_partial_extraction() {
+    let dir = tempdir().unwrap();
+    let repo = Arc::new(
+        Repository::open(dir.path().join("graph.wal"))
+            .await
+            .unwrap(),
+    );
+    let (queue, rx) =
+        DurableJobQueue::open_with_config(dir.path().join("jobs.wal"), zero_backoff())
+            .await
+            .unwrap();
+    let queue = Arc::new(queue);
+    let worker = Worker::new_durable(repo.clone(), Arc::new(MockEntityExtractor::new()));
+    // A missing source makes the atomic extraction transaction invalid.
+    queue
+        .enqueue_tracked(Job::ExtractEntities {
+            node_id: 999,
+            content: "Rust".into(),
+            model_id: "legacy-default".into(),
+            snapshot_id: "wal-lsn-0".into(),
+        })
+        .await
+        .unwrap();
+    let task = tokio::spawn(worker.run_durable(queue.clone(), rx));
+    assert!(
+        wait_until(Duration::from_secs(5), || async {
+            queue.stats().await.pending_depth == 0
+        })
+        .await
+    );
+    assert_eq!(queue.stats().await.completed, 0);
+    assert_eq!(queue.stats().await.dead_lettered, 1);
+    assert!(repo.list_node_ids().await.is_empty());
+    task.abort();
+    let _ = task.await;
 }

@@ -91,6 +91,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "alayasiki-runtime"
+version = "0.1.0"
+dependencies = [
+ "alayasiki-core",
+ "anyhow",
+ "async-trait",
+ "ingestion",
+ "jobs",
+ "query",
+ "slm",
+ "storage",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "alayasiki-sdk"
 version = "0.1.0"
 dependencies = [

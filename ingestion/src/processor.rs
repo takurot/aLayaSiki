@@ -81,6 +81,7 @@ pub struct IngestionPipeline {
 }
 
 impl IngestionPipeline {
+    /// Storage/vector ingestion only; use `alayasiki-runtime` for autonomous extraction.
     pub fn new(repo: Arc<Repository>) -> Self {
         Self {
             repo,
@@ -147,6 +148,14 @@ impl IngestionPipeline {
             audit_health: Arc::new(AuditHealth::default()),
             governance_policy_store: None,
         }
+    }
+
+    pub fn with_policy(self, policy: Box<dyn ContentPolicy>) -> Self {
+        Self { policy, ..self }
+    }
+
+    pub fn set_default_extraction_model_id(&mut self, model_ref: String) {
+        self.default_extraction_model_id = model_ref;
     }
 
     pub fn set_job_queue(&mut self, queue: Arc<dyn JobQueue>) {

@@ -1,0 +1,21 @@
+[package]
+name = "alayasiki-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+alayasiki-core.workspace = true
+storage.workspace = true
+ingestion.workspace = true
+query.workspace = true
+jobs.workspace = true
+slm.workspace = true
+tokio = { workspace = true, features = ["full"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true

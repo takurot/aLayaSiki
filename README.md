@@ -266,3 +266,32 @@ Unless You explicitly state otherwise, any contribution intentionally
 submitted for inclusion in the work by You, as defined in the Apache-2.0
 license, shall be dual licensed as above, without any additional terms or
 conditions.
+
+### Standard autonomous runtime
+
+Use `alayasiki_runtime::RuntimeBuilder::new(data_dir).start().await?` for the
+production composition. It owns the repository (`graph.wal` + snapshots),
+durable extraction queue (`jobs.wal`), registered extraction models, worker,
+ingestion pipeline and query engine. `runtime.ingestion().ingest(request)`
+automatically schedules extraction; `runtime.query()` uses the same repository.
+`wait_for_jobs(timeout)` waits for completion or dead-letter settlement; inspect
+`job_stats()` for failures. The current lightweight extractors are deterministic
+keyword rules, not real SLM inference (tracked in Issue #48).
+
+`IngestionPipeline::new(repo)` remains a lightweight storage/vector-only constructor
+and starts no tasks. Explicit `.extraction_enabled(false)` on the runtime builder
+selects this fail-safe mode. A custom registry/default extraction model can be
+supplied with `.with_registry(registry, model_ref)`; unresolved defaults fail startup.
+
+Stop accepting requests before calling `runtime.shutdown().await?`. Shutdown
+signals the worker to stop at a job boundary, joins it and flushes the graph WAL. Unfinished extraction jobs
+remain pending in the dedicated WAL and replay on next startup (at-least-once).
+Dropping the runtime signals shutdown but cannot join; explicit shutdown is required
+before reopening the same data directory. A blocked extractor can delay shutdown.
+Use `with_ingestion_config(|pipeline| pipeline.with_policy(Box::new(policy)))`
+to configure PII masking; the same callback can attach governance and audit hooks.
+`dead_letters()` exposes retained failure details.
+The runtime uses fail-fast jobs-WAL recovery by default so corruption cannot
+silently discard acknowledged extraction jobs. Retry/DLQ settings are configurable
+with `with_queue_config`. Graph and jobs WALs are separate: enqueue failure is
+currently logged as best-effort after vector ingest, not a transactional outbox.

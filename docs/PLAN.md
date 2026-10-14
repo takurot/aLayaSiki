@@ -608,3 +608,24 @@
 - **エージェンティックワークフロー**: セッショングラフ、ワーキングメモリ (FalkorDB参考)
 - **コスト最適化**: LazyGraphRAG, FastGraphRAGの実装検討
 - **特化SLM**: Triplex (Phi-3ベース) や GLM-4-Flash の統合
+
+
+## v0.3.0 Runtime Integration & Networked DB
+
+Dependency order: #97 → #98 → #62 → #63 → #117 → #118.
+
+- [x] #97 Standard autonomous runtime: repository, durable extraction queue,
+  registered model worker, ingestion and query; explicit vector-only mode;
+  restart/pending recovery and extraction-failure E2E.
+- [ ] #98 Snapshot-compatible community lifecycle/provider.
+- [ ] #62 HTTP API and SDK RemoteTransport.
+- [ ] #63 Live UI API integration and component tests.
+- [ ] #117 MCP stdio/SSE tools, resources and prompts.
+- [ ] #118 Maturin wheels, release workflow and client configuration.
+
+Notes (#97): worker stores all extracted artifacts in one index transaction and
+propagates failures to durable retry/DLQ. Shutdown stops at a job boundary and joins the worker;
+unfinished jobs replay. Jobs WAL corruption is fail-fast by default. Model inference
+remains rule-based pending #48. Graph/jobs WAL atomic outbox (including recovery
+from enqueue failures after committed vector ingest) is a follow-up durability
+improvement; this runtime preserves the existing best-effort enqueue contract.
