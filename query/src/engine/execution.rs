@@ -84,7 +84,7 @@ impl super::QueryEngine {
         session: Option<&SessionGraph>,
     ) -> Result<(ExecutionState, QueryPlan, Option<String>), QueryError> {
         let snapshot_view = resolved_snapshot.snapshot_view.as_deref();
-        if tenant_scope.is_some() {
+        if tenant_scope.is_some() && self.community_provider.is_none() {
             plan.steps = vec![
                 "vector_search",
                 "graph_expansion",
@@ -108,7 +108,55 @@ impl super::QueryEngine {
             return Ok((state, plan.clone(), None));
         }
 
-        if self.community_summaries.is_empty() {
+        // A precomputed community may contain text from members excluded by
+        // request filters or retention. Until request-scoped summaries exist,
+        // use the filtered evidence path rather than returning the entire text.
+        let summary_constraints = !request.filters.entity_type.is_empty()
+            || request.filters.time_range.is_some()
+            || (retention_cutoff_unix(request).is_some()
+                && snapshot_view.is_some_and(|view| {
+                    view.nodes()
+                        .any(|node| node.metadata.contains_key("retention_until_unix"))
+                }));
+        if self.community_provider.is_some() && summary_constraints {
+            plan.steps = vec![
+                "vector_search",
+                "graph_expansion",
+                "context_pruning",
+                "global_fallback_summary_constraints",
+            ];
+            let state = self
+                .execute_with_plan(
+                    request,
+                    plan,
+                    embedding_model_id,
+                    snapshot_view,
+                    tenant_scope,
+                    session,
+                )
+                .await?;
+            return Ok((state, plan.clone(), None));
+        }
+
+        let provider_summaries = match &self.community_provider {
+            Some(provider) => Some(
+                provider
+                    .summaries(
+                        resolved_snapshot.snapshot_view.clone().ok_or_else(|| {
+                            QueryError::InvalidQuery(
+                                "community provider requires a pinned graph view".into(),
+                            )
+                        })?,
+                        tenant_scope,
+                    )
+                    .await?,
+            ),
+            None => None,
+        };
+        let summaries = provider_summaries
+            .as_deref()
+            .unwrap_or(&self.community_summaries);
+        if summaries.is_empty() {
             plan.steps = vec![
                 "vector_search",
                 "graph_expansion",
@@ -132,8 +180,7 @@ impl super::QueryEngine {
             return Ok((state, plan.clone(), None));
         }
 
-        let summary_candidates: Vec<CommunitySummary> = self
-            .community_summaries
+        let summary_candidates: Vec<CommunitySummary> = summaries
             .iter()
             .filter(|summary| {
                 summary.is_visible_at_lsn(resolved_snapshot.snapshot_lsn)

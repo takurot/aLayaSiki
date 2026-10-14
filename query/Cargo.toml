@@ -7,6 +7,7 @@ description.workspace = true
 publish = false
 
 [dependencies]
+async-trait.workspace = true
 alayasiki-core.workspace = true
 storage.workspace = true
 serde.workspace = true

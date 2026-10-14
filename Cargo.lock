@@ -1398,6 +1398,7 @@ name = "query"
 version = "0.1.0"
 dependencies = [
  "alayasiki-core",
+ "async-trait",
  "chrono",
  "ingestion",
  "serde",
