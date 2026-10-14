@@ -84,3 +84,47 @@ async fn ingest_authorized_enforces_abac_attributes() {
     ));
     assert!(repo.list_node_ids().await.is_empty());
 }
+
+#[tokio::test]
+async fn authorized_content_and_explicit_keys_are_tenant_scoped() {
+    let dir = tempdir().unwrap();
+    let repo = Arc::new(
+        Repository::open(dir.path().join("tenant.wal"))
+            .await
+            .unwrap(),
+    );
+    let pipeline = IngestionPipeline::new(repo.clone());
+    let mut request = sample_request();
+    if let IngestionRequest::Text {
+        metadata,
+        idempotency_key,
+        ..
+    } = &mut request
+    {
+        metadata.insert("tenant".into(), "spoofed".into());
+        *idempotency_key = Some("same".into());
+    }
+    let authorizer = Authorizer::default();
+    let mut ids = Vec::new();
+    for tenant in ["a", "b"] {
+        let principal = Principal::new("user", tenant).with_roles(["ingestor"]);
+        let resource = ResourceContext::new(tenant);
+        let first = pipeline
+            .ingest_authorized(request.clone(), &principal, &authorizer, &resource)
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            pipeline
+                .ingest_authorized(request.clone(), &principal, &authorizer, &resource)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            repo.get_node(first[0]).await.unwrap().metadata["tenant"],
+            tenant
+        );
+        ids.push(first);
+    }
+    assert_ne!(ids[0], ids[1]);
+}

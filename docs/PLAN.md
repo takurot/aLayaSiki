@@ -620,7 +620,9 @@ Dependency order: #97 → #98 → #62 → #63 → #117 → #118.
 - [x] #98 Snapshot-compatible community lifecycle/provider: startup rebuild,
   bounded version/tenant cache, on-demand invalidation via WAL LSN, immutable
   evidence view, mutation/restart/pinned/global/tenant E2E.
-- [ ] #62 HTTP API and SDK RemoteTransport.
+- [x] #62 HTTP API and SDK RemoteTransport: JWT-authorized ingest/query,
+  durable audit, health/protected metrics, tenant-scoped dedup and extraction,
+  bounded admission, paginated graph endpoint, shared retry/deadline policy.
 - [ ] #63 Live UI API integration and component tests.
 - [ ] #117 MCP stdio/SSE tools, resources and prompts.
 - [ ] #118 Maturin wheels, release workflow and client configuration.
@@ -639,3 +641,17 @@ Future work: request-scoped summaries with expiration-aware caching, immutable
 snapshot-view caching to avoid WAL replay on global cache misses, and incremental
 refresh instead of a full version rebuild. Tenant extraction artifacts still require
 worker tenant metadata/ID namespacing (to be addressed by network API #62).
+
+Notes (#62): production HTTP binary reuses RuntimeBuilder and preserves the community
+provider when configuring query audit. Authorized ingest hashes/idempotency locks
+and entity IDs are scoped by trusted tenant; anonymous library behavior remains
+compatible. Global request admission protects the initial network boundary; #66
+still owns per-tenant quotas and SLM budgets. File payloads reuse library extraction,
+so raw image/audio inference remains #101. Only one process should open each data
+directory; cross-process repository locking is a follow-up storage hardening task.
+
+Retention note (#62): derived entity nodes keep the minimum deadline across source
+contributions, including re-extraction. This prevents expired content from reappearing
+in graph/global responses but can conservatively exclude a shared entity with a live
+source. #68 source-aware entity resolution should track contributing provenance and
+lifetime individually rather than extending or clearing existing retention.
