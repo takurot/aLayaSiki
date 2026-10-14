@@ -117,9 +117,9 @@ impl Connection {
         match self
             .runtime
             .repository()
-            .get_session_with_owner(session, Some(&owner))
+            .session_expiry_with_owner(session, Some(&owner))
         {
-            Ok(Some(graph)) => reservation.commit(graph.expires_at)?,
+            Ok(Some(expires)) => reservation.commit(expires)?,
             Ok(None) | Err(storage::repo::RepoError::SessionAccessDenied(_)) => {}
             Err(_) => reservation
                 .commit(std::time::SystemTime::now() + std::time::Duration::from_secs(1800))?,

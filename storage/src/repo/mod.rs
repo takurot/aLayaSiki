@@ -440,6 +440,22 @@ impl Repository {
         self.session_manager.cleanup_expired();
     }
 
+    /// Check session existence, ownership and expiry while borrowing the graph.
+    /// This avoids copying nodes and embeddings for metadata-only accounting.
+    pub fn session_expiry_with_owner(
+        &self,
+        session_id: &str,
+        owner: Option<&SessionOwner>,
+    ) -> Result<Option<std::time::SystemTime>, RepoError> {
+        let Some(session) = self.session_manager.get(session_id) else {
+            return Ok(None);
+        };
+        if owner.is_some_and(|owner| session.owner.as_ref() != Some(owner)) {
+            return Err(RepoError::SessionAccessDenied(session_id.to_string()));
+        }
+        Ok(Some(session.expires_at))
+    }
+
     pub fn get_session_with_owner(
         &self,
         session_id: &str,
