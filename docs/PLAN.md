@@ -623,7 +623,9 @@ Dependency order: #97 → #98 → #62 → #63 → #117 → #118.
 - [x] #62 HTTP API and SDK RemoteTransport: JWT-authorized ingest/query,
   durable audit, health/protected metrics, tenant-scoped dedup and extraction,
   bounded admission, paginated graph endpoint, shared retry/deadline policy.
-- [ ] #63 Live UI API integration and component tests.
+- [x] #63 Live UI API integration and component tests: typed lossless-ID API
+  client, real graph/chat/evidence, connection/loading/error/empty states,
+  identity-switch clearing, Vitest coverage gate and real HTTP Playwright E2E.
 - [ ] #117 MCP stdio/SSE tools, resources and prompts.
 - [ ] #118 Maturin wheels, release workflow and client configuration.
 
@@ -655,3 +657,11 @@ contributions, including re-extraction. This prevents expired content from reapp
 in graph/global responses but can conservatively exclude a shared entity with a live
 source. #68 source-aware entity resolution should track contributing provenance and
 lifetime individually rather than extending or clearing existing retention.
+
+Notes (#63): explorer uses a same-origin API/reverse proxy and memory-only bearer
+tokens. Initial graph view is capped at 1000 nodes; returned query evidence can
+replace it with the result subgraph. Runtime npm audit is clean; seven existing
+Tailwind 3 development-tool advisories require an upstream braces patch or a
+separate Tailwind 4 migration. Add this build-tool migration as a follow-up rather
+than suppressing audit findings. Graph endpoint pagination still lacks cross-page
+edges, so the UI does not claim an exhaustive graph view.
