@@ -98,7 +98,10 @@
 
 - [x] Ingestion API のエンドポイント定義（PDF/JSON/Markdown）
 - [x] Ingestion API のエンドポイント定義（画像/音声）
-- [x] Auto-Chunking のルール実装（意味区切り/最大長/オーバーラップ）
+- [x] CharacterChunker の文字数上限/固定オーバーラップ実装（意味分割とは区別、Issue #105）
+- [x] Unicode chars/UTF-8 bytes メタデータの分離と標準ランタイム設定の接続（Issue #105）
+- [ ] 意味区切りの動的 Auto-Chunking（構造/文境界または SLM/埋め込みによる分割）
+  - Issue #105: 現行デフォルトは `CharacterChunker`。`Chunker` trait と `with_chunker` / `with_components` を拡張点とし、将来の semantic provider はサービス停止時の明示的な character fallback を設計する。境界変更時は index-based chunk IDs と content dedup の移行方針も必要。現行 rename は境界/IDを維持し、保存済みメタデータは変更しない。SDK `ClientBuilder::app_config` でも標準設定を適用。回帰検証: Unicode/overlap/空入力/設定→保存/冪等性、SDK両生成経路、workspace 352 tests、line coverage 89.91%。
 - [x] Embedding 生成フローの実装（model_id を付与）
 - [x] Idempotency/Dedup（content_hash + idempotency_key）
 - [x] PIIマスキング/禁止語フィルタのポリシーフック

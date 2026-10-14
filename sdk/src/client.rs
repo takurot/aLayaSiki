@@ -162,6 +162,17 @@ impl InProcessTransport {
         }
     }
 
+    pub fn from_repo_with_config(
+        repo: Arc<Repository>,
+        config: &alayasiki_core::config::AppConfig,
+    ) -> Self {
+        Self {
+            ingestion_pipeline: IngestionPipeline::with_config(repo.clone(), config),
+            query_engine: QueryEngine::new(repo.clone()),
+            repo,
+        }
+    }
+
     pub fn repository(&self) -> Arc<Repository> {
         self.repo.clone()
     }
@@ -311,6 +322,7 @@ impl Client {
 pub struct ClientBuilder {
     retry_config: RetryConfig,
     repo: Option<Arc<Repository>>,
+    app_config: Option<alayasiki_core::config::AppConfig>,
 }
 
 impl ClientBuilder {
@@ -323,6 +335,14 @@ impl ClientBuilder {
         self
     }
 
+    /// Apply runtime chunking settings; storage is still selected by the repo/WAL path.
+    pub fn app_config(self, config: alayasiki_core::config::AppConfig) -> Self {
+        Self {
+            app_config: Some(config),
+            ..self
+        }
+    }
+
     pub fn with_repo(mut self, repo: Arc<Repository>) -> Self {
         self.repo = Some(repo);
         self
@@ -330,7 +350,10 @@ impl ClientBuilder {
 
     pub fn build(self) -> Result<Client, ClientBuildError> {
         let repo = self.repo.ok_or(ClientBuildError::MissingRepository)?;
-        let transport: Arc<dyn SdkTransport> = Arc::new(InProcessTransport::from_repo(repo));
+        let transport: Arc<dyn SdkTransport> = Arc::new(match self.app_config {
+            Some(config) => InProcessTransport::from_repo_with_config(repo, &config),
+            None => InProcessTransport::from_repo(repo),
+        });
         Ok(Client::new(transport, self.retry_config))
     }
 
@@ -341,7 +364,13 @@ impl ClientBuilder {
         if self.repo.is_some() {
             return Err(ClientBuildError::ConflictingRepositoryAndWalPath);
         }
-        let transport = InProcessTransport::connect(wal_path).await?;
+        let transport = match self.app_config {
+            Some(config) => InProcessTransport::from_repo_with_config(
+                Arc::new(Repository::open(wal_path).await?),
+                &config,
+            ),
+            None => InProcessTransport::connect(wal_path).await?,
+        };
         Ok(Client::new(Arc::new(transport), self.retry_config))
     }
 }

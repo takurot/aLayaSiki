@@ -18,7 +18,8 @@ minimal latency.
 **Insert Raw, Retrieve Reasoned.**
 Developers simply ingest raw files. The database handles:
 
-1. **Auto-Chunking & Embedding** — Dynamic segmentation and vectorization.
+1. **Auto-Chunking & Embedding** — Character-limited splitting with fixed overlap
+   and vectorization. Semantic/SLM segmentation is pending.
 2. **Auto-Graph Construction** — Real-time extraction of entities and relations
    using embedded SLMs.
 3. **GraphRAG Inference** — Multi-hop reasoning
@@ -80,6 +81,37 @@ root.
 
 Do not add secrets to checked-in config files; use environment variables for
 secrets instead.
+
+### Ingestion chunking
+
+The default provider is `ingestion::chunker::CharacterChunker`, formerly
+`SemanticChunker`. It uses text-splitter heuristics with a 1000-character base
+limit and prepends up to 100 characters from the previous base chunk. The final
+chunk can therefore contain up to 1100 Unicode scalar values. This is not
+model-based semantic segmentation; that path remains pending.
+
+`AppConfig.chunking` reads `[chunking]` (`strategy = "character"`, `max_chars`,
+`overlap_chars`) from the standard configuration sources above. For example,
+`ALAYASIKI_CHUNKING__MAX_CHARS=500` overrides the base limit. Compose the pipeline
+with `IngestionPipeline::with_config(repo, &config)` to apply these settings;
+`IngestionPipeline::new(repo)` uses defaults. SDK callers can pass the loaded
+configuration to `ClientBuilder::new().app_config(config)` for either `build`
+or `connect_in_process`; this applies chunking settings while the repository or
+WAL path still selects storage. Omitting it preserves defaults. Unsupported strategies, including
+`semantic`, fail configuration loading. Alternative providers can be injected
+through the existing `Chunker` interface with `with_chunker` or `with_components`.
+The current character provider is also the explicit offline fallback available
+to future semantic providers; no semantic service is invoked today.
+
+Chunk metadata reports `chunk_chars` as Unicode scalar values (not grapheme
+clusters), `chunk_bytes` as UTF-8 bytes, `chunk_strategy = "character"`, and
+`chunk_overlap` as the configured overlap cap after clamping. Token counts are
+not measured. Zero `max_chars` is clamped to one; overlap is capped at that
+base limit. This rename preserves chunk boundaries, index-based chunk IDs and
+idempotency behavior. Existing Rust consumers must rename `SemanticChunker`
+imports to `CharacterChunker`. Existing stored metadata is not rewritten;
+older `chunk_chars` values represent bytes. Re-ingestion of deduplicated content
+returns existing nodes, so it does not update historical metadata either.
 
 ## Build, Test & Benchmarks
 

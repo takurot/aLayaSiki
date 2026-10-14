@@ -16,3 +16,9 @@ port = 8080
 [storage]
 data_dir = "./data"
 wal_flush_interval_ms = 100
+
+# Semantic/SLM chunking is pending; unsupported strategies fail configuration loading.
+[chunking]
+strategy = "character"
+max_chars = 1000
+overlap_chars = 100

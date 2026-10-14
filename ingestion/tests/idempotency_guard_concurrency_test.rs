@@ -203,7 +203,7 @@ async fn guard_is_released_after_successful_ingest() {
     let (_repo, pipeline) = new_pipeline(
         &dir,
         "guard_release_success.wal",
-        Box::new(ingestion::chunker::SemanticChunker::default()),
+        Box::new(ingestion::chunker::CharacterChunker::default()),
     )
     .await;
 
@@ -226,7 +226,7 @@ async fn guard_is_released_after_failed_ingest() {
     let repo = Arc::new(Repository::open(&wal_path).await.unwrap());
     let pipeline = IngestionPipeline::with_components(
         repo.clone(),
-        Box::new(ingestion::chunker::SemanticChunker::default()),
+        Box::new(ingestion::chunker::CharacterChunker::default()),
         Box::new(DeterministicEmbedder::default()),
         Box::new(BasicPolicy::new(vec!["forbidden".to_string()], false)),
         "embedding-default-v1",

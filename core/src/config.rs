@@ -14,10 +14,38 @@ pub struct StorageConfig {
     pub wal_flush_interval_ms: u64,
 }
 
+/// Only implemented strategies can be selected; semantic segmentation is pending.
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkingStrategy {
+    #[default]
+    Character,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ChunkingSettings {
+    pub strategy: ChunkingStrategy,
+    pub max_chars: usize,
+    pub overlap_chars: usize,
+}
+
+impl Default for ChunkingSettings {
+    fn default() -> Self {
+        Self {
+            strategy: ChunkingStrategy::Character,
+            max_chars: 1000,
+            overlap_chars: 100,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub chunking: ChunkingSettings,
 }
 
 impl AppConfig {
@@ -151,6 +179,24 @@ mod tests {
         assert_eq!(config.server.port, 9999);
         assert_eq!(config.storage.data_dir, "/var/lib/alayasiki");
         assert_eq!(config.storage.wal_flush_interval_ms, 50);
+    }
+
+    #[test]
+    fn chunking_defaults_and_environment_overrides() {
+        let mut guard = EnvGuard::new();
+        guard.set("ALAYASIKI_CONFIG_DIR", &repo_config_dir());
+        guard.set("RUN_MODE", "nonexistent-run-mode");
+        let defaults = AppConfig::load().unwrap();
+        assert_eq!(defaults.chunking.max_chars, 1000);
+        assert_eq!(defaults.chunking.overlap_chars, 100);
+        assert_eq!(defaults.chunking.strategy, ChunkingStrategy::Character);
+        guard.set("ALAYASIKI_CHUNKING__MAX_CHARS", "12");
+        guard.set("ALAYASIKI_CHUNKING__OVERLAP_CHARS", "2");
+        let config = AppConfig::load().unwrap();
+        assert_eq!(config.chunking.max_chars, 12);
+        assert_eq!(config.chunking.overlap_chars, 2);
+        guard.set("ALAYASIKI_CHUNKING__STRATEGY", "semantic");
+        assert!(AppConfig::load().is_err());
     }
 
     #[test]

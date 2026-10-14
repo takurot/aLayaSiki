@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use text_splitter::TextSplitter;
 
 #[derive(Debug, Clone)]
+/// Character limits apply to base chunks; overlap is added afterward.
+/// A zero limit is clamped to one and overlap is capped at the base limit.
 pub struct ChunkingConfig {
     pub max_chars: usize,
     pub overlap_chars: usize,
@@ -13,6 +15,15 @@ impl Default for ChunkingConfig {
         Self {
             max_chars: 1000,
             overlap_chars: 100,
+        }
+    }
+}
+
+impl From<alayasiki_core::config::ChunkingSettings> for ChunkingConfig {
+    fn from(settings: alayasiki_core::config::ChunkingSettings) -> Self {
+        Self {
+            max_chars: settings.max_chars,
+            overlap_chars: settings.overlap_chars,
         }
     }
 }
@@ -30,12 +41,14 @@ pub trait Chunker: Send + Sync {
     ) -> BoxFuture<'a, Vec<Chunk>>;
 }
 
-pub struct SemanticChunker {
+/// Deterministic character-limited splitting with fixed tail overlap.
+/// Uses text-splitter whitespace/structure heuristics, not a semantic model.
+pub struct CharacterChunker {
     splitter: TextSplitter<text_splitter::Characters>,
     config: ChunkingConfig,
 }
 
-impl SemanticChunker {
+impl CharacterChunker {
     pub fn new(config: ChunkingConfig) -> Self {
         Self {
             splitter: TextSplitter::default().with_trim_chunks(true),
@@ -44,13 +57,13 @@ impl SemanticChunker {
     }
 }
 
-impl Default for SemanticChunker {
+impl Default for CharacterChunker {
     fn default() -> Self {
         Self::new(ChunkingConfig::default())
     }
 }
 
-impl Chunker for SemanticChunker {
+impl Chunker for CharacterChunker {
     fn chunk<'a>(
         &'a self,
         content: &'a str,
@@ -70,25 +83,20 @@ impl Chunker for SemanticChunker {
             for (i, text) in base_chunks.iter().enumerate() {
                 let mut chunk_text = text.clone();
                 if overlap_chars > 0 && i > 0 {
-                    // Logic simplification: if we need overlap, we just grab prev.
-                    // Note: original code called tail_chars on prev.
-                    // We need to keep implementation logic same.
-                    // But 'self' is captured in async block.
-                    // 'content' is used in splitter.
-                    // 'base_metadata' moved.
-
-                    if i > 0 {
-                        let prev = &base_chunks[i - 1];
-                        let overlap = tail_chars(prev, overlap_chars);
-                        if !overlap.is_empty() {
-                            chunk_text = format!("{}{}", overlap, chunk_text);
-                        }
+                    let overlap = tail_chars(&base_chunks[i - 1], overlap_chars);
+                    if !overlap.is_empty() {
+                        chunk_text = format!("{}{}", overlap, chunk_text);
                     }
                 }
 
                 let mut metadata = base_metadata.clone();
                 metadata.insert("chunk_index".to_string(), i.to_string());
-                metadata.insert("chunk_chars".to_string(), chunk_text.len().to_string());
+                metadata.insert(
+                    "chunk_chars".to_string(),
+                    chunk_text.chars().count().to_string(),
+                );
+                metadata.insert("chunk_bytes".to_string(), chunk_text.len().to_string());
+                metadata.insert("chunk_strategy".to_string(), "character".to_string());
                 metadata.insert("chunk_overlap".to_string(), overlap_chars.to_string());
 
                 out.push(Chunk {
