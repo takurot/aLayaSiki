@@ -176,6 +176,8 @@ impl QueryError {
 
 /// A trusted provider must partition graph data by tenant before summarization.
 /// The immutable view pins both summary input and query evidence to one version.
+// async_trait adds must_use to a Future return already marked must_use.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait CommunitySummaryProvider: Send + Sync {
     async fn summaries(
