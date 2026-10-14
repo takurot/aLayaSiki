@@ -12,7 +12,7 @@ use storage::snapshot::SnapshotError;
 use storage::wal::WalError;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IngestResult {
     pub node_ids: Vec<u64>,
     pub snapshot_id: String,
@@ -90,6 +90,10 @@ pub enum ClientBuildError {
     Repository(#[from] RepoError),
     #[error("missing repository: call with_repo() or connect_in_process()")]
     MissingRepository,
+    #[error("invalid remote endpoint or bearer token configuration")]
+    InvalidRemoteConfiguration,
+    #[error("remote connection cannot be combined with repository or application configuration")]
+    ConflictingRemoteConfiguration,
     #[error("conflicting builder configuration: with_repo() cannot be combined with connect_in_process()")]
     ConflictingRepositoryAndWalPath,
 }
@@ -110,6 +114,16 @@ pub enum ClientError {
     /// down) before it could report an outcome.
     #[error("retry attempt task was cancelled before completing")]
     AttemptCancelled,
+    #[error("remote network request failed")]
+    Network,
+    #[error("remote API protocol error: {0}")]
+    Protocol(String),
+    #[error("remote request failed ({code}): {message}")]
+    Remote {
+        code: alayasiki_core::error::ErrorCode,
+        message: String,
+        retryable: bool,
+    },
 }
 
 impl ClientError {
@@ -119,6 +133,8 @@ impl ClientError {
             | ClientError::Query(QueryError::Repository(repo_err)) => {
                 is_retryable_repo_error(repo_err)
             }
+            ClientError::Network => true,
+            ClientError::Remote { retryable, .. } => *retryable,
             // Idempotency-guarded ingestion that found a key already being
             // processed is a transient lock-contention condition, not a
             // permanent failure.
@@ -355,6 +371,19 @@ impl ClientBuilder {
             None => InProcessTransport::from_repo(repo),
         });
         Ok(Client::new(transport, self.retry_config))
+    }
+
+    /// Connect over HTTP. Retry and deadline policy is shared with in-process clients.
+    pub fn connect_remote(
+        self,
+        base_url: &str,
+        bearer_token: &str,
+    ) -> Result<Client, ClientBuildError> {
+        if self.repo.is_some() || self.app_config.is_some() {
+            return Err(ClientBuildError::ConflictingRemoteConfiguration);
+        }
+        let transport = crate::RemoteTransport::new(base_url, bearer_token)?;
+        Ok(Client::new(Arc::new(transport), self.retry_config))
     }
 
     pub async fn connect_in_process(

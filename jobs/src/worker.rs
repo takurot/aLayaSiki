@@ -184,6 +184,7 @@ impl Worker {
         model_ref: &str,
         snapshot_id: &str,
     ) -> anyhow::Result<()> {
+        let source = self.repo.get_node(node_id).await?;
         let resolved = self
             .registry
             .resolve(model_ref)
@@ -191,10 +192,16 @@ impl Worker {
         let extraction_model_ref = format!("{}@{}", resolved.model_id, resolved.version);
         let entities = resolved.extractor.extract(content).await?;
 
+        let tenant = source.metadata.get("tenant");
         let mut mutations = Vec::new();
         for entity in entities {
             // Stable ID generation for entity node using Sha256
             let mut hasher = Sha256::new();
+            if let Some(tenant) = tenant {
+                hasher.update(b"alayasiki-tenant-entity-v1");
+                hasher.update((tenant.len() as u64).to_le_bytes());
+                hasher.update(tenant.as_bytes());
+            }
             hasher.update(entity.text.as_bytes());
             let digest = hasher.finalize();
             // Use first 8 bytes for u64 ID
@@ -204,7 +211,7 @@ impl Worker {
             ]);
 
             // Ensure Entity Node exists
-            let entity_node = alayasiki_core::model::Node {
+            let mut entity_node = alayasiki_core::model::Node {
                 id: target_id,
                 embedding: vec![], // No embedding for purely symbolic entity node for now
                 data: entity.text.clone(),
@@ -219,10 +226,32 @@ impl Worker {
                 ]),
             };
 
+            if let Some(tenant) = tenant {
+                entity_node.metadata.insert("tenant".into(), tenant.clone());
+            }
+            // A tenant-wide entity may be mentioned by sources with different
+            // policies. Keep the earliest deadline; a later mention must never
+            // extend or clear retention inherited from an earlier source.
+            let existing = match self.repo.get_node(target_id).await {
+                Ok(node) => Some(node),
+                Err(storage::repo::RepoError::NotFound) => None,
+                Err(error) => return Err(error.into()),
+            };
+            let retention = [Some(&source), existing.as_ref()]
+                .into_iter()
+                .flatten()
+                .filter_map(|node| node.metadata.get("retention_until_unix"))
+                .filter_map(|value| value.parse::<u64>().ok())
+                .min();
+            if let Some(deadline) = retention {
+                entity_node
+                    .metadata
+                    .insert("retention_until_unix".into(), deadline.to_string());
+            }
             mutations.push(storage::repo::IndexMutation::PutNode(entity_node));
 
             // Create Edge
-            let edge = alayasiki_core::model::Edge {
+            let mut edge = alayasiki_core::model::Edge {
                 source: node_id,
                 target: target_id,
                 relation: "mentions".to_string(),
@@ -236,6 +265,13 @@ impl Worker {
                 ]),
             };
 
+            if let Some(tenant) = tenant {
+                edge.metadata.insert("tenant".into(), tenant.clone());
+            }
+            if let Some(retention) = source.metadata.get("retention_until_unix") {
+                edge.metadata
+                    .insert("retention_until_unix".into(), retention.clone());
+            }
             mutations.push(storage::repo::IndexMutation::PutEdge(edge));
         }
         self.repo.apply_index_transaction(mutations).await?;

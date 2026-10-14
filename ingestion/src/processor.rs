@@ -318,8 +318,10 @@ impl IngestionPipeline {
     ) -> Result<Vec<u64>, IngestionError> {
         self.validate_governance_preflight(tenant, request.metadata())?;
 
-        let content_hash = request.content_hash();
-        let idempotency_key = request.idempotency_key().map(|key| key.to_string());
+        let content_hash = tenant_scoped_key(tenant, "content", &request.content_hash());
+        let idempotency_key = request
+            .idempotency_key()
+            .map(|key| tenant_scoped_key(tenant, "key", key));
 
         // LOCKING: Prevent concurrent processing of same key
         let lock_key = idempotency_key
@@ -626,4 +628,17 @@ fn extract_request_text(
 #[allow(dead_code)]
 pub fn default_chunker() -> Box<dyn Chunker> {
     Box::new(CharacterChunker::new(ChunkingConfig::default()))
+}
+
+fn tenant_scoped_key(tenant: Option<&str>, domain: &str, value: &str) -> String {
+    let Some(tenant) = tenant else {
+        return value.to_string();
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(b"alayasiki-tenant-v1");
+    for part in [tenant, domain, value] {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }

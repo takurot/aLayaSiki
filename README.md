@@ -314,3 +314,12 @@ provider global responses bypass semantic-response caching so expiration is hono
 at unchanged LSN. Snapshot reconstruction still replays WAL for uncached global
 requests; community clustering itself is cached. Snapshot-view caching/incremental
 community refresh is a future performance optimization.
+
+### Network API and remote client
+
+Run `cargo run -p alayasiki-api` with the required JWT secret, issuer and audience
+configured. HTTP ingestion/query use the standard autonomous runtime, tenant
+isolation and persisted audit. Health, protected metrics and a paginated graph
+endpoint are available. `ClientBuilder::connect_remote(base_url, bearer_token)`
+uses the SDK's existing retry/deadline policy. See [HTTP API guide](docs/API.md)
+for request examples, authentication, limits and shutdown behavior.

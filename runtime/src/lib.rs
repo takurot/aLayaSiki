@@ -39,6 +39,7 @@ pub struct RuntimeBuilder {
     registry: Option<(Arc<ModelRegistry>, String)>,
     queue_config: DurableQueueConfig,
     configure_ingestion: Option<ConfigureIngestion>,
+    configure_query: Option<Box<dyn FnOnce(QueryEngine) -> QueryEngine + Send>>,
 }
 
 impl RuntimeBuilder {
@@ -48,6 +49,7 @@ impl RuntimeBuilder {
             extraction_enabled: true,
             registry: None,
             configure_ingestion: None,
+            configure_query: None,
             queue_config: DurableQueueConfig {
                 recovery_mode: WalRecoveryMode::FailFast,
                 ..Default::default()
@@ -84,6 +86,16 @@ impl RuntimeBuilder {
     ) -> Self {
         Self {
             configure_ingestion: Some(Box::new(configure)),
+            ..self
+        }
+    }
+
+    pub fn with_query_config(
+        self,
+        configure: impl FnOnce(QueryEngine) -> QueryEngine + Send + 'static,
+    ) -> Self {
+        Self {
+            configure_query: Some(Box::new(configure)),
             ..self
         }
     }
@@ -130,6 +142,10 @@ impl RuntimeBuilder {
         };
         let communities = Arc::new(community::RuntimeCommunities::default());
         let query = QueryEngine::new(repo.clone()).with_community_provider(communities.clone());
+        let query = match self.configure_query {
+            Some(configure) => configure(query),
+            None => query,
+        };
         let view = Arc::new(
             repo.load_snapshot_view(&repo.current_snapshot_id().await)
                 .await?,
