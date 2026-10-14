@@ -1,104 +1,167 @@
-import { useState, useCallback } from 'react';
-import GraphExplorer from './components/GraphExplorer';
-import DetailsPanel from './components/DetailsPanel';
-import ChatInterface from './components/ChatInterface';
-import type { Node, GraphData } from './types';
-
-import { DatabaseZap } from 'lucide-react';
-
-// Sample mock data resembling aLayaSiki entities
-const mockData: GraphData = {
-  nodes: [
-    { id: 1, label: 'Apple', community: 1, embedding: [0.1, 0.2, 0.3], confidence: 0.95, provenance: 'apple_news_2024.pdf', metadata: { type: 'Company' } },
-    { id: 2, label: 'Vision Pro', community: 1, embedding: [0.4, 0.5, 0.6], confidence: 0.88, provenance: 'apple_news_2024.pdf', metadata: { type: 'Product', category: 'AR/VR' } },
-    { id: 3, label: 'Meta', community: 2, embedding: [0.7, 0.8, 0.9], confidence: 0.92, provenance: 'tech_report.json', metadata: { type: 'Company' } },
-    { id: 4, label: 'Meta Quest 3', community: 2, embedding: [0.11, 0.12, 0.13], confidence: 0.99, provenance: 'tech_report.json', metadata: { type: 'Product', category: 'VR' } },
-    { id: 5, label: 'Tim Cook', community: 1, embedding: [0.14, 0.15, 0.16], confidence: 0.91, provenance: 'apple_news_2024.pdf', metadata: { type: 'Person', role: 'CEO' } },
-    { id: 6, label: 'Mark Zuckerberg', community: 2, embedding: [0.17, 0.18, 0.19], confidence: 0.94, provenance: 'tech_report.json', metadata: { type: 'Person', role: 'CEO' } },
-    { id: 7, label: 'Spatial Computing', community: 3, embedding: [0.21, 0.22, 0.23], confidence: 0.85, provenance: 'industry_analysis.md', metadata: { type: 'Concept' } },
-    { id: 8, label: 'Virtual Reality', community: 3, embedding: [0.24, 0.25, 0.26], confidence: 0.89, provenance: 'industry_analysis.md', metadata: { type: 'Concept' } },
-    { id: 9, label: 'Mixed Reality', community: 3, embedding: [0.27, 0.28, 0.29], confidence: 0.87, provenance: 'industry_analysis.md', metadata: { type: 'Concept' } },
-  ],
-  edges: [
-    { source: 1, target: 2, relation_type: 'produces', weight: 1.0 }, // Apple makes Vision Pro
-    { source: 1, target: 5, relation_type: 'leads', weight: 1.0 }, // Apple CEO is Tim Cook
-    { source: 3, target: 4, relation_type: 'produces', weight: 1.0 }, // Meta makes Quest 3
-    { source: 3, target: 6, relation_type: 'leads', weight: 1.0 }, // Meta CEO is Mark Z
-    { source: 2, target: 7, relation_type: 'is_a', weight: 0.9 }, // Vision pro is Spatial Computing
-    { source: 4, target: 8, relation_type: 'is_a', weight: 0.9 }, // Quest is VR
-    { source: 7, target: 9, relation_type: 'related_to', weight: 0.8 }, // Spatial related to MR
-    { source: 8, target: 9, relation_type: 'related_to', weight: 0.8 }, // VR related to MR
-    { source: 2, target: 4, relation_type: 'competes_with', weight: 0.7 }, // Vision Pro competes with Quest
-    { source: 1, target: 3, relation_type: 'competes_with', weight: 0.8 }, // Apple competes with Meta
-  ]
-};
-
-function App() {
-  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
-  const [highlightedNodeId, setHighlightedNodeId] = useState<number | null>(null);
-
-  const handleNodeClick = useCallback((node: Node) => {
-    setSelectedNode(node);
-    setHighlightedNodeId(node.id);
-  }, []);
-
-  const handleClosePanel = () => {
-    setSelectedNode(null);
-    setHighlightedNodeId(null);
-  };
-
-  const handleHighlightNodes = (nodeIds: number[]) => {
-    // Just highlight the first one for simplicity in this mock,
-    // or expand logic to handle multiple
-    if (nodeIds.length > 0) {
-      setHighlightedNodeId(nodeIds[0]);
-      const node = mockData.nodes.find(n => n.id === nodeIds[0]);
-      if (node) {
-        setSelectedNode(node);
-      }
-    }
-  };
-
+import { useState, useEffect, useMemo } from "react";
+import GraphExplorer from "./components/GraphExplorer";
+import DetailsPanel from "./components/DetailsPanel";
+import ChatInterface from "./components/ChatInterface";
+import { ApiClient, type QueryResult } from "./api";
+import type { Node, GraphData } from "./types";
+const EMPTY: GraphData = { nodes: [], edges: [] };
+export default function App() {
+  const [token, setToken] = useState("");
+  const [connectedToken, setConnectedToken] = useState("");
+  const [generation, setGeneration] = useState(0);
+  const [graph, setGraph] = useState<GraphData>(EMPTY);
+  const [selected, setSelected] = useState<Node | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [partial, setPartial] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const client = useMemo(
+    () => (connectedToken ? new ApiClient(connectedToken) : null),
+    [connectedToken],
+  );
+  useEffect(() => {
+    if (!client) return;
+    const controller = new AbortController();
+    void client
+      .graph(controller.signal)
+      .then((page) => {
+        if (controller.signal.aborted) return;
+        setGraph(page);
+        setSelected(null);
+        setPartial(page.nodes.length >= 1000 && page.next_after !== null);
+        setLoading(false);
+      })
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setError(
+          cause instanceof Error ? cause.message : "Graph request failed",
+        );
+        setLoading(false);
+      });
+    return () => controller.abort();
+  }, [client, refresh]);
+  function reset() {
+    setGraph(EMPTY);
+    setSelected(null);
+    setError("");
+    setPartial(false);
+    setGeneration((value) => value + 1);
+  }
+  function connect(event: React.FormEvent) {
+    event.preventDefault();
+    reset();
+    setLoading(true);
+    setConnectedToken(token.trim());
+    setToken("");
+    setRefresh((value) => value + 1);
+  }
+  function disconnect() {
+    reset();
+    setConnectedToken("");
+    setToken("");
+    setLoading(false);
+  }
+  function highlight(ids: string[], response: QueryResult) {
+    const nodes = response.evidence.nodes.map((node) => ({
+      id: node.id,
+      label: node.data,
+      confidence: node.confidence,
+      provenance: node.provenance.source,
+      model_id: node.provenance.extraction_model_id,
+      metadata: { snapshot_id: node.provenance.snapshot_id },
+    }));
+    const idsInGraph = new Set(nodes.map((node) => node.id));
+    const edges = response.evidence.edges
+      .filter(
+        (edge) => idsInGraph.has(edge.source) && idsInGraph.has(edge.target),
+      )
+      .map((edge) => ({
+        source: edge.source,
+        target: edge.target,
+        relation_type: edge.relation,
+      }));
+    setGraph({ nodes, edges });
+    setPartial(false);
+    setSelected(nodes.find((node) => node.id === ids[0]) ?? null);
+  }
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden bg-slate-50 font-sans text-slate-900">
-      {/* Header */}
-      <header className="h-14 bg-indigo-900 text-white flex items-center px-6 shadow-md z-10 shrink-0">
-        <div className="flex items-center gap-2">
-          <DatabaseZap className="h-6 w-6 text-indigo-400" />
-          <h1 className="text-xl font-bold tracking-tight">aLayaSiki Explorer</h1>
-          <span className="ml-4 text-xs font-medium px-2 py-0.5 rounded-full bg-indigo-800 text-indigo-200 border border-indigo-700">
-            Autonomous GraphRAG
-          </span>
-        </div>
+    <div className="h-screen w-screen flex flex-col bg-slate-50 text-slate-900">
+      <header className="bg-indigo-900 text-white p-3 flex flex-wrap gap-3 items-center">
+        <h1 className="font-bold">aLayaSiki Explorer</h1>
+        <form onSubmit={connect} className="flex gap-2">
+          <input
+            type="password"
+            autoComplete="off"
+            aria-label="Access token"
+            placeholder="Access token"
+            className="text-slate-900 p-1 rounded"
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+          />
+          <button disabled={!token.trim()}>Connect</button>
+        </form>
+        {client && (
+          <>
+            <button onClick={disconnect}>Disconnect</button>
+            <button
+              onClick={() => {
+                setSelected(null);
+                setLoading(true);
+                setError("");
+                setRefresh((value) => value + 1);
+              }}
+            >
+              Refresh graph
+            </button>
+          </>
+        )}
       </header>
-
-      {/* Main Content Area */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left: Chat Interface */}
-        <div className="w-80 flex-shrink-0 relative z-10">
-          <ChatInterface onHighlightNodes={handleHighlightNodes} />
+      <main className="flex-1 flex overflow-hidden">
+        <div className="w-80 shrink-0">
+          <ChatInterface
+            key={generation}
+            client={client}
+            onHighlightNodes={highlight}
+          />
         </div>
-
-        {/* Center: Graph Explorer */}
-        <div className="flex-1 relative z-0">
+        <section className="flex-1 relative" aria-label="Graph">
+          {loading && (
+            <p role="status" className="absolute z-10 p-3 bg-white">
+              Loading graph…
+            </p>
+          )}
+          {error && (
+            <p role="alert" className="absolute z-10 p-3 bg-white">
+              {error}
+            </p>
+          )}
+          {!loading && !error && graph.nodes.length === 0 && (
+            <p className="absolute z-10 p-3">
+              {client
+                ? "No graph data yet. Ingest content and refresh."
+                : "Connect to explore your graph."}
+            </p>
+          )}
+          {partial && (
+            <p className="absolute z-10 bottom-0 bg-white p-3">
+              Showing the first {graph.nodes.length.toLocaleString()} nodes.
+              Edges are limited to this page.
+            </p>
+          )}
           <GraphExplorer
-            data={mockData}
-            onNodeClick={handleNodeClick}
-            selectedNodeId={selectedNode?.id}
-            highlightedNodeId={highlightedNodeId}
+            data={graph}
+            onNodeClick={setSelected}
+            selectedNodeId={selected?.id}
+            highlightedNodeId={selected?.id}
           />
-        </div>
-
-        {/* Right: Details Panel */}
-        <div className="w-80 flex-shrink-0 relative z-10">
+        </section>
+        <aside className="w-80 shrink-0">
           <DetailsPanel
-            selectedNode={selectedNode}
-            onClose={handleClosePanel}
+            selectedNode={selected}
+            onClose={() => setSelected(null)}
           />
-        </div>
-      </div>
+        </aside>
+      </main>
     </div>
   );
 }
-
-export default App;

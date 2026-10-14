@@ -1,14 +1,9 @@
-export type RelationType =
-  | 'produces'
-  | 'leads'
-  | 'is_a'
-  | 'related_to'
-  | 'competes_with';
+export type RelationType = string;
 
-export type EdgeDirection = 'directed' | 'undirected';
+export type EdgeDirection = "directed" | "undirected";
 
 export interface Node {
-  id: number;
+  id: string;
   label: string;
   community?: number;
   embedding?: number[];
@@ -19,8 +14,8 @@ export interface Node {
 }
 
 export interface Edge {
-  source: number;
-  target: number;
+  source: string;
+  target: string;
   relation_type: RelationType;
   weight?: number;
   direction?: EdgeDirection;
