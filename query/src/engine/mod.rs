@@ -174,9 +174,23 @@ impl QueryError {
     }
 }
 
+/// A trusted provider must partition graph data by tenant before summarization.
+/// The immutable view pins both summary input and query evidence to one version.
+// async_trait adds must_use to a Future return already marked must_use.
+#[allow(clippy::double_must_use)]
+#[async_trait::async_trait]
+pub trait CommunitySummaryProvider: Send + Sync {
+    async fn summaries(
+        &self,
+        view: Arc<SnapshotView>,
+        tenant: Option<&str>,
+    ) -> Result<Vec<CommunitySummary>, RepoError>;
+}
+
 pub struct QueryEngine {
     repo: Arc<Repository>,
     community_summaries: Vec<CommunitySummary>,
+    community_provider: Option<Arc<dyn CommunitySummaryProvider>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     audit_failure_policy: AuditFailurePolicy,
     audit_health: Arc<AuditHealth>,
@@ -234,6 +248,7 @@ impl QueryEngine {
         Self {
             repo,
             community_summaries: Vec::new(),
+            community_provider: None,
             audit_sink: None,
             audit_failure_policy: AuditFailurePolicy::default(),
             audit_health: Arc::new(AuditHealth::default()),
@@ -248,6 +263,13 @@ impl QueryEngine {
     pub fn with_community_summaries(mut self, summaries: Vec<CommunitySummary>) -> Self {
         self.community_summaries = summaries;
         self
+    }
+
+    pub fn with_community_provider(self, provider: Arc<dyn CommunitySummaryProvider>) -> Self {
+        Self {
+            community_provider: Some(provider),
+            ..self
+        }
     }
 
     pub fn with_audit_sink(mut self, sink: Arc<dyn AuditSink>) -> Self {

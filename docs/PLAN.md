@@ -617,7 +617,9 @@ Dependency order: #97 → #98 → #62 → #63 → #117 → #118.
 - [x] #97 Standard autonomous runtime: repository, durable extraction queue,
   registered model worker, ingestion and query; explicit vector-only mode;
   restart/pending recovery and extraction-failure E2E.
-- [ ] #98 Snapshot-compatible community lifecycle/provider.
+- [x] #98 Snapshot-compatible community lifecycle/provider: startup rebuild,
+  bounded version/tenant cache, on-demand invalidation via WAL LSN, immutable
+  evidence view, mutation/restart/pinned/global/tenant E2E.
 - [ ] #62 HTTP API and SDK RemoteTransport.
 - [ ] #63 Live UI API integration and component tests.
 - [ ] #117 MCP stdio/SSE tools, resources and prompts.
@@ -629,3 +631,11 @@ unfinished jobs replay. Jobs WAL corruption is fail-fast by default. Model infer
 remains rule-based pending #48. Graph/jobs WAL atomic outbox (including recovery
 from enqueue failures after committed vector ingest) is a follow-up durability
 improvement; this runtime preserves the existing best-effort enqueue contract.
+
+Notes (#98): runtime deterministic excerpt summarizer replaces empty global data;
+community results are built once per cached durable version. Query filters and live
+retention metadata select filtered evidence fallback to prevent summary text leakage.
+Future work: request-scoped summaries with expiration-aware caching, immutable
+snapshot-view caching to avoid WAL replay on global cache misses, and incremental
+refresh instead of a full version rebuild. Tenant extraction artifacts still require
+worker tenant metadata/ID namespacing (to be addressed by network API #62).

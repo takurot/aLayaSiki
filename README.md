@@ -295,3 +295,22 @@ The runtime uses fail-fast jobs-WAL recovery by default so corruption cannot
 silently discard acknowledged extraction jobs. Retry/DLQ settings are configurable
 with `with_queue_config`. Graph and jobs WALs are separate: enqueue failure is
 currently logged as best-effort after vector ingest, not a transactional outbox.
+
+### Community summary lifecycle
+
+The autonomous runtime owns a snapshot-scoped community provider. Startup rebuilds
+the latest version deterministically. Global queries refresh on demand when the
+WAL LSN changes; `refresh_communities()` explicitly refreshes after worker settlement.
+A bounded cache holds 32 `(LSN, tenant)` versions, so repeated queries reuse Leiden
+results. Evicted historical summaries rebuild from the requested immutable snapshot.
+Summary ranges are exact `(LSN, LSN)`; query evidence uses the same snapshot view.
+Tenant graphs are filtered before clustering, including both edge endpoints.
+
+Summaries use deterministic text excerpts (up to 16 members × 240 characters),
+not an LLM. Entity/time-filtered queries and live graphs containing retention
+metadata use filtered evidence fallback until request-scoped summaries are added;
+this avoids returning excluded content from a larger community summary. Live
+provider global responses bypass semantic-response caching so expiration is honored
+at unchanged LSN. Snapshot reconstruction still replays WAL for uncached global
+requests; community clustering itself is cached. Snapshot-view caching/incremental
+community refresh is a future performance optimization.

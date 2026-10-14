@@ -1,4 +1,6 @@
-//! Standard autonomous composition. Low-level ingestion constructors remain task-free.
+mod community;
+use query::engine::CommunitySummaryProvider;
+// Standard autonomous composition. Low-level ingestion constructors remain task-free.
 use ingestion::processor::IngestionPipeline;
 use jobs::durable::{
     DeadLetterEntry, DurableJobQueue, DurableQueueConfig, JobQueueError, JobQueueStats,
@@ -126,7 +128,13 @@ impl RuntimeBuilder {
         } else {
             (None, None, None)
         };
-        let query = QueryEngine::new(repo.clone());
+        let communities = Arc::new(community::RuntimeCommunities::default());
+        let query = QueryEngine::new(repo.clone()).with_community_provider(communities.clone());
+        let view = Arc::new(
+            repo.load_snapshot_view(&repo.current_snapshot_id().await)
+                .await?,
+        );
+        communities.summaries(view, None).await?;
         Ok(AlayasikiRuntime {
             repo,
             pipeline,
@@ -134,11 +142,13 @@ impl RuntimeBuilder {
             queue,
             worker,
             stop,
+            communities,
         })
     }
 }
 
 pub struct AlayasikiRuntime {
+    communities: Arc<community::RuntimeCommunities>,
     repo: Arc<Repository>,
     pipeline: IngestionPipeline,
     query: QueryEngine,
@@ -156,6 +166,25 @@ impl AlayasikiRuntime {
     }
     pub fn query(&self) -> &QueryEngine {
         &self.query
+    }
+
+    /// Refreshes only when the durable graph version changes; all mutations,
+    /// including extraction and direct repository writes, are detected by LSN.
+    pub async fn refresh_communities(
+        &self,
+    ) -> Result<Vec<storage::community::CommunitySummary>, RuntimeError> {
+        let snapshot = self.repo.current_snapshot_id().await;
+        self.communities
+            .summaries(
+                Arc::new(self.repo.load_snapshot_view(&snapshot).await?),
+                None,
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    pub fn community_rebuild_count(&self) -> u64 {
+        self.communities.rebuild_count()
     }
 
     pub async fn job_stats(&self) -> Option<JobQueueStats> {

@@ -60,6 +60,11 @@ impl SnapshotView {
         self.hyper_index.storage_capabilities()
     }
 
+    /// Borrow node records for projections without copying embeddings or metadata.
+    pub fn nodes(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.values()
+    }
+
     pub fn list_node_ids(&self) -> Vec<u64> {
         let mut out: Vec<u64> = self.nodes.keys().copied().collect();
         out.sort_unstable();

@@ -32,9 +32,14 @@ impl super::QueryEngine {
             .clone()
             .unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string());
         let mut plan = QueryPlanner::plan(&request);
-        let resolved_snapshot = self.resolve_snapshot(&request).await?;
+        let mut resolved_snapshot = self.resolve_snapshot(&request).await?;
         let tenant_scoped = tenant_scope.is_some();
-        let cache_eligible = !tenant_scoped && request.session_id.is_none();
+        let cache_eligible = !tenant_scoped
+            && request.session_id.is_none()
+            && !(self.community_provider.is_some()
+                && plan.effective_search_mode == SearchMode::Global
+                && request.snapshot_id.is_none()
+                && request.time_travel.is_none());
 
         let session_graph = match request.session_id.as_deref() {
             Some(session_id) => self
@@ -70,6 +75,17 @@ impl super::QueryEngine {
                     .record_query(start.elapsed().as_micros() as u64, true);
                 return Ok(cached_response);
             }
+        }
+
+        // Runtime global summaries and evidence must use the identical graph version.
+        if plan.effective_search_mode == SearchMode::Global
+            && self.community_provider.is_some()
+            && resolved_snapshot.snapshot_view.is_none()
+        {
+            resolved_snapshot.snapshot_view = Some(
+                self.load_snapshot_view(&resolved_snapshot.snapshot_id)
+                    .await?,
+            );
         }
 
         let (state, plan, global_answer) = match plan.effective_search_mode {
