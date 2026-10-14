@@ -22,6 +22,10 @@ jobs:
     env:
       RUSTFLAGS: ""
       CXXFLAGS: ""
+      # usearch 2.24 references POSIX MAP_FAILED in its Windows allocator.
+      # VirtualAlloc fails with NULL; this preserves the existing failure check.
+      # Remove after upgrading to the fix: https://github.com/unum-cloud/USearch/pull/742
+      CXXFLAGS_x86_64_pc_windows_msvc: /DMAP_FAILED=0
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +65,8 @@ jobs:
           project = tomllib.loads(Path('mcp/pyproject.toml').read_text())['project']['version']
           crate = tomllib.loads(Path('mcp/Cargo.toml').read_text())['package']['version']
           assert project == crate, (project, crate)
+          for license in ("LICENSE-MIT", "LICENSE-APACHE"):
+              assert Path(license).read_bytes() == Path("mcp", license).read_bytes()
           if os.environ['GITHUB_REF'].startswith('refs/tags/'):
               assert os.environ['GITHUB_REF_NAME'] == f'mcp-v{project}'
       - name: Build wheel

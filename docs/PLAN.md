@@ -697,3 +697,9 @@ Local packaging verification (#118): maturin 1.15.0 `build --release --locked
 passed native entrypoint, initialize/discovery, durable ingest/evidence query and
 session write/read checks. Other platform wheels and public PyPI installation
 remain release-CI gates, not claims based on the local macOS result.
+
+Windows wheel note (#118): locked usearch 2.24 has an upstream MSVC build bug
+(USearch #742). A target-specific C++ definition treats MAP_FAILED as NULL on
+Windows, matching VirtualAlloc failure semantics. Remove this build workaround
+when upgrading usearch to a release containing the allocator fix (2.25+).
+Wheel licenses are included explicitly; CI checks copies against root licenses.
