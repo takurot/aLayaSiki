@@ -607,3 +607,149 @@ async fn extracted_entities_never_extend_source_retention() {
     );
     server.abort();
 }
+
+async fn sse_event(response: &mut reqwest::Response) -> String {
+    let mut text = String::new();
+    loop {
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), response.chunk())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        text.push_str(std::str::from_utf8(&chunk).unwrap());
+        if text.contains("\n\n") {
+            return text;
+        }
+    }
+}
+#[tokio::test]
+async fn mcp_legacy_sse_handshake_tool_call_and_identity_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RuntimeBuilder::new(dir.path()).start().await.unwrap());
+    let config = ServerConfig::new(
+        "test-secret-at-least-32-bytes-long".into(),
+        "test".into(),
+        "api".into(),
+    )
+    .unwrap();
+    let state = ApiState::new(runtime.clone(), config, dir.path().join("audit.jsonl")).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+    let client = reqwest::Client::new();
+    assert_eq!(
+        client
+            .get(format!("{base}/mcp/sse"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/mcp/sse"))
+            .bearer_auth(token("a", "admin"))
+            .header("origin", "https://evil.example")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let mut events = client
+        .get(format!("{base}/mcp/sse"))
+        .bearer_auth(token("a", "admin"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.status(), 200);
+    let event = sse_event(&mut events).await;
+    assert!(event.contains("event: endpoint"));
+    let endpoint = event
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap()
+        .to_owned();
+    let messages = format!("{base}{endpoint}");
+    assert_eq!(
+        client
+            .post(&messages)
+            .bearer_auth(token("b", "admin"))
+            .json(&json!({"jsonrpc":"2.0","id":0,"method":"ping"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"remote","version":"1"}}});
+    assert_eq!(
+        client
+            .post(&messages)
+            .bearer_auth(token("a", "admin"))
+            .json(&init)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        202
+    );
+    let event = sse_event(&mut events).await;
+    assert!(event.contains("event: message"));
+    assert!(event.contains("protocolVersion"));
+    assert_eq!(
+        client
+            .post(&messages)
+            .bearer_auth(token("a", "admin"))
+            .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        202
+    );
+    assert_eq!(client.post(&messages).bearer_auth(token("a","reader")).json(&json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"alayasiki_ingest","arguments":{"content":"reader must not persist"}}})).send().await.unwrap().status(),202);
+    let denied = sse_event(&mut events).await;
+    let denied: Value = serde_json::from_str(
+        denied
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(denied["result"]["isError"], true);
+    assert!(runtime.repository().list_node_ids().await.is_empty());
+    for _ in 0..20 {
+        let response=client.post(&messages).bearer_auth(token("a","admin")).json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"alayasiki_ingest","arguments":{"content":"SSE startup Rust evidence"}}})).send().await.unwrap();
+        if response.status() == 202 {
+            break;
+        }
+        assert_eq!(response.status(), 429);
+        tokio::task::yield_now().await;
+    }
+    let event = sse_event(&mut events).await;
+    let result: Value = serde_json::from_str(
+        event
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["id"], 2);
+    assert_eq!(result["result"]["isError"], false);
+    drop(events);
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert_eq!(
+        client
+            .post(&messages)
+            .bearer_auth(token("a", "admin"))
+            .json(&json!({"jsonrpc":"2.0","id":3,"method":"ping"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    server.abort();
+}

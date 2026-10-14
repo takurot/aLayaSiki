@@ -9,6 +9,7 @@ members = [
     "sdk",
     "runtime",
     "api",
+    "mcp",
     "prototypes",
 ]
 resolver = "2"

@@ -199,6 +199,17 @@ impl AlayasikiRuntime {
             .map_err(Into::into)
     }
 
+    /// Resource summaries are rebuilt from currently visible tenant nodes so
+    /// cached community text cannot outlive a source retention deadline.
+    pub async fn refresh_communities_for_tenant(
+        &self,
+        tenant: &str,
+    ) -> Result<Vec<storage::community::CommunitySummary>, RuntimeError> {
+        let snapshot = self.repo.current_snapshot_id().await;
+        let view = self.repo.load_snapshot_view(&snapshot).await?;
+        Ok(community::tenant_resource_summaries(&view, tenant))
+    }
+
     pub fn community_rebuild_count(&self) -> u64 {
         self.communities.rebuild_count()
     }

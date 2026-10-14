@@ -330,3 +330,11 @@ The explorer connects to the authenticated HTTP API. Paste a query-capable acces
 token to load real graph data and ask GraphRAG questions with evidence/citations.
 Credentials are memory-only and disconnect clears the view. See [UI guide](docs/UI.md)
 for Vite proxy configuration, production hosting and component/browser tests.
+
+### MCP for agents
+
+Run `cargo run -p alayasiki-mcp` for local stdio. The HTTP server also exposes
+JWT-authenticated legacy SSE at `/mcp/sse`. Tools provide GraphRAG query, autonomous
+ingest and TTL-backed session memory, with tenant/owner-aware resources and a
+reasoning prompt. See [MCP guide](docs/MCP.md) for client messages, limits and transport
+configuration. Protocol support is MCP 2024-11-05; Streamable HTTP is future work.
