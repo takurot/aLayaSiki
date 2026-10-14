@@ -103,3 +103,38 @@ impl CommunitySummaryProvider for RuntimeCommunities {
         Ok(summaries)
     }
 }
+
+pub(crate) fn tenant_resource_summaries(
+    view: &SnapshotView,
+    tenant: &str,
+) -> Vec<CommunitySummary> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let labels: BTreeMap<_, _> = view
+        .nodes()
+        .filter(|node| {
+            node.metadata
+                .get("tenant")
+                .is_some_and(|owner| owner == tenant)
+                && node
+                    .metadata
+                    .get("retention_until_unix")
+                    .and_then(|deadline| deadline.parse::<u64>().ok())
+                    .is_none_or(|deadline| now < deadline)
+        })
+        .map(|node| (node.id, node.data.chars().take(240).collect::<String>()))
+        .collect();
+    let mut graph = AdjacencyGraph::new();
+    for source in labels.keys() {
+        for (target, relation, weight) in view.neighbors(*source) {
+            if labels.contains_key(&target) {
+                graph.add_edge(*source, target, relation, weight);
+            }
+        }
+    }
+    let mut engine = CommunityEngine::new(graph);
+    engine.rebuild_hierarchy(3, &TextSummarizer { labels });
+    engine.summaries().to_vec()
+}

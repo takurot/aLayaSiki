@@ -435,6 +435,11 @@ impl Repository {
         self.get_node(id).await
     }
 
+    /// Reclaim expired working-memory graphs before admitting new allocations.
+    pub fn cleanup_expired_sessions(&self) {
+        self.session_manager.cleanup_expired();
+    }
+
     pub fn get_session_with_owner(
         &self,
         session_id: &str,

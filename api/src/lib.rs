@@ -59,6 +59,7 @@ impl ServerConfig {
     }
 }
 pub struct ApiState {
+    mcp: Arc<alayasiki_mcp::sse::SseState>,
     runtime: Arc<AlayasikiRuntime>,
     auth: JwtAuthenticator,
     authorizer: Authorizer,
@@ -70,7 +71,12 @@ pub struct ApiState {
 impl ApiState {
     /// Call after the HTTP listener has stopped accepting requests. Detached
     /// durable operations retain their admission permit until completion.
+    pub fn close_mcp_connections(&self) {
+        self.mcp.close_connections();
+    }
+
     pub async fn drain(&self) -> Result<(), tokio::sync::AcquireError> {
+        self.mcp.drain().await?;
         let _permits = self
             .limit
             .acquire_many(self.config.max_concurrent_requests as u32)
@@ -93,8 +99,22 @@ impl ApiState {
                 "server limits must be positive and concurrency must fit u32",
             ));
         }
-        let audit = JsonlAuditSink::open(audit_path).map_err(std::io::Error::other)?;
+        let audit: Arc<dyn AuditSink> =
+            Arc::new(JsonlAuditSink::open(audit_path).map_err(std::io::Error::other)?);
+        let origins = std::env::var("ALAYASIKI_MCP_ALLOWED_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty())
+            .map(str::to_string)
+            .collect();
+        let mcp = alayasiki_mcp::sse::SseState::with_audit_sink(
+            runtime.clone(),
+            origins,
+            Some(audit.clone()),
+        );
         Ok(Arc::new(Self {
+            mcp,
             auth: JwtAuthenticator::new_hs256(
                 &config.secret,
                 Some(&config.issuer),
@@ -105,7 +125,7 @@ impl ApiState {
             config,
             runtime,
             authorizer: Authorizer::default(),
-            audit: Arc::new(audit),
+            audit,
         }))
     }
 }
@@ -146,6 +166,7 @@ fn mapped(error: &impl AlayasikiError) -> Response {
 }
 pub fn router(state: Arc<ApiState>) -> Router {
     let protected = Router::new()
+        .merge(alayasiki_mcp::sse::router(state.mcp.clone()))
         .route("/v1/ingest", post(ingest))
         .route("/v1/query", post(query))
         .route("/metrics", get(metrics))

@@ -24,9 +24,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("ALAYASIKI_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into()),
     )
     .await?;
+    let shutdown_state = state.clone();
     axum::serve(listener, router(state.clone()))
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            shutdown_state.close_mcp_connections();
         })
         .await?;
     state.drain().await?;

@@ -626,7 +626,9 @@ Dependency order: #97 → #98 → #62 → #63 → #117 → #118.
 - [x] #63 Live UI API integration and component tests: typed lossless-ID API
   client, real graph/chat/evidence, connection/loading/error/empty states,
   identity-switch clearing, Vitest coverage gate and real HTTP Playwright E2E.
-- [ ] #117 MCP stdio/SSE tools, resources and prompts.
+- [x] #117 MCP stdio/SSE tools, resources and prompts: JSON-RPC lifecycle,
+  authorized query/ingest/session memory, tenant/owner resources, real SSE with
+  current JWT permission checks, bounded queues/connections/memory and CLI tests.
 - [ ] #118 Maturin wheels, release workflow and client configuration.
 
 Notes (#97): worker stores all extracted artifacts in one index transaction and
@@ -665,3 +667,16 @@ Tailwind 3 development-tool advisories require an upstream braces patch or a
 separate Tailwind 4 migration. Add this build-tool migration as a follow-up rather
 than suppressing audit findings. Graph endpoint pagination still lacks cross-page
 edges, so the UI does not claim an exhaustive graph view.
+
+Notes (#117): MCP supports protocol 2024-11-05 with stdio and legacy SSE; current
+Streamable HTTP is a follow-up transport. SSE identity is fixed to tenant+subject
+but current POST roles/scopes are re-authorized. Working-memory budgets are shared
+across reconnects, reclaim actual TTL-expired graphs before reuse and conservatively
+limit serialized input/writes. PDF working memory uses persistent ingest instead.
+Community resource reads exclude current expired records without changing pinned
+query semantics; these live resources rebuild independently of cached query summaries.
+
+Quota note (#117): strict audit failures can occur after session mutation. Retained
+owned graphs keep reservations charged even on error; uncertain repository outcomes
+conservatively retain usage. Failed attempts against an existing graph can overcount
+usage until TTL expiry. Exact mutation-aware accounting is a future refinement.
