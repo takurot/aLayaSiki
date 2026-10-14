@@ -629,8 +629,8 @@ Dependency order: #97 → #98 → #62 → #63 → #117 → #118.
 - [x] #117 MCP stdio/SSE tools, resources and prompts: JSON-RPC lifecycle,
   authorized query/ingest/session memory, tenant/owner resources, real SSE with
   current JWT permission checks, bounded queues/connections/memory and CLI tests.
-- [ ] #118 Maturin wheels, release workflow and client configuration: packaging and
-  native wheel smoke checks implemented; public PyPI/uvx verification pending.
+- [x] #118 Maturin wheels, release workflow and client configuration: five native
+  wheels published as 0.3.0; public PyPI/uvx MCP smoke verification passed.
 
 Notes (#97): worker stores all extracted artifacts in one index transaction and
 propagates failures to durable retry/DLQ. Shutdown stops at a job boundary and joins the worker;
@@ -695,11 +695,19 @@ Local packaging verification (#118): maturin 1.15.0 `build --release --locked
 `alayasiki_mcp-0.3.0-py3-none-macosx_11_0_arm64.whl`.
 `python3 scripts/smoke_mcp_wheel.py -- uvx --from <local-wheel> alayasiki-mcp`
 passed native entrypoint, initialize/discovery, durable ingest/evidence query and
-session write/read checks. Other platform wheels and public PyPI installation
-remain release-CI gates, not claims based on the local macOS result.
+session write/read checks. All five platform wheels subsequently passed installed-wheel smoke tests in
+release CI and were published to PyPI.
 
 Windows wheel note (#118): locked usearch 2.24 has an upstream MSVC build bug
 (USearch #742). A target-specific C++ definition treats MAP_FAILED as NULL on
 Windows, matching VirtualAlloc failure semantics. Remove this build workaround
 when upgrading usearch to a release containing the allocator fix (2.25+).
 Wheel licenses are included explicitly; CI checks copies against root licenses.
+
+Release verification (#118): tag `mcp-v0.3.0` points to reviewed commit
+`61d5e05`; GitHub Actions run `38655262228` passed all five wheel jobs and OIDC
+publication. PyPI `alayasiki-mcp==0.3.0` contains the five expected platform
+wheels. `uvx --refresh alayasiki-mcp --version` returned `alayasiki-mcp 0.3.0`;
+`python3 scripts/smoke_mcp_wheel.py -- uvx --refresh --from
+alayasiki-mcp==0.3.0 alayasiki-mcp` passed initialization, tool discovery,
+persistent ingest/query and session write/read against the public package.
