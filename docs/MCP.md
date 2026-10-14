@@ -111,3 +111,92 @@ protocol errors, stdio subprocess framing/EOF, real SSE handshake/tools, current
 JWT permissions, origins, reconnects, queue saturation and TTL memory accounting.
 EOF cancellation of clients does not imply durable background jobs were all finished;
 pending jobs replay on restart.
+
+## Install with uvx
+
+Platform wheels let [uv](https://docs.astral.sh/uv/) run the native Rust server
+without a Rust toolchain or Python extension bindings:
+
+```sh
+uvx alayasiki-mcp --version
+uvx alayasiki-mcp --data-dir /path/to/agent-db
+```
+
+For reproducible client configurations, pin a release with
+`uvx --from alayasiki-mcp==0.3.0 alayasiki-mcp`. The wheel installs the native
+`alayasiki-mcp` executable directly on PATH through maturin's `bin` bindings.
+There is no Python wrapper: `[project.scripts]` is intended for Python
+`module:function` entrypoints and is unnecessary for this native executable.
+See [maturin binary bindings](https://www.maturin.rs/bindings).
+
+Wheels cover Linux x86_64/aarch64 (glibc 2.28 or newer), macOS Intel/Apple Silicon,
+and Windows x86_64. Alpine/musl wheels are not included in this release matrix.
+Python 3.10 or newer and an installed `uv` are required; `uv` can manage Python.
+
+### Claude Desktop and other local MCP clients
+
+Add this entry to the client's MCP configuration (`claude_desktop_config.json`
+for Claude Desktop), then restart the client:
+
+```json
+{
+  "mcpServers": {
+    "alayasiki": {
+      "command": "uvx",
+      "args": ["alayasiki-mcp"]
+    }
+  }
+}
+```
+
+If a desktop process does not inherit your shell PATH, use the absolute path of
+`uvx` for `command`. The default database is the user's `.alayasiki-mcp` directory.
+To select a separate database or identity, add an optional `env` object under the
+server entry:
+
+```json
+{
+  "ALAYASIKI_DATA_DIR": "/absolute/path/to/agent-db",
+  "ALAYASIKI_MCP_TENANT": "my-project",
+  "ALAYASIKI_MCP_SUBJECT": "desktop-agent"
+}
+```
+
+The packaged command runs stdio locally. To share an existing database remotely,
+use an MCP client supporting the authenticated legacy SSE transport described
+above at `/mcp/sse`; the API process owns the shared database. Never point two
+stdio processes at the same directory.
+
+## Build and release wheels
+
+Package metadata lives in `mcp/pyproject.toml`; the root `pyproject.toml` continues
+to describe benchmark dependencies. Build a platform wheel from the MCP directory:
+
+```sh
+cd mcp
+maturin build --release --locked --out ../dist
+cd ..
+python scripts/smoke_mcp_wheel.py -- uvx --from /absolute/path/to/dist/alayasiki_mcp-0.3.0-py3-none-PLATFORM.whl alayasiki-mcp
+```
+
+The smoke test checks help/version and a real stdio lifecycle: initialize,
+tool discovery, persistent ingest, evidence-backed query, working-memory write,
+and read. It uses a temporary database and requires stdout to contain only JSON-RPC.
+
+`.github/workflows/publish-mcp.yml` builds and installs every native wheel on pull
+requests and `mcp-v*` tags. Manual dispatch builds/tests only. All five installed
+wheels must pass smoke tests before a tag-triggered publishing job can run.
+The tag `mcp-v0.3.0` must match both Cargo package and Python project versions.
+Builds use ordinary portable target settings, not `target-cpu=native`.
+
+Publication uses PyPI Trusted Publishing (OIDC), with no stored API token. The
+publisher must match repository `takurot/aLayaSiki`, workflow `publish-mcp.yml`, and
+GitHub environment `pypi`. This trust is configured in PyPI separately from GitHub;
+a pending publisher creates the PyPI project on its first successful upload.
+Only a tag push can publish; pull requests, forks, and manual builds cannot.
+See [PyPI Trusted Publishing](https://docs.pypi.org/trusted-publishers/).
+
+Before pushing a release tag, review the packaging change, wait for all required
+CI and wheel checks, then tag that exact tested commit. After publication verify
+`uvx --from alayasiki-mcp==0.3.0 alayasiki-mcp --version` and run the smoke test
+against that public package. Publication is complete only after those checks pass.

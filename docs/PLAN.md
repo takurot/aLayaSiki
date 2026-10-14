@@ -629,7 +629,8 @@ Dependency order: #97 → #98 → #62 → #63 → #117 → #118.
 - [x] #117 MCP stdio/SSE tools, resources and prompts: JSON-RPC lifecycle,
   authorized query/ingest/session memory, tenant/owner resources, real SSE with
   current JWT permission checks, bounded queues/connections/memory and CLI tests.
-- [ ] #118 Maturin wheels, release workflow and client configuration.
+- [ ] #118 Maturin wheels, release workflow and client configuration: packaging and
+  native wheel smoke checks implemented; public PyPI/uvx verification pending.
 
 Notes (#97): worker stores all extracted artifacts in one index transaction and
 propagates failures to durable retry/DLQ. Shutdown stops at a job boundary and joins the worker;
@@ -680,3 +681,19 @@ Quota note (#117): strict audit failures can occur after session mutation. Retai
 owned graphs keep reservations charged even on error; uncertain repository outcomes
 conservatively retain usage. Failed attempts against an existing graph can overcount
 usage until TTL expiry. Exact mutation-aware accounting is a future refinement.
+
+Notes (#118): native maturin `bin` wheels expose the CLI through wheel scripts,
+without a Python wrapper or `[project.scripts]` function entrypoint. The existing
+root benchmark metadata remains unchanged. Release workflow tests five native
+platforms (Linux manylinux_2_28 x86_64/aarch64, macOS Intel/ARM, Windows x86_64);
+musllinux wheels are a follow-up. PyPI OIDC is restricted to matching `mcp-v*`
+tags and the `pypi` environment after all wheel smoke checks. Public package
+publication and a real `uvx` invocation must pass before this issue is complete.
+
+Local packaging verification (#118): maturin 1.15.0 `build --release --locked
+--manifest-path mcp/Cargo.toml` produced
+`alayasiki_mcp-0.3.0-py3-none-macosx_11_0_arm64.whl`.
+`python3 scripts/smoke_mcp_wheel.py -- uvx --from <local-wheel> alayasiki-mcp`
+passed native entrypoint, initialize/discovery, durable ingest/evidence query and
+session write/read checks. Other platform wheels and public PyPI installation
+remain release-CI gates, not claims based on the local macOS result.
