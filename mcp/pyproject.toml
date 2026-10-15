@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin==1.15.0"]
+build-backend = "maturin"
+
+[project]
+name = "alayasiki-mcp"
+version = "0.3.0"
+description = "Autonomous GraphRAG database MCP server for AI agents"
+readme = "../docs/MCP.md"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+keywords = ["mcp", "graphrag", "database", "agents"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/takurot/aLayaSiki"
+Documentation = "https://github.com/takurot/aLayaSiki/blob/main/docs/MCP.md"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "Cargo.toml"
+strip = true

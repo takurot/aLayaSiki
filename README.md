@@ -338,3 +338,12 @@ JWT-authenticated legacy SSE at `/mcp/sse`. Tools provide GraphRAG query, autono
 ingest and TTL-backed session memory, with tenant/owner-aware resources and a
 reasoning prompt. See [MCP guide](docs/MCP.md) for client messages, limits and transport
 configuration. Protocol support is MCP 2024-11-05; Streamable HTTP is future work.
+
+### Install the MCP server
+
+Run `uvx alayasiki-mcp` to launch the native MCP stdio server from a platform wheel,
+or pin a release with `uvx --from alayasiki-mcp==0.3.0 alayasiki-mcp`.
+Linux x86_64/aarch64, macOS Intel/Apple Silicon and Windows x86_64 wheels are
+built and smoke-tested before tag-triggered PyPI publication. See the
+[MCP installation and client guide](docs/MCP.md#install-with-uvx) for Claude Desktop
+configuration and local/remote database ownership.
