@@ -47,14 +47,14 @@ jobs:
             manylinux: 'off'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.11'
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           key: wheel-${{ matrix.target }}
       - name: Validate release version
@@ -86,7 +86,7 @@ jobs:
           subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-deps', str(wheels[0])], check=True)
       - name: Smoke installed wheel
         run: python scripts/smoke_mcp_wheel.py -- alayasiki-mcp
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: wheel-${{ matrix.target }}
           path: dist/*.whl
@@ -107,4 +107,4 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Publish tested wheels using OIDC
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
